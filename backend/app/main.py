@@ -7,6 +7,7 @@ REST
   GET  /api/market/metrics       global market header metrics
   GET  /api/tickers              last price + 24h change for a list of symbols
   GET  /api/watchlist/scan       nearest zone and signals per watchlist symbol
+  GET  /api/indicators/kimi      Kimi Cooked v5.7.4: levels, signals, forecast and its two tables
   POST /api/agent/analyze        prompt → structured chart overlays
 WebSocket
   /ws/klines?symbol=INJUSDT&interval=4h   live candle updates
@@ -27,12 +28,14 @@ from .agent import run_analysis
 from .alerts import AlertService
 from .config import get_settings
 from .derivatives import DerivativesService
+from .kimi_service import KimiService
 from .llm import LLMClient
 from .market_data import MarketData, MarketDataError
 from .market_metrics import MarketMetricsService
 from .ratelimit import RateLimitMiddleware
 from .scanner import WatchlistCache, tickers
-from .schemas import INTERVALS, AnalyzeRequest, AnalyzeResponse, CreateAlertsRequest, MarketMetrics, ScanResult
+from .schemas import (INTERVALS, AnalyzeRequest, AnalyzeResponse, CreateAlertsRequest, KimiResponse, MarketMetrics,
+                      ScanResult)
 from .stream_hub import StreamHub
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -49,6 +52,7 @@ async def lifespan(app: FastAPI):
     app.state.metrics = MarketMetricsService(app.state.derivatives)
     app.state.hub = StreamHub(market)
     app.state.watchlist = WatchlistCache(market)
+    app.state.kimi = KimiService(market)
     app.state.alerts = AlertService(app.state.hub)
     await app.state.alerts.start()
     log.info("Data source: %s | LLM provider: %s %s", market.settings.data_source,
@@ -141,10 +145,21 @@ async def watchlist_scan(request: Request, symbols: str = Query(...), interval: 
     return await request.app.state.watchlist.get(_symbol_list(symbols), _check_interval(interval))
 
 
+@app.get("/api/indicators/kimi", response_model=KimiResponse)
+async def kimi_cooked(request: Request, symbol: str = Query("INJUSDT"), interval: str = Query("4h")) -> KimiResponse:
+    try:
+        return await request.app.state.kimi.get(_norm_symbol(symbol), _check_interval(interval))
+    except MarketDataError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 @app.post("/api/agent/analyze", response_model=AnalyzeResponse)
 async def agent_analyze(req: AnalyzeRequest, request: Request) -> AnalyzeResponse:
     try:
-        return await run_analysis(req, request.app.state.market, request.app.state.llm, request.app.state.derivatives)
+        return await run_analysis(req, request.app.state.market, request.app.state.llm, request.app.state.derivatives,
+                                  request.app.state.kimi)
     except MarketDataError as exc:
         raise HTTPException(502, str(exc)) from exc
     except ValueError as exc:

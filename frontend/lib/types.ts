@@ -280,6 +280,8 @@ export interface IndicatorState {
   rsi: boolean;
   macd: boolean;
   vwap: boolean;
+  /** Kimi Cooked v5.7.4, the user's own indicator (computed by the backend). */
+  kimi: boolean;
 }
 
 /** One chart in the multi-chart grid. */
@@ -294,4 +296,90 @@ export interface LayoutState {
   logScale: boolean;
   grid: boolean;
   autoLevels: boolean;
+}
+
+// ------------------------------------------------------- kimi cooked --
+// What GET /api/indicators/kimi returns. Mirrors the Kimi models in backend/app/schemas.py.
+
+export interface KimiLevel {
+  side: "support" | "resistance";
+  price: number;
+  zone_low: number;
+  zone_high: number;
+  time_start: number;
+  /** The candle that broke it; null while it holds. */
+  time_end: number | null;
+  state: "active" | "expired" | "broken";
+  /** % chance price reaches it within the forecast window. */
+  odds: number | null;
+  touches: number;
+}
+
+export interface KimiFib {
+  time_start: number;
+  time_end: number;
+  swing_high: number;
+  swing_low: number;
+  down: boolean;
+  levels: { ratio: number; price: number; odds: number }[];
+  pocket_low: number;
+  pocket_high: number;
+}
+
+export interface KimiSignal {
+  type: "DIV" | "U/Dn" | "Early";
+  direction: "long" | "short";
+  /** The chart label: B+, B-, U, Dn, B+?, B-? */
+  text: string;
+  /** Where the label sits: the pivot candle (DIV, U/Dn) or the signal candle (Early). */
+  time: number;
+  /** The candle the signal could first be traded on. */
+  confirm_time: number;
+  price: number;
+  entry: number;
+  confluence: number;
+  tier: "top" | "rest" | "warm-up";
+  result: "open" | "win" | "loss" | "expiry";
+  r: number | null;
+}
+
+export interface KimiForecast {
+  /** The last closed candle; path[0] is its close and path[k] is k candles later. */
+  start_time: number;
+  step: number;
+  horizon: number;
+  path: number[];
+  band_high: number[];
+  band_low: number[];
+  texture: number[];
+  final: number;
+  range_low: number;
+  range_high: number;
+  pct_change: number;
+  vol_regime: "LOW" | "NORMAL" | "HIGH";
+  headline: string;
+  next_candle: { direction: "up" | "down"; right_pct: number | null; calls: number } | null;
+}
+
+export interface KimiRow {
+  label: string;
+  value: string;
+  tone: "up" | "down" | "mute" | null;
+}
+
+export interface KimiResult {
+  symbol: string;
+  interval: Interval;
+  version: string;
+  data_source: string;
+  bars: number;
+  last_closed: number;
+  levels: KimiLevel[];
+  fib: KimiFib | null;
+  signals: KimiSignal[];
+  forecast: KimiForecast | null;
+  verify: KimiRow[];
+  stats: KimiRow[];
+  notes: string[];
+  seconds: number;
 }

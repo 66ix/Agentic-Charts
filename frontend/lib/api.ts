@@ -7,6 +7,7 @@ import type {
   Candle,
   ChatTurn,
   Interval,
+  KimiResult,
   MarketMetrics,
   Overlay,
   PriceAlert,
@@ -90,6 +91,12 @@ export function analyze(
     signal,
     timeoutMs: 90_000, // local LLMs can be slow on first load
   });
+}
+
+/** Kimi Cooked on the chart's closed candles. The first run on a chart takes a second or two. */
+export function fetchKimi(symbol: string, interval: Interval, signal?: AbortSignal) {
+  const q = new URLSearchParams({ symbol, interval });
+  return request<KimiResult>(`/api/indicators/kimi?${q}`, { signal, timeoutMs: 60_000 });
 }
 
 export function fetchTickers(symbols: string[], signal?: AbortSignal) {

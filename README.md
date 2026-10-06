@@ -45,6 +45,8 @@ agentic-charts/
 │   │   ├── indicators.py      RSI, MACD, divergences, structure breaks (BOS/CHoCH), volume profile, VWAP
 │   │   ├── patterns.py        Liquidity sweeps, fair value gaps, order blocks, ranges, triangles, double tops
 │   │   ├── trade_plan.py      Entry / stop / targets built from detected levels
+│   │   ├── kimi/              Kimi Cooked v5.7.4, the Python port of Trick's Pine Script indicator
+│   │   ├── kimi_service.py    Runs Kimi Cooked on closed candles, builds its drawing and tables, caches per candle
 │   │   ├── agent.py           prompt → intent → data → detectors → summary
 │   │   ├── agent_loop.py      Tool-calling planner (look at any chart, scan watchlist, read funding/OI)
 │   │   ├── llm.py             Ollama / OpenAI-compatible / Anthropic structured outputs + rule fallback
@@ -176,6 +178,7 @@ for 30 seconds.
 | `TRUST_PROXY` | `0` | Number of reverse proxies in front of the API; the rate limiter then reads the client IP from `X-Forwarded-For` |
 | `CORS_ORIGINS` | `http://localhost:3000,...` | Comma-separated frontend origins |
 | `METRICS_CACHE_SECONDS` | `60` | Header metrics cache |
+| `KIMI_BARS` | `5000` | Closed candles Kimi Cooked runs on (300–5000; `3h` is capped at about 1,600) |
 | `ALERTS_STORE` | `backend/.cache/alerts.json` | Where price alerts are saved; `memory` = not saved |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | empty | Send fired alerts to Telegram (see [Alerts](#alerts)) |
 | `DISCORD_WEBHOOK_URL` | empty | Send fired alerts to a Discord channel |
@@ -231,6 +234,7 @@ they are uploaded once the first time the app connects to a backend that has non
 | GET | `/api/market/metrics` | Header metrics, each tagged `live` or `mock` |
 | GET | `/api/tickers?symbols=BTCUSDT,ETHUSDT` | Last price and 24h change per symbol |
 | GET | `/api/watchlist/scan?symbols=BTCUSDT,ETHUSDT&interval=4h` | Per symbol: trend, RSI, nearest zone and its distance, signals (cached 60s) |
+| GET | `/api/indicators/kimi?symbol=INJUSDT&interval=4h` | Kimi Cooked v5.7.4 on the closed candles: S/R levels with odds, Fib ladder, signals with outcomes, forecast path and band, and its PATH VERIFY and Signal Stats tables |
 | POST | `/api/agent/analyze` | `{symbol, interval, prompt, candles?, history?, overlays?, previous_intent?, watchlist?}` → overlays, summary, alerts, and when relevant `navigate` (chart to switch to), `plan`, `scan`, `indicators`, `steps` |
 | GET | `/api/alerts` | `{alerts, channels: {telegram, discord}}` |
 | POST | `/api/alerts` | `{symbol, alerts: [{kind: "cross"\|"zone", price?, price_low?, price_high?, label}]}` → created alerts |
@@ -286,7 +290,8 @@ Overlay types: `box`, `horizontal_line`, `trendline`, `marker` (see `backend/app
 - **Drawing tools:** Trendline `T`, Horizontal ray `H`, Fibonacci `F`, Rectangle `R`, Text `N`, XABCD pattern `P`, Measure `M`. Click to place points; `Esc` cancels. In crosshair mode, click a drawing to select it, drag to move it, `Delete` to remove it. Magnet snaps to the nearest OHLC price; Lock freezes drawings. Drawings are saved per symbol in the browser.
 - **Watchlist:** the list icon in the chart header opens it. Each coin shows its price, 24h change and the nearest zone on the active timeframe ("In demand", "Supply 0.8%"). Click a coin to open it, **+** to add one; the scan button asks the agent to rank them.
 - **Multiple charts:** the layout buttons in the chart header show 1, 2 or 4 charts. Click a chart to make it active (blue header); the timeframe buttons, toolbar and agent act on the active chart. Each chart keeps its own coin, timeframe and overlays.
-- **Indicators:** EMA 20, EMA 50, Parabolic SAR, VWAP, Volume, and RSI 14 and MACD in panes under the price. **Layout:** log scale, grid, auto levels. The camera button saves a PNG.
+- **Indicators:** EMA 20, EMA 50, Parabolic SAR, VWAP, Volume, RSI 14 and MACD in panes under the price, and Kimi Cooked (below). **Layout:** log scale, grid, auto levels. The camera button saves a PNG.
+- **Kimi Cooked v5.7.4:** Trick's own TradingView indicator, run from its Python port (`backend/app/kimi`) on the last 5,000 closed candles. Turn it on in the Indicators menu or ask the agent ("show my Kimi"). It draws what the script draws: S/R zones and rays with the chance price reaches each level within the forecast window, the auto Fib ladder with its odds and golden pocket, the B+/B-, U/Dn and B+?/B-? labels, and the forecast (confidence band, best-guess line, textured scenario path, end label and the next-candle ▲/▼). The **Kimi Cooked** pill under the legend opens the PATH VERIFY and Signal Stats tables and the latest signals with their outcomes. It reruns when a candle closes, like the script since v5.7.4. Ask "what does Kimi say?" and the agent reads its levels, signals and forecast; with an LLM it can also read it on other coins and timeframes. Chart patterns and harmonics are not in the port yet, so those drawings and the Pat BO and Harmonics rows are missing, and confluence scores run a little lower than on TradingView.
 - **Caching:** candles are kept in the browser (IndexedDB) and on the backend (SQLite), so opening the app draws the chart from cache at once and only the bars since the last visit are downloaded.
 
 ## Tests

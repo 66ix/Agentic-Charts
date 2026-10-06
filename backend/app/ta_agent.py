@@ -662,6 +662,25 @@ def _htf(z: dict) -> str:
     return f", lines up with {'/'.join(z['htf_confluence'])}" if z.get("htf_confluence") else ""
 
 
+def _kimi_lines(k: dict) -> list[str]:
+    if k.get("error"):
+        return [k["error"] + "."]
+    out = [f"{k['indicator']}:"]
+    f = k.get("forecast")
+    if f:
+        nxt = f" Next candle: {'▲' if f['next_candle'] == 'up' else '▼'}." if f.get("next_candle") else ""
+        out.append(f"{f['headline']} over {f['bars']} bars, range {_fmt(f['range'][0])}–{_fmt(f['range'][1])} "
+                   f"({f['volatility'].lower()} volatility).{nxt}")
+    for lv in k.get("levels", [])[:4]:
+        odds = f", {lv['odds_pct']}% to reach" if lv.get("odds_pct") is not None else ""
+        out.append(f"{lv['side'].title()} {_fmt(lv['price'])}{odds}.")
+    if k.get("recent_signals"):
+        s = k["recent_signals"][-1]
+        out.append(f"Last signal {s['label']} ({s['direction']}) at {_fmt(s['price'])}, {s['bars_ago']} bars ago, "
+                   f"{s['result']}.")
+    return out
+
+
 def describe(facts: dict, symbol: str) -> str:
     """Plain-English summary of the analysis, used when no LLM is configured."""
     tf = facts["timeframe"]
@@ -736,6 +755,8 @@ def describe(facts: dict, symbol: str) -> str:
                                                for r in best) + ".")
     elif "scan" in facts:
         lines.append("Couldn't scan the watchlist.")
+    if facts.get("kimi"):
+        lines += _kimi_lines(facts["kimi"])
     lines += facts.get("actions", [])
     if len(lines) == 1:
         lines.append("No qualifying levels found for this request.")

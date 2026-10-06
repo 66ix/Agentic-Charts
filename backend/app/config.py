@@ -81,6 +81,10 @@ class Settings:
     candle_cache_path: str = field(default_factory=lambda: _env(
         "CANDLE_CACHE_PATH", str(Path(__file__).resolve().parent.parent / ".cache" / "candles.sqlite3")))
 
+    # Kimi Cooked (app/kimi): closed candles it runs on. More candles = longer stats history, slower first run
+    # (about 1.3 s per 5,000). TradingView's tables depend on how many candles the chart loaded too.
+    kimi_bars: int = field(default_factory=lambda: max(300, min(int(_env("KIMI_BARS", "5000")), 5000)))
+
     # Server-side price alerts. ALERTS_STORE=memory keeps them in memory only (lost on restart).
     alerts_store: str = field(default_factory=lambda: _env(
         "ALERTS_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "alerts.json")))

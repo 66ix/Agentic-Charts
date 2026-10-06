@@ -52,3 +52,6 @@
 {"prompt": "compare this with ETH", "llm_only": true, "expect": {"symbol": "ETHUSDT"}}
 {"prompt": "short setup on btc, alert me at the stop and the targets", "expect": {"trade_plan": "short", "symbol": "BTCUSDT", "alert_targets": ["stop", "targets"]}}
 {"prompt": "remove the take profit lines", "expect": {"remove": ["targets"]}}
+{"prompt": "show my kimi indicator", "expect": {"indicators_on": ["kimi"], "remove": [], "custom_levels_count": 0}}
+{"prompt": "hide kimi cooked", "expect": {"indicators_off": ["kimi"], "remove": []}}
+{"prompt": "turn on kimi and the rsi", "expect": {"indicators_on": ["kimi", "rsi"]}}

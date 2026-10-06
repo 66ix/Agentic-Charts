@@ -62,6 +62,21 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "read_kimi",
+        "description": "Read the user's own indicator, Kimi Cooked v5.7.4, on any coin and timeframe: its S/R levels "
+                       "with the % chance price reaches each within the forecast window, the Fib ladder with odds, "
+                       "its latest signals (B+/B- divergence, U/Dn trend, B+?/B-? early warnings) and how they "
+                       "resolved, its forecast (direction, range, next-candle call) and its signal stats. Use it "
+                       "whenever the user mentions Kimi.",
+        "parameters": {
+            "type": "object", "additionalProperties": False, "required": ["symbol", "timeframe"],
+            "properties": {
+                "symbol": {"type": "string", "description": "USDT pair, e.g. ETHUSDT"},
+                "timeframe": {"type": "string", "enum": list(INTERVALS)},
+            },
+        },
+    },
+    {
         "name": FINAL_TOOL,
         "description": "Final step, call exactly once: the plan for what to draw, remove, alert on, which chart to "
                        "switch to, which indicators to toggle, whether to scan the watchlist or build a trade plan.",
@@ -70,11 +85,12 @@ TOOLS: list[dict[str, Any]] = [
 ]
 
 LOOP_SYSTEM = (
-    "You are the planning step of a crypto charting agent. {chart} You can call look_at_chart, scan_watchlist and "
-    "market_context to gather facts (at most {steps} calls in total), then you must call draw_on_chart exactly once "
-    "with the plan for what to show. Only look first when the answer depends on something you can't see yet: "
-    "another timeframe ('does the daily agree?'), another coin ('compare with ETH'), several coins, or funding/open "
-    "interest. For a simple request call draw_on_chart straight away.\n\nHow to fill draw_on_chart: " + INTENT_SYSTEM
+    "You are the planning step of a crypto charting agent. {chart} You can call look_at_chart, scan_watchlist, "
+    "read_kimi and market_context to gather facts (at most {steps} calls in total), then you must call "
+    "draw_on_chart exactly once with the plan for what to show. Only look first when the answer depends on "
+    "something you can't see yet: another timeframe ('does the daily agree?'), another coin ('compare with ETH'), "
+    "several coins, funding/open interest, or the user's Kimi Cooked indicator on another coin or timeframe. For a "
+    "simple request call draw_on_chart straight away.\n\nHow to fill draw_on_chart: " + INTENT_SYSTEM
 )
 
 
@@ -85,6 +101,7 @@ class Toolbox:
     look: Callable[[str, str, list[str]], Awaitable[dict]]
     scan: Callable[[str, str], Awaitable[list[dict]]]
     context: Callable[[str], Awaitable[dict]]
+    kimi: Callable[[str, str], Awaitable[dict]] | None = None
 
 
 @dataclass
@@ -111,6 +128,10 @@ async def _run_tool(box: Toolbox, name: str, args: dict, chart: ChartContext) ->
         filt = args.get("filter") if args.get("filter") in SCAN_FILTERS else "any"
         rows = await box.scan(tf, filt)
         return rows, f"Scanned {len(rows)} watchlist coins on {tf}"
+    if name == "read_kimi" and box.kimi is not None:
+        sym = str(args.get("symbol") or chart.symbol).upper()
+        tf = args.get("timeframe") if args.get("timeframe") in INTERVALS else chart.interval
+        return await box.kimi(sym, tf), f"Read Kimi Cooked on {sym} {tf}"
     if name == "market_context":
         sym = str(args.get("symbol") or chart.symbol).upper()
         return await box.context(sym), f"Checked funding and open interest for {sym}"

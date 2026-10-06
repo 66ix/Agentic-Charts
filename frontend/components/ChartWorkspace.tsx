@@ -99,6 +99,7 @@ export default function ChartWorkspace() {
     rsi: false,
     macd: false,
     vwap: false,
+    kimi: false,
   });
   const [layout, setLayout] = usePersistentState<LayoutState>("ac:layout", {
     logScale: false,

@@ -106,6 +106,7 @@ export default function ChartHeader(p: Props) {
         <MenuToggle label="Volume" checked={p.indicators.volume} onChange={(v) => p.onIndicators({ ...p.indicators, volume: v })} />
         <MenuToggle label="RSI 14" checked={!!p.indicators.rsi} onChange={(v) => p.onIndicators({ ...p.indicators, rsi: v })} />
         <MenuToggle label="MACD" hint="12 26 9" checked={!!p.indicators.macd} onChange={(v) => p.onIndicators({ ...p.indicators, macd: v })} />
+        <MenuToggle label="Kimi Cooked" hint="v5.7.4" checked={!!p.indicators.kimi} onChange={(v) => p.onIndicators({ ...p.indicators, kimi: v })} />
       </Menu>
 
       <Menu title="Chart layout" trigger={<LayoutGrid className="h-4 w-4" />}>
