@@ -1,0 +1,29 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  height: 100%;
+  background: #0b0e14;
+  color: #d1d5db;
+}
+
+@layer components {
+  .btn-ghost {
+    @apply inline-flex h-7 items-center justify-center gap-1.5 rounded px-1.5 text-mute transition-colors hover:bg-panel2 hover:text-ink;
+  }
+}
+
+@layer utilities {
+  .scrollbar-none {
+    scrollbar-width: none;
+  }
+  .scrollbar-none::-webkit-scrollbar {
+    display: none;
+  }
+}

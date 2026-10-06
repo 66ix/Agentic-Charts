@@ -1,0 +1,496 @@
+"""Deterministic technical-analysis engine.
+
+Turns OHLCV into chart primitives without any LLM involvement, so every price
+the agent draws is grounded in the data:
+
+* swing highs / lows      — `scipy.signal.find_peaks` with ATR-scaled prominence
+* support / resistance    — hierarchical clustering (`scipy.cluster.hierarchy`)
+                            of swing prices into zones, scored by touches,
+                            recency and prominence
+* supply / demand         — base-then-impulse detection, filtered to zones price
+                            has not closed through since they formed
+* window highs / lows     — high/low of the last *completed* higher-timeframe bar
+* trendlines              — lines through the two latest swing highs / lows
+* market structure        — HH / HL / LH / LL labels on swing points
+
+All functions are pure and operate on a DataFrame with columns
+time, open, high, low, close, volume (oldest → newest).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Iterable, Literal
+
+import numpy as np
+import pandas as pd
+from scipy.cluster.hierarchy import fcluster, linkage
+from scipy.signal import find_peaks
+
+from .schemas import (
+    AnalysisIntent,
+    AnalysisStats,
+    BoxOverlay,
+    HorizontalLineOverlay,
+    MarkerOverlay,
+    TrendlineOverlay,
+)
+
+TF_LABEL = {
+    "1m": "M1", "5m": "M5", "15m": "M15", "30m": "M30", "1h": "H1", "3h": "H3",
+    "4h": "H4", "1d": "D1", "1w": "W1", "1M": "MN",
+}
+
+RED, GREEN, ORANGE, TEAL, SLATE = "#ef4444", "#22c55e", "#f97316", "#14b8a6", "#94a3b8"
+
+
+def rgba(hex_color: str, alpha: float) -> str:
+    h = hex_color.lstrip("#")
+    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    return f"rgba({r}, {g}, {b}, {alpha})"
+
+
+# ------------------------------------------------------------- indicators
+
+
+def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """Wilder's Average True Range."""
+    prev_close = df["close"].shift(1)
+    tr = pd.concat(
+        [df["high"] - df["low"], (df["high"] - prev_close).abs(), (df["low"] - prev_close).abs()], axis=1
+    ).max(axis=1)
+    return tr.ewm(alpha=1 / period, adjust=False, min_periods=1).mean()
+
+
+def ema(series: pd.Series, period: int) -> pd.Series:
+    return series.ewm(span=period, adjust=False).mean()
+
+
+def parabolic_sar(df: pd.DataFrame, step: float = 0.02, max_step: float = 0.2) -> pd.Series:
+    """Classic Wilder Parabolic SAR."""
+    high, low = df["high"].to_numpy(), df["low"].to_numpy()
+    n = len(df)
+    sar = np.full(n, np.nan)
+    if n < 2:
+        return pd.Series(sar, index=df.index)
+    up = high[1] >= high[0]
+    af = step
+    ep = high[0] if up else low[0]
+    sar[0] = low[0] if up else high[0]
+    for i in range(1, n):
+        prev = sar[i - 1]
+        cur = prev + af * (ep - prev)
+        if up:
+            cur = min(cur, low[i - 1], low[i - 2] if i > 1 else low[i - 1])
+            if low[i] < cur:
+                up, cur, ep, af = False, ep, low[i], step
+            elif high[i] > ep:
+                ep, af = high[i], min(af + step, max_step)
+        else:
+            cur = max(cur, high[i - 1], high[i - 2] if i > 1 else high[i - 1])
+            if high[i] > cur:
+                up, cur, ep, af = True, ep, high[i], step
+            elif low[i] < ep:
+                ep, af = low[i], min(af + step, max_step)
+        sar[i] = cur
+    return pd.Series(sar, index=df.index)
+
+
+# ------------------------------------------------------------------ swings
+
+
+@dataclass
+class Swing:
+    idx: int
+    time: int
+    price: float
+    kind: Literal["high", "low"]
+    prominence: float
+    structure: str = ""  # HH / LH / HL / LL
+
+
+def find_swings(
+    df: pd.DataFrame, atr_value: float, distance: int | None = None, prominence_atr: float = 1.0
+) -> tuple[list[Swing], list[Swing]]:
+    """Swing highs and lows via peak detection with ATR-scaled prominence."""
+    n = len(df)
+    if n < 5:
+        return [], []
+    distance = distance or max(3, min(12, n // 60))
+    prominence = max(atr_value * prominence_atr, 1e-12)
+    times = df["time"].to_numpy()
+
+    def _collect(values: np.ndarray, kind: Literal["high", "low"]) -> list[Swing]:
+        signal = values if kind == "high" else -values
+        idx, props = find_peaks(signal, distance=distance, prominence=prominence)
+        swings = [
+            Swing(int(i), int(times[i]), float(values[i]), kind, float(p))
+            for i, p in zip(idx, props["prominences"])
+        ]
+        prev: Swing | None = None
+        for s in swings:
+            if prev is not None:
+                if kind == "high":
+                    s.structure = "HH" if s.price > prev.price else "LH"
+                else:
+                    s.structure = "HL" if s.price > prev.price else "LL"
+            prev = s
+        return swings
+
+    return _collect(df["high"].to_numpy(), "high"), _collect(df["low"].to_numpy(), "low")
+
+
+# --------------------------------------------------------- S/R clustering
+
+
+@dataclass
+class Zone:
+    price_low: float
+    price_high: float
+    kind: str  # resistance | support | supply | demand
+    touches: int
+    first_time: int
+    last_idx: int
+    score: float
+    tests: int = 0
+    meta: dict = field(default_factory=dict)
+
+    @property
+    def mid(self) -> float:
+        return (self.price_low + self.price_high) / 2
+
+    def overlap_ratio(self, other: "Zone") -> float:
+        inter = min(self.price_high, other.price_high) - max(self.price_low, other.price_low)
+        span = min(self.price_high - self.price_low, other.price_high - other.price_low)
+        return max(0.0, inter) / span if span > 0 else 0.0
+
+
+def cluster_levels(
+    swings: Iterable[Swing], atr_value: float, last_price: float, n_bars: int, tolerance_atr: float = 0.6
+) -> list[Zone]:
+    """Group swing prices that sit within `tolerance_atr` ATRs into S/R zones."""
+    swings = list(swings)
+    if not swings or atr_value <= 0:
+        return []
+    prices = np.array([[s.price] for s in swings])
+    if len(swings) == 1:
+        labels = np.array([1])
+    else:
+        labels = fcluster(linkage(prices, method="complete"), t=atr_value * tolerance_atr, criterion="distance")
+
+    max_prom = max(s.prominence for s in swings) or 1.0
+    zones: list[Zone] = []
+    for label in np.unique(labels):
+        members = [s for s, lab in zip(swings, labels) if lab == label]
+        lo = min(s.price for s in members)
+        hi = max(s.price for s in members)
+        # Give thin clusters a minimum visual height around their centre.
+        min_h = atr_value * 0.3
+        if hi - lo < min_h:
+            mid = (hi + lo) / 2
+            lo, hi = mid - min_h / 2, mid + min_h / 2
+        highs = sum(1 for s in members if s.kind == "high")
+        last_idx = max(s.idx for s in members)
+        touches = len(members)
+        recency = last_idx / max(n_bars - 1, 1)
+        prom = np.mean([s.prominence for s in members]) / max_prom
+        score = 0.45 * min(touches / 4, 1.0) + 0.30 * recency + 0.25 * prom
+        if hi < last_price:
+            kind = "support"
+        elif lo > last_price:
+            kind = "resistance"
+        else:  # price is inside the zone: classify by which swings built it
+            kind = "resistance" if highs >= touches - highs else "support"
+        zones.append(Zone(lo, hi, kind, touches, min(s.time for s in members), last_idx, float(score),
+                          meta={"swing_highs": highs, "swing_lows": touches - highs}))
+    return _merge_adjacent(zones, atr_value * 0.25, atr_value * 1.5, last_price)
+
+
+def _merge_adjacent(zones: list[Zone], gap: float, max_height: float, last_price: float) -> list[Zone]:
+    """Merge S/R zones that overlap or sit within `gap` of each other, so the
+    chart shows one band instead of a stack of slivers."""
+    merged: list[Zone] = []
+    for z in sorted(zones, key=lambda z: z.price_low):
+        prev = merged[-1] if merged else None
+        if (prev and z.price_low - prev.price_high <= gap
+                and max(prev.price_high, z.price_high) - prev.price_low <= max_height):
+            touches = prev.touches + z.touches
+            prev.price_high = max(prev.price_high, z.price_high)
+            prev.first_time = min(prev.first_time, z.first_time)
+            prev.last_idx = max(prev.last_idx, z.last_idx)
+            prev.score = min(1.0, max(prev.score, z.score) + 0.05)
+            prev.touches = touches
+            for k in ("swing_highs", "swing_lows"):
+                prev.meta[k] = prev.meta.get(k, 0) + z.meta.get(k, 0)
+            if prev.price_high < last_price:
+                prev.kind = "support"
+            elif prev.price_low > last_price:
+                prev.kind = "resistance"
+            else:
+                prev.kind = "resistance" if prev.meta["swing_highs"] >= prev.meta["swing_lows"] else "support"
+        else:
+            merged.append(z)
+    return merged
+
+
+# ------------------------------------------------------- supply / demand
+
+
+def supply_demand_zones(
+    df: pd.DataFrame, atr_series: pd.Series, impulse_atr: float = 1.6, base_body_atr: float = 0.6, max_base: int = 3
+) -> list[Zone]:
+    """Find base → impulse formations and keep the ones price hasn't invalidated.
+
+    Demand: small-bodied base followed by a strong bullish move. Zone spans the
+    base's lowest low to its highest body top. Supply is the mirror image.
+    A zone is invalidated once a later bar closes beyond its far edge.
+    """
+    o, h, l, c = (df[k].to_numpy() for k in ("open", "high", "low", "close"))
+    times = df["time"].to_numpy()
+    a = atr_series.to_numpy()
+    body = c - o
+    n = len(df)
+    zones: list[Zone] = []
+    i = max_base + 1
+    while i < n - 1:
+        # Impulse = one big candle or two consecutive same-direction candles.
+        move1 = body[i]
+        move2 = body[i] + body[i + 1] if np.sign(body[i]) == np.sign(body[i + 1]) else move1
+        move = move2 if abs(move2) > abs(move1) else move1
+        if abs(move) < impulse_atr * a[i - 1] or abs(body[i]) < 0.5 * a[i - 1]:
+            i += 1
+            continue
+        bullish = move > 0
+        # Base: up to `max_base` small-bodied candles just before the impulse.
+        j = i - 1
+        while j >= i - max_base and abs(body[j]) <= base_body_atr * a[j]:
+            j -= 1
+        base = slice(j + 1, i) if j + 1 < i else slice(i - 1, i)
+        if bullish:
+            lo = float(l[base].min())
+            hi = float(np.maximum(o[base], c[base]).max())
+        else:
+            hi = float(h[base].max())
+            lo = float(np.minimum(o[base], c[base]).min())
+        if hi - lo < 0.15 * a[i]:
+            pad = (0.15 * a[i] - (hi - lo)) / 2
+            lo, hi = lo - pad, hi + pad
+
+        after = slice(i + 1, n)
+        closes_after = c[after]
+        if bullish:
+            invalid = bool((closes_after < lo).any())
+            # A "test" is a later bar wicking back into the zone.
+            tests = int(((l[after] <= hi) & (l[after] >= lo)).sum())
+        else:
+            invalid = bool((closes_after > hi).any())
+            tests = int(((h[after] >= lo) & (h[after] <= hi)).sum())
+        if not invalid:
+            strength = min(abs(move) / (a[i - 1] * impulse_atr * 2), 1.0)
+            freshness = 1.0 / (1 + tests)
+            zones.append(Zone(lo, hi, "demand" if bullish else "supply", 1, int(times[base.start]), i,
+                              float(0.6 * strength + 0.4 * freshness), tests=tests,
+                              meta={"impulse_atr": round(abs(move) / a[i - 1], 2)}))
+        i += 2
+    return _dedupe_zones(zones)
+
+
+def _dedupe_zones(zones: list[Zone]) -> list[Zone]:
+    """Merge overlapping zones of the same kind, keeping the higher score."""
+    zones = sorted(zones, key=lambda z: -z.score)
+    kept: list[Zone] = []
+    for z in zones:
+        if all(not (k.kind == z.kind and k.overlap_ratio(z) > 0.3) for k in kept):
+            kept.append(z)
+    return kept
+
+
+def pick_nearest(zones: list[Zone], last_price: float, per_side: int) -> list[Zone]:
+    """Keep the `per_side` strongest-near zones above and below price.
+
+    Ranking blends proximity and score so a strong zone slightly further away
+    beats a weak one hugging price.
+    """
+    above = [z for z in zones if z.mid >= last_price]
+    below = [z for z in zones if z.mid < last_price]
+
+    def rank(z: Zone) -> float:
+        dist = abs(z.mid - last_price) / last_price
+        return z.score - dist * 8
+
+    return sorted(above, key=rank, reverse=True)[:per_side] + sorted(below, key=rank, reverse=True)[:per_side]
+
+
+# --------------------------------------------------------- window levels
+
+
+def window_levels(df: pd.DataFrame, tf: str) -> dict[str, float | int] | None:
+    """High/low of the last completed bar of a higher-timeframe series."""
+    if len(df) < 2:
+        return None
+    bar = df.iloc[-2]
+    return {"high": float(bar["high"]), "low": float(bar["low"]), "time": int(bar["time"]),
+            "tf": tf}
+
+
+# --------------------------------------------------------------- engine
+
+
+@dataclass
+class AnalysisResult:
+    overlays: list
+    stats: AnalysisStats
+    facts: dict
+
+
+def _fmt(p: float) -> str:
+    if p >= 1000:
+        return f"{p:,.2f}"
+    if p >= 1:
+        return f"{p:.4f}".rstrip("0").rstrip(".")
+    return f"{p:.6f}".rstrip("0").rstrip(".")
+
+
+def analyze(
+    df: pd.DataFrame,
+    intent: AnalysisIntent,
+    tf: str,
+    higher_tf: dict[str, pd.DataFrame] | None = None,
+) -> AnalysisResult:
+    """Run the requested detectors and return overlays + stats + facts for narration."""
+    if len(df) < 30:
+        raise ValueError("Need at least 30 candles for analysis")
+    df = df.reset_index(drop=True)
+    tfl = TF_LABEL.get(tf, tf.upper())
+    atr_s = atr(df)
+    atr_v = float(atr_s.iloc[-1])
+    last = float(df["close"].iloc[-1])
+    ema_f = ema(df["close"], 20)
+    ema_s = ema(df["close"], 50)
+    highs, lows = find_swings(df, atr_v)
+
+    slope = (ema_s.iloc[-1] - ema_s.iloc[-10]) / atr_v if len(df) > 10 else 0
+    if ema_f.iloc[-1] > ema_s.iloc[-1] and slope > 0.2:
+        trend = "up"
+    elif ema_f.iloc[-1] < ema_s.iloc[-1] and slope < -0.2:
+        trend = "down"
+    else:
+        trend = "range"
+
+    overlays: list = []
+    facts: dict = {"timeframe": tfl, "last_price": last, "trend": trend, "atr": atr_v}
+    feats = set(intent.features)
+    sr_zones: list[Zone] = []
+
+    if "support_resistance" in feats:
+        sr_zones = pick_nearest(cluster_levels(highs + lows, atr_v, last, len(df)), last, intent.max_zones)
+        for z in sr_zones:
+            color = RED if z.kind == "resistance" else GREEN
+            overlays.append(BoxOverlay(
+                label=f"{tfl} {z.kind.title()}", kind=z.kind, price_high=z.price_high, price_low=z.price_low,
+                color=rgba(color, 0.22), border_color=rgba(color, 0.7), time_start=z.first_time,
+                strength=round(min(z.score, 1.0), 2),
+            ))
+        facts["resistance"] = sorted([(z.price_low, z.price_high, z.touches) for z in sr_zones
+                                      if z.kind == "resistance"])
+        facts["support"] = sorted([(z.price_low, z.price_high, z.touches) for z in sr_zones
+                                   if z.kind == "support"], reverse=True)
+
+    if "supply_demand" in feats:
+        sd = supply_demand_zones(df, atr_s)
+        sd = [z for z in sd if not any(z.overlap_ratio(s) > 0.5 for s in sr_zones)]
+        sd = pick_nearest(sd, last, intent.max_zones)
+        for z in sd:
+            color = ORANGE if z.kind == "supply" else TEAL
+            overlays.append(BoxOverlay(
+                label=f"{tfl} {z.kind.title()}" + (" (fresh)" if z.tests == 0 else ""), kind=z.kind,
+                price_high=z.price_high, price_low=z.price_low, color=rgba(color, 0.18),
+                border_color=rgba(color, 0.65), time_start=z.first_time, strength=round(min(z.score, 1.0), 2),
+            ))
+        facts["supply"] = sorted([(z.price_low, z.price_high, z.tests) for z in sd if z.kind == "supply"])
+        facts["demand"] = sorted([(z.price_low, z.price_high, z.tests) for z in sd if z.kind == "demand"],
+                                 reverse=True)
+
+    if "window_levels" in feats:
+        facts["windows"] = []
+        for wtf, wdf in (higher_tf or {}).items():
+            lv = window_levels(wdf.reset_index(drop=True), wtf)
+            if not lv:
+                continue
+            wl = TF_LABEL.get(wtf, wtf.upper())
+            style = "solid" if wtf in ("1h", "3h", "4h") else "dashed"
+            overlays.append(HorizontalLineOverlay(label=f"{wl} window high", kind="window_high", price=lv["high"],
+                                                  color=RED, line_style=style, time_start=lv["time"]))
+            overlays.append(HorizontalLineOverlay(label=f"{wl} window low", kind="window_low", price=lv["low"],
+                                                  color=GREEN, line_style=style, time_start=lv["time"]))
+            facts["windows"].append((wl, lv["high"], lv["low"]))
+
+    if "swings" in feats:
+        for s in sorted(highs[-6:] + lows[-6:], key=lambda s: s.idx):
+            is_high = s.kind == "high"
+            overlays.append(MarkerOverlay(
+                time=s.time, price=s.price, position="above" if is_high else "below",
+                shape="arrowDown" if is_high else "arrowUp", label=s.structure or ("SH" if is_high else "SL"),
+                color=RED if is_high else GREEN, kind=f"swing_{s.kind}",
+            ))
+        facts["structure"] = [s.structure for s in sorted(highs[-3:] + lows[-3:], key=lambda s: s.idx)
+                              if s.structure]
+
+    if "trendlines" in feats:
+        for pts, color, name in ((highs, RED, "Descending resistance"), (lows, GREEN, "Ascending support")):
+            if len(pts) < 2:
+                continue
+            a, b = pts[-2], pts[-1]
+            falling = b.price < a.price
+            # Only the "meaningful" direction: lower highs or higher lows.
+            if (pts is highs and falling) or (pts is lows and not falling):
+                overlays.append(TrendlineOverlay(
+                    time1=a.time, price1=a.price, time2=b.time, price2=b.price, extend_right=True,
+                    color=color, label=f"{tfl} {name}", kind="trendline",
+                ))
+
+    for i, ov in enumerate(overlays):
+        ov.id = f"ai-{ov.type}-{i}"
+        for name in ("price", "price_high", "price_low", "price1", "price2"):
+            if getattr(ov, name, None) is not None:
+                setattr(ov, name, float(f"{getattr(ov, name):.6g}"))
+
+    stats = AnalysisStats(
+        last_price=last, atr=atr_v, trend=trend, ema_fast=float(ema_f.iloc[-1]), ema_slow=float(ema_s.iloc[-1]),
+        swing_highs=len(highs), swing_lows=len(lows),
+    )
+    return AnalysisResult(overlays, stats, facts)
+
+
+def _touches(n: int) -> str:
+    return f"{n} touch" if n == 1 else f"{n} touches"
+
+
+def describe(facts: dict, symbol: str) -> str:
+    """Plain-English summary of the analysis, used when no LLM is configured."""
+    tf = facts["timeframe"]
+    lines = [f"{symbol} on {tf}: last {_fmt(facts['last_price'])}, trend {facts['trend']} "
+             f"(ATR {_fmt(facts['atr'])})."]
+    if facts.get("resistance"):
+        lo, hi, t = facts["resistance"][0]
+        lines.append(f"Nearest {tf} resistance {_fmt(lo)}–{_fmt(hi)} ({_touches(t)}).")
+    if facts.get("support"):
+        lo, hi, t = facts["support"][0]
+        lines.append(f"Nearest {tf} support {_fmt(lo)}–{_fmt(hi)} ({_touches(t)}).")
+    if "supply" in facts and not facts["supply"]:
+        lines.append(f"No unmitigated {tf} supply zone above price right now.")
+    if "demand" in facts and not facts["demand"]:
+        lines.append(f"No unmitigated {tf} demand zone below price right now.")
+    if facts.get("supply"):
+        lo, hi, t = facts["supply"][0]
+        lines.append(f"Unmitigated supply {_fmt(lo)}–{_fmt(hi)}" + (" (untested)." if t == 0 else f" (tested {t}x)."))
+    if facts.get("demand"):
+        lo, hi, t = facts["demand"][0]
+        lines.append(f"Unmitigated demand {_fmt(lo)}–{_fmt(hi)}" + (" (untested)." if t == 0 else f" (tested {t}x)."))
+    for wl, hi, lo in facts.get("windows", []):
+        lines.append(f"{wl} window: high {_fmt(hi)}, low {_fmt(lo)}.")
+    if facts.get("structure"):
+        lines.append("Recent structure: " + " → ".join(facts["structure"]) + ".")
+    if len(lines) == 1:
+        lines.append("No qualifying levels found for this request.")
+    return " ".join(lines)
