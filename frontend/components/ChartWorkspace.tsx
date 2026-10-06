@@ -50,6 +50,9 @@ export default function ChartWorkspace() {
     ema50: false,
     psar: true,
     volume: true,
+    rsi: false,
+    macd: false,
+    vwap: false,
   });
   const [layout, setLayout] = usePersistentState<LayoutState>("ac:layout", {
     logScale: false,

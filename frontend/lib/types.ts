@@ -212,6 +212,10 @@ export interface IndicatorState {
   ema50: boolean;
   psar: boolean;
   volume: boolean;
+  // Added later: states saved before these existed lack the keys, so read them as `!!ind.rsi`.
+  rsi: boolean;
+  macd: boolean;
+  vwap: boolean;
 }
 
 export interface LayoutState {
