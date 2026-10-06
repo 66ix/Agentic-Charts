@@ -75,6 +75,9 @@ class MarketData:
         self._cache: dict[tuple[str, str, int], _Cached] = {}
         self._binance_down_until = 0.0
         self._symbols: tuple[float, list[str]] | None = None
+        # Switched to the fallback endpoints once the primary answers 451/403 (geo-block).
+        self.rest_url = self.settings.binance_rest_url
+        self.ws_url = self.settings.binance_ws_url
 
     # ------------------------------------------------------------ lifecycle
     @property
@@ -138,8 +141,7 @@ class MarketData:
         symbols = FALLBACK_SYMBOLS
         if self.binance_usable():
             try:
-                resp = await self.client.get(f"{self.settings.binance_rest_url}/api/v3/exchangeInfo",
-                                             params={"permissions": "SPOT"})
+                resp = await self._binance_get("/api/v3/exchangeInfo", params={"permissions": "SPOT"})
                 resp.raise_for_status()
                 symbols = sorted(
                     s["symbol"] for s in resp.json()["symbols"]
@@ -152,6 +154,16 @@ class MarketData:
         return symbols
 
     # ------------------------------------------------------------ binance
+    async def _binance_get(self, path: str, params: dict | None = None) -> httpx.Response:
+        resp = await self.client.get(f"{self.rest_url}{path}", params=params)
+        fallback = self.settings.binance_fallback_rest_url
+        if resp.status_code in (403, 451) and fallback and self.rest_url != fallback:
+            log.warning("Binance %s returned %s (region block); switching to %s", self.rest_url,
+                        resp.status_code, fallback)
+            self.rest_url, self.ws_url = fallback, self.settings.binance_fallback_ws_url
+            resp = await self.client.get(f"{self.rest_url}{path}", params=params)
+        return resp
+
     async def _binance_klines(self, symbol: str, interval: str, limit: int) -> list[Candle]:
         if interval in DERIVED_INTERVALS:
             base, factor = DERIVED_INTERVALS[interval]
@@ -168,7 +180,7 @@ class MarketData:
             }
             if end_time is not None:
                 params["endTime"] = end_time
-            resp = await self.client.get(f"{self.settings.binance_rest_url}/api/v3/klines", params=params)
+            resp = await self._binance_get("/api/v3/klines", params=params)
             if resp.status_code == 400:
                 raise MarketDataError(f"Binance rejected request: {resp.text[:200]}")
             resp.raise_for_status()

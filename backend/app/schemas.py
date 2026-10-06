@@ -91,6 +91,52 @@ Overlay = Annotated[
 Feature = Literal["support_resistance", "supply_demand", "swings", "window_levels", "trendlines"]
 ALL_FEATURES: tuple[str, ...] = ("support_resistance", "supply_demand", "swings", "window_levels", "trendlines")
 
+# Overlay groups the user can refer to ("remove the trendline", "alert me on the supply zone").
+Target = Literal["all", "support", "resistance", "supply", "demand", "window", "swings", "trendlines", "custom", "new"]
+TARGETS: tuple[str, ...] = ("all", "support", "resistance", "supply", "demand", "window", "swings", "trendlines",
+                            "custom", "new")
+TARGET_KINDS: dict[str, frozenset[str]] = {
+    "support": frozenset({"support"}),
+    "resistance": frozenset({"resistance"}),
+    "supply": frozenset({"supply"}),
+    "demand": frozenset({"demand"}),
+    "window": frozenset({"window_high", "window_low"}),
+    "swings": frozenset({"swing_high", "swing_low"}),
+    "trendlines": frozenset({"trendline"}),
+    "custom": frozenset({"custom_level", "custom_zone"}),
+}
+# Overlay kinds each detector produces; a re-run replaces the old ones.
+FEATURE_KINDS: dict[str, frozenset[str]] = {
+    "support_resistance": TARGET_KINDS["support"] | TARGET_KINDS["resistance"],
+    "supply_demand": TARGET_KINDS["supply"] | TARGET_KINDS["demand"],
+    "swings": TARGET_KINDS["swings"],
+    "window_levels": TARGET_KINDS["window"],
+    "trendlines": TARGET_KINDS["trendlines"],
+}
+
+
+class CustomLevel(BaseModel):
+    """A level the user stated explicitly, e.g. "draw a line at 25.40" or "box 24 to 25"."""
+
+    kind: Literal["line", "zone"] = "line"
+    price: Optional[float] = Field(None, gt=0)
+    price_low: Optional[float] = Field(None, gt=0)
+    price_high: Optional[float] = Field(None, gt=0)
+    label: str = ""
+
+    @model_validator(mode="after")
+    def _complete(self) -> "CustomLevel":
+        if self.kind == "line" and self.price is None:
+            if self.price_low is None and self.price_high is None:
+                raise ValueError("a line needs a price")
+            self.price = self.price_low or self.price_high
+        if self.kind == "zone":
+            if self.price_low is None or self.price_high is None:
+                raise ValueError("a zone needs price_low and price_high")
+            if self.price_low > self.price_high:
+                self.price_low, self.price_high = self.price_high, self.price_low
+        return self
+
 
 class AnalysisIntent(BaseModel):
     """What the user asked for, normalised. Produced by the LLM or the rule parser."""
@@ -100,15 +146,52 @@ class AnalysisIntent(BaseModel):
     window_timeframes: list[Interval] = Field(default_factory=lambda: ["4h", "1d"])
     max_zones: int = Field(2, ge=1, le=6, description="Max zones per side (above/below price)")
     answer_hint: str = Field("", description="Short restatement of the question")
+    custom_levels: list[CustomLevel] = Field(default_factory=list, max_length=10)
+    remove: list[Target] = Field(default_factory=list, description="Overlay groups to take off the chart")
+    keep_existing: bool = Field(False, description="Add to the overlays already drawn instead of replacing them")
+    alert_prices: list[float] = Field(default_factory=list, max_length=10)
+    alert_targets: list[Target] = Field(default_factory=list, description="Overlay groups to set alerts on")
 
-    @field_validator("features")
+    @field_validator("features", "remove", "alert_targets")
     @classmethod
     def _dedupe(cls, v: list[str]) -> list[str]:
         seen: list[str] = []
         for f in v:
             if f not in seen:
                 seen.append(f)
-        return seen or ["support_resistance"]
+        return seen
+
+    @field_validator("alert_prices")
+    @classmethod
+    def _positive(cls, v: list[float]) -> list[float]:
+        return [p for p in v if p > 0]
+
+    @property
+    def has_actions(self) -> bool:
+        return bool(self.custom_levels or self.remove or self.alert_prices or self.alert_targets)
+
+    @model_validator(mode="after")
+    def _default_features(self) -> "AnalysisIntent":
+        # A request with nothing to draw, remove or alert on is a plain "analyse this".
+        if not self.features and not self.has_actions:
+            self.features = ["support_resistance"]
+        return self
+
+
+class ChatTurn(BaseModel):
+    role: Literal["user", "agent"]
+    text: str = Field("", max_length=2000)
+
+
+class AlertSpec(BaseModel):
+    """A price alert the client should arm. `cross` fires when price crosses `price`;
+    `zone` fires when price moves into [price_low, price_high]."""
+
+    kind: Literal["cross", "zone"]
+    price: Optional[float] = None
+    price_low: Optional[float] = None
+    price_high: Optional[float] = None
+    label: str = ""
 
 
 class AnalyzeRequest(BaseModel):
@@ -119,11 +202,24 @@ class AnalyzeRequest(BaseModel):
     candles: Optional[list[Candle]] = Field(
         None, description="Optional OHLCV the client already has; skips the server-side fetch"
     )
+    history: list[ChatTurn] = Field(default_factory=list, description="Earlier turns, oldest first")
+    overlays: list[Overlay] = Field(default_factory=list, description="AI overlays currently on the chart")
+    previous_intent: Optional[AnalysisIntent] = None
 
     @field_validator("symbol")
     @classmethod
     def _norm_symbol(cls, v: str) -> str:
         return v.replace("/", "").replace("-", "").upper()
+
+    @field_validator("history")
+    @classmethod
+    def _recent(cls, v: list[ChatTurn]) -> list[ChatTurn]:
+        return v[-10:]
+
+    @field_validator("overlays")
+    @classmethod
+    def _cap(cls, v: list) -> list:
+        return v[-100:]
 
 
 class AnalysisStats(BaseModel):
@@ -146,6 +242,7 @@ class AnalyzeResponse(BaseModel):
     stats: AnalysisStats
     engine: dict[str, str]
     data_source: str
+    alerts: list[AlertSpec] = Field(default_factory=list)
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -159,6 +256,7 @@ class Metric(BaseModel):
     display: str
     change_pct: Optional[float] = None
     source: Literal["live", "mock"] = "mock"
+    note: Optional[str] = Field(None, description="Tooltip: coverage or why the value is mocked")
 
 
 class MarketMetrics(BaseModel):

@@ -1,7 +1,7 @@
 "use client";
 
 import clsx from "clsx";
-import { Bot, ChevronDown, Eraser, Loader2, SendHorizontal, Sparkles, User } from "lucide-react";
+import { Bell, Bot, ChevronDown, Eraser, Loader2, SendHorizontal, Sparkles, Trash2, User } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import type { Overlay } from "@/lib/types";
@@ -12,6 +12,7 @@ export interface AgentMessage {
   text: string;
   overlays?: Overlay[];
   meta?: string;
+  alerts?: number;
 }
 
 const SUGGESTIONS = [
@@ -20,6 +21,8 @@ const SUGGESTIONS = [
   "Mark swing highs and lows with market structure",
   "Full analysis: zones, windows, trendlines",
 ];
+
+const FOLLOW_UPS = ["Also show swings", "Same on daily", "Remove the trendlines", "Alert me on these levels"];
 
 function swatch(o: Overlay) {
   if (o.type === "box") return o.border_color ?? o.color;
@@ -33,6 +36,7 @@ interface Props {
   overlayCount: number;
   onSubmit(prompt: string): void;
   onClearOverlays(): void;
+  onClearChat(): void;
   onClose(): void;
 }
 
@@ -73,6 +77,11 @@ export default function AgentPanel(p: Props) {
             <Eraser className="h-3.5 w-3.5" /> Clear {p.overlayCount}
           </button>
         )}
+        {p.messages.length > 0 && (
+          <button type="button" onClick={p.onClearChat} className="btn-ghost h-6 w-6 p-0" title="Start a new conversation" aria-label="Clear conversation">
+            <Trash2 className="h-3.5 w-3.5" />
+          </button>
+        )}
         <button type="button" onClick={p.onClose} className="btn-ghost h-6 w-6 p-0" aria-label="Minimize agent">
           <ChevronDown className="h-4 w-4" />
         </button>
@@ -104,6 +113,11 @@ export default function AgentPanel(p: Props) {
                       ))}
                   </div>
                 )}
+                {m.alerts ? (
+                  <p className="mt-1 inline-flex items-center gap-1 text-[11px] text-yellow-300">
+                    <Bell className="h-3 w-3" /> {m.alerts} alert{m.alerts === 1 ? "" : "s"} armed
+                  </p>
+                ) : null}
                 {m.meta && <p className="mt-1 text-[10px] text-mute">{m.meta}</p>}
               </div>
             </div>
@@ -116,9 +130,9 @@ export default function AgentPanel(p: Props) {
         </div>
       )}
 
-      {p.messages.length === 0 && !p.busy && (
+      {!p.busy && (p.messages.length === 0 || p.overlayCount > 0) && (
         <div className="flex flex-wrap gap-1.5 px-3 pt-3">
-          {SUGGESTIONS.map((s) => (
+          {(p.messages.length === 0 ? SUGGESTIONS : FOLLOW_UPS).map((s) => (
             <button
               key={s}
               type="button"
@@ -142,7 +156,7 @@ export default function AgentPanel(p: Props) {
           ref={inputRef}
           value={value}
           onChange={(e) => setValue(e.target.value)}
-          placeholder='Ask the agent, e.g. "Identify the current H4 supply zone"'
+          placeholder={p.messages.length ? 'Follow up, e.g. "line at 25.4" or "alert me if it enters the zone"' : 'Ask the agent, e.g. "Identify the current H4 supply zone"'}
           className="h-9 flex-1 rounded-lg border border-line bg-base px-3 text-sm text-ink outline-none placeholder:text-mute focus:border-accent/60"
           aria-label="Agent prompt"
         />

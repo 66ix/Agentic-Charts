@@ -17,7 +17,7 @@ function fngColor(v: number) {
 function MetricItem({ m }: { m: Metric }) {
   const isFng = m.key === "fear_greed";
   return (
-    <div className="flex shrink-0 items-center gap-1.5 whitespace-nowrap" title={m.source === "mock" ? "Mocked value" : "Live"}>
+    <div className="flex shrink-0 items-center gap-1.5 whitespace-nowrap" title={m.note ?? (m.source === "mock" ? "Mocked value" : "Live")}>
       <span className="text-mute">{m.label}:</span>
       {isFng ? (
         <span className={clsx("font-medium", fngColor(m.value))}>{m.display}</span>

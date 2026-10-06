@@ -1,5 +1,5 @@
 import { API_URL } from "./config";
-import type { AnalyzeResponse, Candle, Interval, MarketMetrics } from "./types";
+import type { AnalysisIntent, AnalyzeResponse, Candle, ChatTurn, Interval, MarketMetrics, Overlay } from "./types";
 
 export class ApiError extends Error {
   constructor(message: string, readonly status: number) {
@@ -57,7 +57,15 @@ export function fetchSymbols(signal?: AbortSignal) {
 }
 
 export function analyze(
-  body: { symbol: string; interval: Interval; prompt: string; candles?: Candle[] },
+  body: {
+    symbol: string;
+    interval: Interval;
+    prompt: string;
+    candles?: Candle[];
+    history?: ChatTurn[];
+    overlays?: Overlay[];
+    previous_intent?: AnalysisIntent | null;
+  },
   signal?: AbortSignal,
 ) {
   return request<AnalyzeResponse>("/api/agent/analyze", {

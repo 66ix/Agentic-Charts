@@ -2,6 +2,7 @@
 
 import clsx from "clsx";
 import {
+  BellPlus,
   Crosshair,
   GitFork,
   Lock,
@@ -39,11 +40,13 @@ interface Props {
   magnet: boolean;
   locked: boolean;
   hasSelection: boolean;
+  canAlert: boolean;
   drawingCount: number;
   onTool(t: ToolId): void;
   onMagnet(v: boolean): void;
   onLock(v: boolean): void;
   onDelete(): void;
+  onAlert(): void;
 }
 
 function ToolButton({ active, label, onClick, children, danger, disabled }: {
@@ -87,6 +90,13 @@ export default function DrawingToolbar(p: Props) {
       </ToolButton>
       <ToolButton label={p.locked ? "Unlock drawings" : "Lock drawings"} active={p.locked} onClick={() => p.onLock(!p.locked)}>
         {p.locked ? <Lock className="h-[18px] w-[18px]" strokeWidth={1.75} /> : <LockOpen className="h-[18px] w-[18px]" strokeWidth={1.75} />}
+      </ToolButton>
+      <ToolButton
+        label={p.canAlert ? "Set a price alert on the selected drawing" : "Select a horizontal ray or rectangle to set an alert"}
+        onClick={p.onAlert}
+        disabled={!p.canAlert}
+      >
+        <BellPlus className="h-[18px] w-[18px]" strokeWidth={1.75} />
       </ToolButton>
       <ToolButton
         label={p.hasSelection ? "Delete selected (Del)" : "Delete all drawings"}

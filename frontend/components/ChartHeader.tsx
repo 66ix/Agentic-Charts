@@ -1,7 +1,7 @@
 "use client";
 
 import clsx from "clsx";
-import { Bot, Camera, ChevronDown, LayoutGrid, LineChart, Maximize2, Search } from "lucide-react";
+import { Bell, Bot, Camera, ChevronDown, LayoutGrid, LineChart, Maximize2, Search } from "lucide-react";
 
 import { displaySymbol, formatPct, formatPrice } from "@/lib/format";
 import { TIMEFRAMES, type DataSource, type IndicatorState, type Interval, type LayoutState } from "@/lib/types";
@@ -26,6 +26,8 @@ interface Props {
   indicators: IndicatorState;
   layout: LayoutState;
   agentOpen: boolean;
+  alertsOpen: boolean;
+  armedAlerts: number;
   onInterval(i: Interval): void;
   onSearch(): void;
   onIndicators(next: IndicatorState): void;
@@ -33,6 +35,7 @@ interface Props {
   onScreenshot(): void;
   onFit(): void;
   onToggleAgent(): void;
+  onToggleAlerts(): void;
 }
 
 export default function ChartHeader(p: Props) {
@@ -110,6 +113,21 @@ export default function ChartHeader(p: Props) {
 
       <div className="flex-1" />
 
+      <button
+        type="button"
+        onClick={p.onToggleAlerts}
+        title="Price alerts"
+        aria-label="Price alerts"
+        aria-pressed={p.alertsOpen}
+        className={clsx("btn-ghost relative mr-1 shrink-0", p.alertsOpen && "bg-panel2 text-ink")}
+      >
+        <Bell className="h-4 w-4" />
+        {p.armedAlerts > 0 && (
+          <span className="absolute -right-0.5 -top-0.5 grid h-3.5 min-w-3.5 place-items-center rounded-full bg-yellow-400 px-0.5 text-[9px] font-bold text-black">
+            {p.armedAlerts}
+          </span>
+        )}
+      </button>
       <button
         type="button"
         onClick={p.onToggleAgent}
