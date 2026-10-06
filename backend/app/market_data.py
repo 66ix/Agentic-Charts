@@ -49,6 +49,8 @@ INTERVAL_SECONDS: dict[str, int] = {
 DERIVED_INTERVALS: dict[str, tuple[str, int]] = {"3h": ("1h", 3)}
 
 BINANCE_MAX_LIMIT = 1000
+# Largest history one call returns: the REST endpoint allows 1500, Kimi Cooked asks for up to 5000.
+MAX_KLINES = 5000
 
 FALLBACK_SYMBOLS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "INJUSDT", "DOGEUSDT", "ADAUSDT",
@@ -127,7 +129,7 @@ class MarketData:
         """Return (candles oldest→newest, source) where source is 'binance' or 'synthetic'."""
         if interval not in INTERVAL_SECONDS:
             raise MarketDataError(f"Unsupported interval {interval!r}")
-        limit = max(1, min(limit, 1500))
+        limit = max(1, min(limit, MAX_KLINES))
         key = (symbol, interval, limit)
         now = time.monotonic()
         cached = self._cache.get(key)

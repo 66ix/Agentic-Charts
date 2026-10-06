@@ -18,7 +18,8 @@ from pathlib import Path
 
 from .schemas import Candle
 
-# Bars kept per (symbol, interval): the largest request is 1500 bars of 3h = 4503 bars of 1h.
+# Bars kept per (symbol, interval): the largest requests are Kimi Cooked's 5000 bars, and its 1600 bars of 3h
+# (4803 bars of 1h).
 KEEP_BARS = 5000
 
 _SCHEMA = """

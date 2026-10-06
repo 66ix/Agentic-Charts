@@ -15,11 +15,14 @@ import {
 } from "lightweight-charts";
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState, type ReactNode } from "react";
 
-import { fetchKlines } from "@/lib/api";
+import KimiPanel from "./KimiPanel";
+
+import { fetchKimi, fetchKlines } from "@/lib/api";
 import { mergeCandles, readCandles, writeCandles } from "@/lib/candleCache";
 import { AxisMaskPrimitive } from "@/lib/chart/primitives/AxisMaskPrimitive";
 import { BoxZonePrimitive } from "@/lib/chart/primitives/BoxZonePrimitive";
 import { DrawingLayerPrimitive } from "@/lib/chart/primitives/DrawingLayerPrimitive";
+import { KimiPrimitive } from "@/lib/chart/primitives/KimiPrimitive";
 import { LabeledRayPrimitive } from "@/lib/chart/primitives/LabeledRayPrimitive";
 import { TrendLinePrimitive } from "@/lib/chart/primitives/TrendLinePrimitive";
 import { TimeMapper } from "@/lib/chart/timeMapper";
@@ -36,6 +39,7 @@ import {
   type DrawingType,
   type IndicatorState,
   type Interval,
+  type KimiResult,
   type LayoutState,
   type Overlay,
   type ToolId,
@@ -85,6 +89,18 @@ const TOOL_COLORS: Record<DrawingType, string> = {
 };
 
 const toTime = (t: number) => t as UTCTimestamp;
+
+// Kimi Cooked's label colours (TradingView's teal, maroon, blue, purple and orange).
+const KIMI_MARKER: Record<string, { color: string; shape: SeriesMarker<Time>["shape"] }> = {
+  "B+": { color: "#089981", shape: "arrowUp" },
+  "B-": { color: "#880e4f", shape: "arrowDown" },
+  U: { color: "#2962ff", shape: "arrowUp" },
+  Dn: { color: "#9c27b0", shape: "arrowDown" },
+  "B+?": { color: "#ff9800", shape: "arrowUp" },
+  "B-?": { color: "#ff9800", shape: "arrowDown" },
+};
+// The backend sees a candle as closed a moment after it closes; wait that long before asking for the new run.
+const KIMI_REFRESH_DELAY_MS = 6000;
 const uid = () => Math.random().toString(36).slice(2, 10);
 
 interface Legend {
@@ -177,6 +193,10 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
   const mapperRef = useRef(new TimeMapper(INTERVAL_SECONDS[props.interval]));
   const layerRef = useRef<DrawingLayerPrimitive | null>(null);
   const overlayPrims = useRef<Array<BoxZonePrimitive | LabeledRayPrimitive | TrendLinePrimitive>>([]);
+  const kimiPrimRef = useRef<KimiPrimitive | null>(null);
+  const markersRef = useRef<{ ai: SeriesMarker<Time>[]; kimi: SeriesMarker<Time>[] }>({ ai: [], kimi: [] });
+  const kimiTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const rightOffsetRef = useRef(12); // bars of empty space right of the last candle (more for Kimi's forecast)
   const candlesRef = useRef<Candle[]>([]);
   const pendingRef = useRef<ChartPoint[]>([]);
   const dragRef = useRef<{ id: string; start: ChartPoint; orig: ChartPoint[] } | null>(null);
@@ -193,6 +213,12 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
   const [loading, setLoading] = useState(true);
   const [plotHeight, setPlotHeight] = useState(0); // container minus time axis, for sub-pane labels
   const [paneVals, setPaneVals] = useState<PaneValues>({ rsi: null, macd: null });
+  const [kimi, setKimi] = useState<{ data: KimiResult | null; loading: boolean; error: string | null }>({
+    data: null,
+    loading: false,
+    error: null,
+  });
+  const [kimiTick, setKimiTick] = useState(0); // bumped when a candle closes, to fetch the next run
 
   useImperativeHandle(ref, () => ({
     screenshot: () => chartRef.current?.takeScreenshot() ?? null,
@@ -304,6 +330,7 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
       candleRef.current = null;
       layerRef.current = null;
       overlayPrims.current = [];
+      kimiPrimRef.current = null;
     };
   }, []);
 
@@ -383,6 +410,13 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
     setPaneVals((prev) => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
   }, []);
 
+  /** AI-overlay markers and Kimi's labels share the series' single marker list. */
+  const applyMarkers = useCallback(() => {
+    const { ai, kimi: k } = markersRef.current;
+    const all = [...ai, ...k].sort((a, b) => (a.time as number) - (b.time as number));
+    candleRef.current?.setMarkers(all);
+  }, []);
+
   const emitFeed = useCallback((source: DataSource, force = false) => {
     const now = performance.now();
     if (!force && now - feedThrottle.current < 250) return;
@@ -419,6 +453,11 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
       else {
         data.push(c);
         mapperRef.current.setData(data.map((d) => d.time), INTERVAL_SECONDS[interval]);
+        if (last && propsRef.current.indicators.kimi) {
+          // The previous candle just closed: Kimi Cooked has a new run.
+          clearTimeout(kimiTimer.current);
+          kimiTimer.current = setTimeout(() => setKimiTick((t) => t + 1), KIMI_REFRESH_DELAY_MS);
+        }
       }
       candleRef.current?.update({ time: toTime(c.time), open: c.open, high: c.high, low: c.low, close: c.close });
       volumeRef.current?.update({
@@ -481,7 +520,7 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
         refreshIndicators(true);
         chartRef.current
           ?.timeScale()
-          .setVisibleLogicalRange({ from: Math.max(0, data.length - 160), to: data.length + 10 });
+          .setVisibleLogicalRange({ from: Math.max(0, data.length - 160), to: data.length - 2 + rightOffsetRef.current });
         source = src;
         emitFeed(source, true);
         setLoading(false);
@@ -539,6 +578,7 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
       disposed = true;
       abort.abort();
       clearTimeout(retryTimer);
+      clearTimeout(kimiTimer.current);
       clearInterval(pingTimer);
       if (ws) {
         ws.onclose = null;
@@ -600,9 +640,73 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
       }
     }
     for (const p of overlayPrims.current) series.attachPrimitive(p);
-    markers.sort((a, b) => (a.time as number) - (b.time as number));
-    series.setMarkers(markers);
-  }, [props.overlays, loading]);
+    markersRef.current.ai = markers;
+    applyMarkers();
+  }, [props.overlays, loading, applyMarkers]);
+
+  // ---------------------------------------------------- Kimi Cooked
+  const kimiOn = !!props.indicators.kimi;
+  useEffect(() => {
+    if (!kimiOn) {
+      setKimi({ data: null, loading: false, error: null });
+      return;
+    }
+    const abort = new AbortController();
+    const { symbol, interval } = props;
+    // Keep the drawing of the same chart while the next run loads; drop another chart's.
+    setKimi((k) => ({
+      data: k.data && k.data.symbol === symbol && k.data.interval === interval ? k.data : null,
+      loading: true,
+      error: null,
+    }));
+    fetchKimi(symbol, interval, abort.signal)
+      .then((data) => setKimi({ data, loading: false, error: null }))
+      .catch((err: Error) => {
+        if (err.name === "AbortError") return;
+        setKimi((k) => ({ ...k, loading: false, error: err.message }));
+      });
+    return () => abort.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [kimiOn, props.symbol, props.interval, kimiTick]);
+
+  useEffect(() => {
+    const series = candleRef.current;
+    if (!series) return;
+    if (kimiPrimRef.current) series.detachPrimitive(kimiPrimRef.current);
+    kimiPrimRef.current = null;
+    markersRef.current.kimi = [];
+    const data = kimi.data;
+    if (data && !loading && data.symbol === props.symbol && data.interval === props.interval) {
+      const prim = new KimiPrimitive(mapperRef.current, data);
+      series.attachPrimitive(prim);
+      kimiPrimRef.current = prim;
+      // Kimi runs on more history than the chart loads; labels older than the first loaded candle are left out.
+      const first = candlesRef.current[0]?.time ?? Infinity;
+      markersRef.current.kimi = data.signals.filter((s) => s.time >= first).map((s) => {
+        const style = KIMI_MARKER[s.text] ?? { color: "#9ca3af", shape: "circle" as const };
+        return {
+          time: toTime(s.time),
+          position: s.direction === "long" ? "belowBar" : "aboveBar",
+          shape: style.shape,
+          color: style.color,
+          text: s.text,
+          size: s.type === "U/Dn" ? 0.6 : 0.8,
+        };
+      });
+    }
+    applyMarkers();
+  }, [kimi.data, loading, props.symbol, props.interval, applyMarkers]);
+
+  // Room on the right for the forecast and its label while Kimi Cooked is on.
+  const kimiHorizon = kimiOn ? (kimi.data?.forecast?.horizon ?? 0) : 0;
+  useEffect(() => {
+    const ts = chartRef.current?.timeScale();
+    if (!ts) return;
+    const offset = kimiHorizon ? kimiHorizon + 36 : 12;
+    rightOffsetRef.current = offset;
+    ts.applyOptions({ rightOffset: offset });
+    ts.scrollToPosition(offset, false);
+  }, [kimiHorizon]);
 
   // ---------------------------------------------------- user drawings
   useEffect(() => {
@@ -822,6 +926,7 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
           )}
         </PaneLabel>
       )}
+      {kimiOn && <KimiPanel data={kimi.data} loading={kimi.loading} error={kimi.error} />}
       {loading && (
         <div className="pointer-events-none absolute inset-0 z-10 grid place-items-center text-sm text-mute">
           Loading candles…

@@ -13,11 +13,14 @@ timeframes and coins first; otherwise from the single-shot planner or the rule p
 from __future__ import annotations
 
 import asyncio
+import logging
+import re
 import uuid
 
 from .agent_loop import Toolbox, plan_with_tools
 from .config import get_settings
 from .derivatives import DerivativesService
+from .kimi_service import KimiService, summarize
 from .llm import ChartContext, LLMClient
 from .market_data import MarketData, candles_to_df
 from .scanner import DEFAULT_WATCHLIST, scan, tickers
@@ -36,7 +39,12 @@ from .ta_agent import _fmt, analyze, describe, higher_timeframes, rgba
 from .trade_plan import build_plan, plan_overlays
 
 CUSTOM_COLOR = "#a78bfa"
+INDICATOR_NAMES = {"kimi": "Kimi Cooked", "ema20": "EMA 20", "ema50": "EMA 50", "psar": "Parabolic SAR",
+                   "volume": "volume"}
 MAX_ALERTS = 10
+
+
+log = logging.getLogger(__name__)
 
 
 def _new_id() -> str:
@@ -132,7 +140,8 @@ def _compact(facts: dict) -> dict:
     return {k: v for k, v in facts.items() if k not in ("last_bar_time",)}
 
 
-def make_toolbox(market: MarketData, derivatives: DerivativesService | None, watchlist: list[str]) -> Toolbox:
+def make_toolbox(market: MarketData, derivatives: DerivativesService | None, watchlist: list[str],
+                 kimi: KimiService | None = None) -> Toolbox:
     async def look(symbol: str, tf: str, features: list[str]) -> dict:
         candles, source = await market.get_klines(symbol, tf, 400)
         frames = await _confluence_frames(market, symbol, tf, features)
@@ -153,7 +162,12 @@ def make_toolbox(market: MarketData, derivatives: DerivativesService | None, wat
         out["futures"] = deriv or "unavailable"
         return out
 
-    return Toolbox(look=look, scan=scan_tool, context=context)
+    async def read_kimi(symbol: str, tf: str) -> dict:
+        if kimi is None:
+            return {"error": "Kimi Cooked is not available"}
+        return {"data_source": (k := await kimi.get(symbol, tf)).data_source, **summarize(k)}
+
+    return Toolbox(look=look, scan=scan_tool, context=context, kimi=read_kimi if kimi else None)
 
 
 async def _none() -> None:
@@ -170,15 +184,28 @@ async def _confluence_frames(market: MarketData, symbol: str, tf: str, features:
             if not isinstance(r, BaseException) and len(r[0]) >= 60}
 
 
+KIMI_WORDS = re.compile(r"\bkimi\b", re.I)
+
+
+async def _kimi_facts(kimi: KimiService | None, symbol: str, tf: str) -> dict | None:
+    if kimi is None:
+        return None
+    try:
+        return summarize(await kimi.get(symbol, tf))
+    except Exception as exc:  # the answer goes out without it
+        log.warning("Kimi Cooked failed for %s %s: %s", symbol, tf, exc)
+        return {"error": f"Kimi Cooked could not run: {exc}"}
+
+
 async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
-                       derivatives: DerivativesService | None = None) -> AnalyzeResponse:
+                       derivatives: DerivativesService | None = None, kimi: KimiService | None = None) -> AnalyzeResponse:
     settings = get_settings()
     chart = ChartContext(req.symbol, req.interval, req.watchlist)
     steps: list[str] = []
     research: list[dict] = []
     loop = None
     if req.prompt.strip() and llm.available() and settings.agent_mode == "tools":
-        box = make_toolbox(market, derivatives, req.watchlist)
+        box = make_toolbox(market, derivatives, req.watchlist, kimi)
         loop = await plan_with_tools(llm, req.prompt, req.history, req.overlays, req.previous_intent, chart, box,
                                      settings.agent_max_steps)
     if loop:
@@ -220,9 +247,12 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         return await scan(market, req.watchlist or DEFAULT_WATCHLIST, tf, intent.scan_filter)
 
     want_deriv = derivatives is not None and bool(req.prompt.strip())
-    (candles, source), higher, frames, rows, deriv = await asyncio.gather(
+    # The user's own indicator: read it when they name it or switch it on.
+    want_kimi = "kimi" in intent.indicators_on or bool(KIMI_WORDS.search(req.prompt))
+    (candles, source), higher, frames, rows, deriv, kimi_facts = await asyncio.gather(
         candles_for_chart(), windows(), _confluence_frames(market, symbol, tf, features), scan_rows(),
-        derivatives.symbol_snapshot(symbol) if want_deriv else _none())
+        derivatives.symbol_snapshot(symbol) if want_deriv else _none(),
+        _kimi_facts(kimi, symbol, tf) if want_kimi else _none())
 
     df = candles_to_df(candles)
     # Detection is CPU-bound (SciPy); keep the event loop free for streams.
@@ -250,6 +280,8 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
 
     if deriv:
         facts["derivatives"] = deriv
+    if kimi_facts:
+        facts["kimi"] = kimi_facts
     if intent.scan_watchlist:
         facts["scan"] = [r.model_dump(include={"symbol", "last_price", "change_pct", "trend", "rsi", "signals",
                                                "nearest_kind", "distance_pct"}) for r in rows[:6]]
@@ -260,9 +292,10 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         nav.append(f"Switched the chart to {navigate.symbol} {navigate.interval}.")
     toggles = {**{k: True for k in intent.indicators_on}, **{k: False for k in intent.indicators_off}}
     actions = _action_lines(intent, custom, removed, alerts)
+    show_kimi = want_kimi and "kimi" not in toggles  # asked about it: show it on the chart too, quietly
     if toggles:
-        on = [k.upper() for k, v in toggles.items() if v]
-        off = [k.upper() for k, v in toggles.items() if not v]
+        on = [INDICATOR_NAMES.get(k, k.upper()) for k, v in toggles.items() if v]
+        off = [INDICATOR_NAMES.get(k, k.upper()) for k, v in toggles.items() if not v]
         actions.append(" ".join(filter(None, [f"Turned on {', '.join(on)}." if on else "",
                                               f"Turned off {', '.join(off)}." if off else ""])))
     if nav:
@@ -285,7 +318,7 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         data_source=source,
         alerts=alerts,
         navigate=navigate,
-        indicators=toggles,
+        indicators={**toggles, **({"kimi": True} if show_kimi else {})},
         scan=rows[:10],
         plan=plan,
         steps=steps,

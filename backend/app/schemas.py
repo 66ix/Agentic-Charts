@@ -138,8 +138,8 @@ FEATURE_KINDS: dict[str, frozenset[str]] = {
 }
 
 # Chart indicators the agent can switch on or off (mirrors IndicatorState in frontend/lib/types.ts).
-IndicatorName = Literal["rsi", "macd", "vwap", "ema20", "ema50", "psar", "volume"]
-INDICATORS: tuple[str, ...] = ("rsi", "macd", "vwap", "ema20", "ema50", "psar", "volume")
+IndicatorName = Literal["rsi", "macd", "vwap", "ema20", "ema50", "psar", "volume", "kimi"]
+INDICATORS: tuple[str, ...] = ("rsi", "macd", "vwap", "ema20", "ema50", "psar", "volume", "kimi")
 
 # What a watchlist scan looks for.
 ScanFilter = Literal["any", "near_support", "near_resistance", "bullish", "bearish", "oversold", "overbought",
@@ -399,3 +399,96 @@ class CreateAlertsRequest(BaseModel):
     @classmethod
     def _norm_symbol(cls, v: str) -> str:
         return v.replace("/", "").replace("-", "").upper()
+
+
+# ------------------------------------------------------------ kimi cooked --
+# What GET /api/indicators/kimi returns (app/kimi_service.py). Mirrors the Kimi types in frontend/lib/types.ts.
+
+
+class KimiLevel(BaseModel):
+    side: Literal["support", "resistance"]
+    price: float
+    zone_low: float
+    zone_high: float
+    time_start: int = Field(..., description="The pivot candle, UNIX seconds")
+    time_end: Optional[int] = Field(None, description="The candle that broke it; null while it holds")
+    state: Literal["active", "expired", "broken"]
+    odds: Optional[int] = Field(None, description="% chance price reaches it within the forecast window")
+    touches: int = 0
+
+
+class KimiFibLevel(BaseModel):
+    ratio: float
+    price: float
+    odds: int
+
+
+class KimiFib(BaseModel):
+    time_start: int
+    time_end: int
+    swing_high: float
+    swing_low: float
+    down: bool = Field(..., description="The swing ran from the high down to the low")
+    levels: list[KimiFibLevel]
+    pocket_low: float
+    pocket_high: float
+
+
+class KimiSignal(BaseModel):
+    type: Literal["DIV", "U/Dn", "Early"]
+    direction: Literal["long", "short"]
+    text: str = Field(..., description="The chart label: B+, B-, U, Dn, B+?, B-?")
+    time: int = Field(..., description="Where the label sits: the pivot candle (DIV, U/Dn) or the signal candle")
+    confirm_time: int = Field(..., description="The candle the signal could first be traded on")
+    price: float
+    entry: float
+    confluence: int
+    tier: Literal["top", "rest", "warm-up"]
+    result: Literal["open", "win", "loss", "expiry"]
+    r: Optional[float] = None
+
+
+class KimiNextCandle(BaseModel):
+    direction: Literal["up", "down"]
+    right_pct: Optional[float] = Field(None, description="Its live record on this chart; null under 30 calls")
+    calls: int
+
+
+class KimiForecast(BaseModel):
+    start_time: int = Field(..., description="The last closed candle; path[0] is its close")
+    step: int = Field(..., description="Seconds per candle")
+    horizon: int
+    path: list[float]
+    band_high: list[float]
+    band_low: list[float]
+    texture: list[float] = Field(..., description="The textured scenario path (drawn, never scored)")
+    final: float
+    range_low: float
+    range_high: float
+    pct_change: float
+    vol_regime: Literal["LOW", "NORMAL", "HIGH"]
+    headline: str = Field(..., description="'▲ Proj: 86,120', '► Flat (learning 12/30)', ...")
+    next_candle: Optional[KimiNextCandle] = None
+
+
+class KimiRow(BaseModel):
+    label: str
+    value: str
+    tone: Optional[Literal["up", "down", "mute"]] = None
+
+
+class KimiResponse(BaseModel):
+    symbol: str
+    interval: str
+    version: str
+    data_source: str
+    bars: int = Field(..., description="Closed candles the engine ran on")
+    last_closed: int = Field(..., description="Open time of the newest closed candle, UNIX seconds")
+    levels: list[KimiLevel]
+    fib: Optional[KimiFib] = None
+    signals: list[KimiSignal] = Field(..., description="The labels on the chart, oldest first")
+    forecast: Optional[KimiForecast] = None
+    verify: list[KimiRow]
+    stats: list[KimiRow]
+    notes: list[str] = Field(default_factory=list)
+    seconds: float = Field(0.0, description="Engine run time")

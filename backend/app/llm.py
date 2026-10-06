@@ -140,7 +140,8 @@ INTENT_SCHEMA: dict[str, Any] = {
                            "'what's the trade here?' → auto). null otherwise.",
         },
         "indicators_on": {"type": "array", "items": {"type": "string", "enum": list(INDICATORS)},
-                          "description": "Chart indicators to show ('add RSI' → rsi)."},
+                          "description": "Chart indicators to show ('add RSI' → rsi; 'show my Kimi' or 'turn on "
+                                         "Kimi Cooked' → kimi, the user's own indicator)."},
         "indicators_off": {"type": "array", "items": {"type": "string", "enum": list(INDICATORS)},
                            "description": "Chart indicators to hide."},
     },
@@ -157,6 +158,8 @@ INTENT_SYSTEM = (
     "order_blocks, 'imbalance' or 'FVG' means fvg, 'stop hunt' or 'liquidity grab' means liquidity_sweeps, "
     "'triangle', 'wedge', 'range' or 'double top' means patterns. If the request only draws given prices, removes "
     "overlays, sets alerts, switches the chart, toggles indicators or scans the watchlist, features may be empty. "
+    "'Kimi' or 'Kimi Cooked' is the user's own indicator: 'show Kimi' → indicators_on kimi; a question about what "
+    "Kimi says needs no detectors (its facts are read separately). "
     "Respond with JSON only."
 )
 
@@ -168,6 +171,9 @@ NARRATE_SYSTEM = (
     "Lead with what matters for a decision: where price sits relative to the nearest zones (distance in ATR), "
     "higher-timeframe confluence, structure breaks, divergences, sweeps, and funding/open interest when given. "
     "For a trade plan give entry, stop, targets and reward-to-risk. For a scan name the best few coins and why. "
+    "FACTS.kimi is the user's own indicator, Kimi Cooked: name it, and give its levels with odds_pct (the chance "
+    "price reaches that level within the forecast window), its latest signals and its forecast when they answer "
+    "the question. "
     "No disclaimers, no markdown."
 )
 
@@ -217,6 +223,7 @@ _INDICATOR_WORDS: list[tuple[str, str]] = [
     (r"\b(?:ema ?50|50 ?ema)\b", "ema50"),
     (r"\b(?:psar|parabolic(?: sar)?)\b", "psar"),
     (r"\bvolume (?:bars?|histogram)\b", "volume"),
+    (r"\bkimi(?: cooked)?(?: indicator| script)?\b", "kimi"),
 ]
 _OFF = r"\b(?:hide|remove|delete|turn off|disable|close|drop|get rid of|take off)\b"
 _ON = r"\b(?:show|add|turn on|enable|display|plot|put|overlay|open|bring up|pull up|give me)\b"
