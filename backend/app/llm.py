@@ -113,7 +113,7 @@ INTENT_SCHEMA: dict[str, Any] = {
             "items": {"type": "string", "enum": list(TARGETS)},
             "description": "Overlay groups to alert on ('alert me if it enters the supply zone' → supply; "
                            "'alert me on these levels' → new if this request draws levels, else all; "
-                           "'alert me at my entry' → plan).",
+                           "'alert me on the plan' → plan; 'alert me at the entry' → entry; stop; targets).",
         },
         "symbol": {
             "type": ["string", "null"],
@@ -203,7 +203,11 @@ _GROUP_WORDS: list[tuple[str, str]] = [
     (r"\b(patterns?|triangles?|wedges?|ranges?|double (?:tops?|bottoms?)|necklines?)\b", "patterns"),
     (r"\b(volume profile|poc|value area|vah|val)\b", "volume_profile"),
     (r"\b(plan|setup|entry|stop|targets?|trade)\b", "plan"),
+    (r"\bentry\b", "entry"),
+    (r"\bstop(?! hunts?)(?:[ -]?loss)?\b|\bsl\b", "stop"),
+    (r"\b(targets?|tps?|take[ -]?profits?)\b", "targets"),
 ]
+_PLAN_PARTS = ("entry", "stop", "targets")
 
 _INDICATOR_WORDS: list[tuple[str, str]] = [
     (r"\brsi\b", "rsi"),
@@ -233,7 +237,10 @@ def _num(token: str) -> float:
 
 
 def _groups(text: str) -> list[str]:
-    return [g for pat, g in _GROUP_WORDS if re.search(pat, text)]
+    found = [g for pat, g in _GROUP_WORDS if re.search(pat, text)]
+    if any(g in _PLAN_PARTS for g in found):  # "the entry" means that line, not the whole plan
+        found = [g for g in found if g != "plan"]
+    return found
 
 
 def _custom_levels(p: str) -> tuple[list[CustomLevel], list[str]]:
@@ -340,9 +347,10 @@ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases
                                                    + _NUM, clause)]
         if not alert_prices:
             alert_targets = [g for g in _groups(clause) if g not in ("custom",) or "my" in clause] or ["new"]
-            if "plan" in alert_targets:
+            if "plan" in alert_targets or any(g in _PLAN_PARTS for g in alert_targets):
                 alert_targets = [g for g in alert_targets if g != "custom"]
-            scan = scan.replace(clause, " " + " ".join(g for g in alert_targets if g not in ("all", "plan")) + " ")
+            scan = scan.replace(clause, " " + " ".join(g for g in alert_targets
+                                                       if g not in ("all", "plan", *_PLAN_PARTS)) + " ")
 
     custom, spans = _custom_levels(scan)
     for span in spans:  # "support at 24.1" is a drawing, not a request for the S/R detector

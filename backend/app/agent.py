@@ -245,7 +245,7 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
     new = result.overlays + plan_ovs + custom
     if plan_ovs:  # a new plan replaces the previous one
         existing = [o for o in existing if (o.kind or "") not in TARGET_KINDS["plan"]]
-    overlays, removed = merge_overlays(existing, new, intent)
+    overlays, removed = merge_overlays(existing, new, run_intent)
     alerts = build_alerts(intent, overlays, new)
 
     if deriv:

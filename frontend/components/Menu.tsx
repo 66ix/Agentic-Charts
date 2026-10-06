@@ -15,7 +15,29 @@ export function Menu({
   align?: "left" | "right";
 }) {
   const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
   const ref = useRef<HTMLDivElement>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+
+  // The dropdown is fixed-positioned under the trigger: the header row scrolls horizontally, and
+  // overflow-x on it would otherwise clip anything that hangs below it.
+  useEffect(() => {
+    if (!open) return;
+    const place = () => {
+      const r = buttonRef.current?.getBoundingClientRect();
+      if (!r) return;
+      const width = 220;
+      const left = align === "right" ? r.right - width : r.left;
+      setPos({ top: r.bottom + 4, left: Math.max(8, Math.min(left, window.innerWidth - width - 8)) });
+    };
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
+  }, [open, align]);
 
   useEffect(() => {
     if (!open) return;
@@ -32,6 +54,7 @@ export function Menu({
   return (
     <div ref={ref} className="relative">
       <button
+        ref={buttonRef}
         type="button"
         title={title}
         aria-label={title}
@@ -41,12 +64,10 @@ export function Menu({
       >
         {trigger}
       </button>
-      {open && (
+      {open && pos && (
         <div
-          className={clsx(
-            "absolute top-full z-40 mt-1 min-w-[200px] rounded-md border border-line bg-panel p-1 shadow-xl",
-            align === "right" ? "right-0" : "left-0",
-          )}
+          className="fixed z-50 w-[220px] rounded-md border border-line bg-panel p-1 shadow-xl"
+          style={{ top: pos.top, left: pos.left }}
         >
           {children}
         </div>

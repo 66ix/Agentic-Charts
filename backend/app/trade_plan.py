@@ -119,14 +119,14 @@ def build_plan(direction: Literal["long", "short", "auto"], last: float, atr: fl
 
 
 def plan_overlays(plan: TradePlan, time_start: int) -> list:
-    """Entry, stop and target lines plus shaded risk/reward areas starting at the current bar."""
+    """Entry, stop and target lines plus shaded (unlabelled) risk/reward areas starting at the current bar."""
     last_t = plan.targets[-1].price
     risk_pct = plan.risk_pct
     out: list = [
-        BoxOverlay(label="Risk", kind="plan_risk", price_low=min(plan.entry, plan.stop),
+        BoxOverlay(label="", kind="plan_risk", price_low=min(plan.entry, plan.stop),
                    price_high=max(plan.entry, plan.stop), color="rgba(239, 68, 68, 0.12)", border_color=None,
                    time_start=time_start),
-        BoxOverlay(label="Reward", kind="plan_reward", price_low=min(plan.entry, last_t),
+        BoxOverlay(label="", kind="plan_reward", price_low=min(plan.entry, last_t),
                    price_high=max(plan.entry, last_t), color="rgba(34, 197, 94, 0.10)", border_color=None,
                    time_start=time_start),
         HorizontalLineOverlay(label=f"{plan.direction.title()} entry", kind="plan_entry", price=plan.entry,

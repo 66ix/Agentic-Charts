@@ -42,7 +42,7 @@
 {"prompt": "short setup on BTC 1h", "expect": {"trade_plan": "short", "symbol": "BTCUSDT", "timeframe": "1h"}}
 {"prompt": "what's the trade here?", "expect": {"trade_plan": "auto"}}
 {"prompt": "where should I buy?", "expect": {"trade_plan": "long"}}
-{"prompt": "give me a long setup and alert me at the entry", "expect": {"trade_plan": "long", "alert_targets": ["plan"]}}
+{"prompt": "give me a long setup and alert me at the entry", "expect": {"trade_plan": "long", "alert_targets": ["entry"]}}
 {"prompt": "add RSI", "expect": {"indicators_on": ["rsi"], "features": []}}
 {"prompt": "show MACD and VWAP", "expect": {"indicators_on": ["macd", "vwap"]}}
 {"prompt": "hide the rsi", "expect": {"indicators_off": ["rsi"], "remove": []}}
@@ -50,3 +50,5 @@
 {"prompt": "show rsi, remove the trendline", "previous": {"features": ["trendlines"]}, "expect": {"indicators_on": ["rsi"], "remove": ["trendlines"]}}
 {"prompt": "does the daily agree with the 4h demand?", "llm_only": true, "expect": {"features": ["supply_demand"]}}
 {"prompt": "compare this with ETH", "llm_only": true, "expect": {"symbol": "ETHUSDT"}}
+{"prompt": "short setup on btc, alert me at the stop and the targets", "expect": {"trade_plan": "short", "symbol": "BTCUSDT", "alert_targets": ["stop", "targets"]}}
+{"prompt": "remove the take profit lines", "expect": {"remove": ["targets"]}}

@@ -98,9 +98,11 @@ FULL_FEATURES: tuple[str, ...] = ("support_resistance", "supply_demand", "swings
 
 # Overlay groups the user can refer to ("remove the trendline", "alert me on the supply zone").
 Target = Literal["all", "support", "resistance", "supply", "demand", "window", "swings", "trendlines", "custom",
-                 "sweeps", "fvg", "order_blocks", "patterns", "volume_profile", "plan", "new"]
+                 "sweeps", "fvg", "order_blocks", "patterns", "volume_profile", "plan", "entry", "stop", "targets",
+                 "new"]
 TARGETS: tuple[str, ...] = ("all", "support", "resistance", "supply", "demand", "window", "swings", "trendlines",
-                            "custom", "sweeps", "fvg", "order_blocks", "patterns", "volume_profile", "plan", "new")
+                            "custom", "sweeps", "fvg", "order_blocks", "patterns", "volume_profile", "plan", "entry",
+                            "stop", "targets", "new")
 TARGET_KINDS: dict[str, frozenset[str]] = {
     "support": frozenset({"support"}),
     "resistance": frozenset({"resistance"}),
@@ -116,6 +118,10 @@ TARGET_KINDS: dict[str, frozenset[str]] = {
     "patterns": frozenset({"pattern_range", "pattern_line", "pattern_neckline", "pattern_point"}),
     "volume_profile": frozenset({"poc", "vah", "val"}),
     "plan": frozenset({"plan_entry", "plan_stop", "plan_target", "plan_risk", "plan_reward"}),
+    # Single parts of the trade plan ("alert me at the entry").
+    "entry": frozenset({"plan_entry"}),
+    "stop": frozenset({"plan_stop"}),
+    "targets": frozenset({"plan_target"}),
 }
 # Overlay kinds each detector produces; a re-run replaces the old ones.
 FEATURE_KINDS: dict[str, frozenset[str]] = {

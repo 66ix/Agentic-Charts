@@ -1,10 +1,11 @@
 "use client";
 
 import clsx from "clsx";
-import { Bell, Bot, ChevronDown, Eraser, Loader2, SendHorizontal, Sparkles, Trash2, User } from "lucide-react";
+import { Bell, Bot, ChevronDown, Eraser, Footprints, Loader2, SendHorizontal, Sparkles, Target, Trash2, User } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
-import type { Overlay } from "@/lib/types";
+import { displaySymbol, formatPct, formatPrice } from "@/lib/format";
+import type { Overlay, ScanResult, TradePlan } from "@/lib/types";
 
 export interface AgentMessage {
   id: string;
@@ -13,16 +14,74 @@ export interface AgentMessage {
   overlays?: Overlay[];
   meta?: string;
   alerts?: number;
+  plan?: TradePlan;
+  scan?: ScanResult[];
+  steps?: string[];
 }
 
 const SUGGESTIONS = [
   "Identify the current H4 supply zone and key resistance high",
-  "Show daily support and resistance",
-  "Mark swing highs and lows with market structure",
+  "Which of my coins are near demand?",
+  "Give me a long setup",
+  "Find order blocks, FVGs and liquidity sweeps",
+  "Open BTC daily and show key levels",
   "Full analysis: zones, windows, trendlines",
 ];
 
-const FOLLOW_UPS = ["Also show swings", "Same on daily", "Remove the trendlines", "Alert me on these levels"];
+const FOLLOW_UPS = ["Also show swings", "Same on daily", "Does the daily agree?", "Alert me on these levels", "Add RSI"];
+
+function PlanCard({ plan }: { plan: TradePlan }) {
+  const long = plan.direction === "long";
+  return (
+    <div className="mt-1.5 rounded-md border border-line bg-base/60 p-2 text-[11px]">
+      <div className="mb-1 flex items-center gap-1.5">
+        <Target className={clsx("h-3.5 w-3.5", long ? "text-up" : "text-down")} />
+        <span className={clsx("font-semibold", long ? "text-up" : "text-down")}>{long ? "Long" : "Short"} plan</span>
+        <span className="truncate text-mute">from {plan.basis}</span>
+      </div>
+      <div className="grid grid-cols-[auto_1fr_auto] gap-x-3 gap-y-0.5 font-mono">
+        <span className="text-mute">Entry</span>
+        <span className="text-accent">{formatPrice(plan.entry)}</span>
+        <span />
+        <span className="text-mute">Stop</span>
+        <span className="text-down">{formatPrice(plan.stop)}</span>
+        <span className="text-mute">−{plan.risk_pct}%</span>
+        {plan.targets.map((t) => (
+          <span key={t.label} className="contents">
+            <span className="text-mute">{t.label.split(" ")[0]}</span>
+            <span className="text-up">{formatPrice(t.price)}</span>
+            <span className="text-ink">{t.rr}R</span>
+          </span>
+        ))}
+      </div>
+      {plan.notes.map((n) => (
+        <p key={n} className="mt-1 text-mute">{n}</p>
+      ))}
+    </div>
+  );
+}
+
+function ScanTable({ rows, onPick }: { rows: ScanResult[]; onPick(symbol: string): void }) {
+  return (
+    <div className="mt-1.5 overflow-hidden rounded-md border border-line">
+      {rows.slice(0, 8).map((r) => (
+        <button
+          key={r.symbol}
+          type="button"
+          onClick={() => onPick(r.symbol)}
+          className="flex w-full items-start gap-2 border-b border-line px-2 py-1 text-left text-[11px] last:border-b-0 hover:bg-panel2"
+          title={`Open ${displaySymbol(r.symbol)}`}
+        >
+          <span className="w-20 shrink-0 font-medium text-ink">{displaySymbol(r.symbol)}</span>
+          <span className={clsx("w-14 shrink-0 font-mono", (r.change_pct ?? 0) >= 0 ? "text-up" : "text-down")}>
+            {formatPct(r.change_pct)}
+          </span>
+          <span className="min-w-0 flex-1 truncate text-mute">{r.signals.slice(0, 2).join(" · ") || r.trend}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
 
 function swatch(o: Overlay) {
   if (o.type === "box") return o.border_color ?? o.color;
@@ -37,6 +96,7 @@ interface Props {
   onSubmit(prompt: string): void;
   onClearOverlays(): void;
   onClearChat(): void;
+  onPickSymbol(symbol: string): void;
   onClose(): void;
 }
 
@@ -70,7 +130,7 @@ export default function AgentPanel(p: Props) {
       <div className="flex items-center gap-2 border-b border-line px-3 py-2 text-xs">
         <Sparkles className="h-4 w-4 text-accent" />
         <span className="font-semibold text-ink">Chart Agent</span>
-        <span className="text-mute">draws zones and levels from your request</span>
+        <span className="truncate text-mute">draws levels, switches charts, scans your watchlist</span>
         <div className="flex-1" />
         {p.overlayCount > 0 && (
           <button type="button" onClick={p.onClearOverlays} className="btn-ghost h-6 gap-1 px-1.5 text-[11px]" title="Remove AI overlays">
@@ -88,7 +148,7 @@ export default function AgentPanel(p: Props) {
       </div>
 
       {(p.messages.length > 0 || p.busy) && (
-        <div ref={listRef} className="max-h-60 space-y-3 overflow-y-auto px-3 py-3 text-[13px] leading-relaxed">
+        <div ref={listRef} className="max-h-72 space-y-3 overflow-y-auto px-3 py-3 text-[13px] leading-relaxed">
           {p.messages.map((m) => (
             <div key={m.id} className="flex gap-2">
               <div
@@ -100,11 +160,22 @@ export default function AgentPanel(p: Props) {
                 {m.role === "user" ? <User className="h-3 w-3" /> : <Bot className="h-3 w-3" />}
               </div>
               <div className="min-w-0 flex-1">
+                {m.steps && (
+                  <ul className="mb-1 space-y-0.5 text-[11px] text-mute">
+                    {m.steps.map((s, i) => (
+                      <li key={i} className="flex items-center gap-1">
+                        <Footprints className="h-3 w-3" /> {s}
+                      </li>
+                    ))}
+                  </ul>
+                )}
                 <p className={clsx(m.role === "user" ? "text-mute" : m.role === "error" ? "text-down" : "text-ink")}>{m.text}</p>
+                {m.plan && <PlanCard plan={m.plan} />}
+                {m.scan && <ScanTable rows={m.scan} onPick={p.onPickSymbol} />}
                 {m.overlays && m.overlays.length > 0 && (
                   <div className="mt-1.5 flex flex-wrap gap-1">
                     {m.overlays
-                      .filter((o) => o.type !== "marker")
+                      .filter((o) => o.type !== "marker" && o.label)
                       .map((o, i) => (
                         <span key={o.id ?? i} className="inline-flex items-center gap-1 rounded bg-panel2 px-1.5 py-0.5 text-[11px] text-ink/80">
                           <span className="h-2 w-2 rounded-sm" style={{ background: swatch(o) }} />
@@ -156,7 +227,7 @@ export default function AgentPanel(p: Props) {
           ref={inputRef}
           value={value}
           onChange={(e) => setValue(e.target.value)}
-          placeholder={p.messages.length ? 'Follow up, e.g. "line at 25.4" or "alert me if it enters the zone"' : 'Ask the agent, e.g. "Identify the current H4 supply zone"'}
+          placeholder={p.messages.length ? 'Follow up, e.g. "same on ETH", "line at 25.4" or "alert me at the entry"' : 'Ask the agent, e.g. "Which of my coins are near demand?"'}
           className="h-9 flex-1 rounded-lg border border-line bg-base px-3 text-sm text-ink outline-none placeholder:text-mute focus:border-accent/60"
           aria-label="Agent prompt"
         />
