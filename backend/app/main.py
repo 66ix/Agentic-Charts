@@ -9,8 +9,11 @@ REST
   GET  /api/watchlist/scan       nearest zone and signals per watchlist symbol
   GET  /api/indicators/kimi      Kimi Cooked v5.7.4: levels, signals, forecast and its two tables
   POST /api/agent/analyze        prompt → structured chart overlays
+  *    /api/alerts*              price alerts, signal alerts and the alert history
+  *    /api/brief*               the scheduled market brief
 WebSocket
   /ws/klines?symbol=INJUSDT&interval=4h   live candle updates
+  /ws/alerts                              alert snapshots, fires and history items
 """
 
 from __future__ import annotations
@@ -25,7 +28,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
 from .agent import run_analysis
-from .alerts import AlertService
+from .alerts import AlertPatch, AlertService
+from .brief import BriefService, BriefSettings, NoChannelError
 from .config import get_settings
 from .derivatives import DerivativesService
 from .kimi_service import KimiService
@@ -36,6 +40,7 @@ from .ratelimit import RateLimitMiddleware
 from .scanner import WatchlistCache, tickers
 from .schemas import (INTERVALS, AnalyzeRequest, AnalyzeResponse, CreateAlertsRequest, KimiResponse, MarketMetrics,
                       ScanResult)
+from .signal_alerts import SIGNALS, CreateSignalAlertsRequest, SignalAlertPatch, SignalAlertService
 from .stream_hub import StreamHub
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -55,9 +60,17 @@ async def lifespan(app: FastAPI):
     app.state.kimi = KimiService(market)
     app.state.alerts = AlertService(app.state.hub)
     await app.state.alerts.start()
+    # Signal alerts and the scheduled brief (signal_alerts.py, brief.py); both notify through app.state.alerts.
+    # Wire an economic calendar into the brief with `app.state.brief.events_provider = <async () -> [dict]>`.
+    app.state.signal_alerts = SignalAlertService(app.state.hub, market, app.state.kimi, app.state.alerts)
+    await app.state.signal_alerts.start()
+    app.state.brief = BriefService(market, app.state.kimi, app.state.derivatives, app.state.alerts)
+    app.state.brief.start()
     log.info("Data source: %s | LLM provider: %s %s", market.settings.data_source,
              app.state.llm.provider, app.state.llm.model)
     yield
+    await app.state.brief.close()
+    await app.state.signal_alerts.close()
     await app.state.alerts.close()
     await app.state.hub.shutdown()
     await asyncio.gather(market.close(), app.state.llm.close(), app.state.metrics.close(),
@@ -70,7 +83,7 @@ app = FastAPI(title="Agentic Charts API", version="1.0.0", lifespan=lifespan)
 app.add_middleware(RateLimitMiddleware, agent_rate=settings.agent_rate_limit, api_rate=settings.api_rate_limit,
                    agent_daily=settings.agent_daily_limit, trust_proxy=settings.trust_proxy)
 app.add_middleware(CORSMiddleware, allow_origins=list(settings.cors_origins), allow_credentials=False,
-                   allow_methods=["GET", "POST", "DELETE"], allow_headers=["*"])
+                   allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"], allow_headers=["*"])
 app.add_middleware(GZipMiddleware, minimum_size=2048)
 
 
@@ -160,6 +173,126 @@ async def agent_analyze(req: AnalyzeRequest, request: Request) -> AnalyzeRespons
     try:
         return await run_analysis(req, request.app.state.market, request.app.state.llm, request.app.state.derivatives,
                                   request.app.state.kimi)
+    except MarketDataError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+# ------------------------------- signal alerts, history and the brief --
+# (ahead of the price-alert routes so DELETE /api/alerts/history is not read as an alert id)
+#   PATCH  /api/alerts/{id}               edit price / zone / label / note / repeat / expires_at
+#   GET    /api/alerts/history?limit=     every fire (price, signal, brief), newest first
+#   DELETE /api/alerts/history            clear it
+#   GET    /api/signal-alerts             {alerts, signals: [{id, name, description}]}
+#   POST   /api/signal-alerts             {symbols, interval, signal, repeat?, note?} → one alert per symbol
+#   PATCH  /api/signal-alerts/{id}        {armed?, repeat?, note?}
+#   DELETE /api/signal-alerts/{id}
+#   GET    /api/signal-alerts/preview     symbol, interval, signal, bars → when it would have fired
+#   GET    /api/brief/settings            {settings, channels, last_sent_at, default_symbols}
+#   PUT    /api/brief/settings            BriefSettings → the same shape
+#   GET    /api/brief/preview             {text, messages, generated_at, ...}; symbols/interval override
+#   POST   /api/brief/send                sends it now; 400 without a channel
+#   WS     /ws/alerts                     also {type:"signal_snapshot"|"signal_fired"|"history"}
+
+
+@app.patch("/api/alerts/{alert_id}")
+async def update_alert(alert_id: str, patch: AlertPatch, request: Request) -> dict:
+    try:
+        alert = await request.app.state.alerts.update(alert_id, patch)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    if alert is None:
+        raise HTTPException(404, "Alert not found")
+    return {"alert": alert.model_dump()}
+
+
+@app.get("/api/alerts/history")
+async def alert_history(request: Request, limit: int = Query(100, ge=1, le=500)) -> dict:
+    return {"items": request.app.state.alerts.history.list(limit)}
+
+
+@app.delete("/api/alerts/history")
+async def clear_alert_history(request: Request) -> dict:
+    return {"removed": request.app.state.alerts.history.clear()}
+
+
+@app.get("/api/signal-alerts")
+async def list_signal_alerts(request: Request) -> dict:
+    service: SignalAlertService = request.app.state.signal_alerts
+    return {"alerts": [a.model_dump() for a in service.list()],
+            "signals": [{"id": k, "name": v.name, "description": v.description} for k, v in SIGNALS.items()]}
+
+
+@app.post("/api/signal-alerts")
+async def create_signal_alerts(req: CreateSignalAlertsRequest, request: Request) -> dict:
+    try:
+        created = await request.app.state.signal_alerts.add(req.symbols, req.interval, req.signal, req.repeat,
+                                                            req.note)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"alerts": [a.model_dump() for a in created]}
+
+
+@app.get("/api/signal-alerts/preview")
+async def preview_signal_alert(request: Request, symbol: str = Query(...), interval: str = Query("4h"),
+                               signal: str = Query(...), bars: int = Query(300, ge=10, le=1000)) -> dict:
+    try:
+        return await request.app.state.signal_alerts.preview(_norm_symbol(symbol), _check_interval(interval),
+                                                             signal, bars)
+    except MarketDataError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.patch("/api/signal-alerts/{alert_id}")
+async def update_signal_alert(alert_id: str, patch: SignalAlertPatch, request: Request) -> dict:
+    alert = await request.app.state.signal_alerts.update(alert_id, patch)
+    if alert is None:
+        raise HTTPException(404, "Signal alert not found")
+    return {"alert": alert.model_dump()}
+
+
+@app.delete("/api/signal-alerts/{alert_id}")
+async def delete_signal_alert(alert_id: str, request: Request) -> dict:
+    if not await request.app.state.signal_alerts.remove(alert_id):
+        raise HTTPException(404, "Signal alert not found")
+    return {"ok": True}
+
+
+@app.get("/api/brief/settings")
+async def brief_settings(request: Request) -> dict:
+    return request.app.state.brief.status()
+
+
+@app.put("/api/brief/settings")
+async def save_brief_settings(settings_in: BriefSettings, request: Request) -> dict:
+    service: BriefService = request.app.state.brief
+    service.update_settings(settings_in)
+    return service.status()
+
+
+@app.get("/api/brief/preview")
+async def brief_preview(request: Request, symbols: str | None = Query(None, description="Comma-separated override"),
+                        interval: str | None = Query(None)) -> dict:
+    try:
+        brief = await request.app.state.brief.build(_symbol_list(symbols) if symbols else None,
+                                                    _check_interval(interval) if interval else None)
+    except MarketDataError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return brief.model_dump(mode="json")
+
+
+@app.post("/api/brief/send")
+async def brief_send(request: Request, symbols: str | None = Query(None), interval: str | None = Query(None)) -> dict:
+    try:
+        return await request.app.state.brief.send(_symbol_list(symbols) if symbols else None,
+                                                  _check_interval(interval) if interval else None)
+    except NoChannelError as exc:
+        raise HTTPException(400, str(exc)) from exc
     except MarketDataError as exc:
         raise HTTPException(502, str(exc)) from exc
     except ValueError as exc:

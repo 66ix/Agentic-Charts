@@ -7,6 +7,8 @@ import os
 # test_candle_cache.py turns it back on with a tmp path.
 os.environ["CANDLE_CACHE"] = "off"
 os.environ["ALERTS_STORE"] = "memory"
+for _key in ("ALERT_HISTORY_STORE", "SIGNAL_ALERTS_STORE", "BRIEF_STORE"):
+    os.environ[_key] = "memory"
 for _key in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "DISCORD_WEBHOOK_URL"):
     os.environ[_key] = ""  # set (even empty) so python-dotenv will not fill it from .env
 os.environ["AGENT_RATE_LIMIT"] = "0"

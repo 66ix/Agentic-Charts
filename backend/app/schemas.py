@@ -248,6 +248,10 @@ class AlertSpec(BaseModel):
     price_low: Optional[float] = None
     price_high: Optional[float] = None
     label: str = ""
+    # Management options (alerts.py); the defaults keep older clients and stored alerts working.
+    repeat: bool = Field(False, description="Stay armed after firing; fire again on a new crossing, at most every 5 min")
+    expires_at: Optional[int] = Field(None, description="UNIX milliseconds; the alert disarms itself after this")
+    note: str = Field("", max_length=500)
 
 
 class Navigate(BaseModel):
@@ -389,6 +393,8 @@ class PriceAlert(AlertSpec):
     triggered_price: Optional[float] = None
     last_side: Optional[Literal["above", "below", "inside"]] = Field(
         None, description="Where price was last seen relative to the level, so alerts fire on the transition")
+    fire_count: int = 0
+    expired: bool = Field(False, description="Disarmed because expires_at passed")
 
 
 class CreateAlertsRequest(BaseModel):

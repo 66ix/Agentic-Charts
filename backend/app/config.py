@@ -92,6 +92,15 @@ class Settings:
     telegram_chat_id: str = field(default_factory=lambda: _env("TELEGRAM_CHAT_ID", ""))
     discord_webhook_url: str = field(default_factory=lambda: _env("DISCORD_WEBHOOK_URL", ""), repr=False)
 
+    # Alert history, signal alerts and the morning brief (alerts.py, signal_alerts.py, brief.py).
+    # Each is a JSON file; `memory` keeps it in memory only (lost on restart).
+    alert_history_store: str = field(default_factory=lambda: _env(
+        "ALERT_HISTORY_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "alert_history.json")))
+    signal_alerts_store: str = field(default_factory=lambda: _env(
+        "SIGNAL_ALERTS_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "signal_alerts.json")))
+    brief_store: str = field(default_factory=lambda: _env(
+        "BRIEF_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "brief.json")))
+
 
 @lru_cache
 def get_settings() -> Settings:
