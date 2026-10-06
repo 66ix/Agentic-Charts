@@ -54,6 +54,8 @@ export interface HorizontalLineOverlay extends OverlayBase {
   line_style?: LineStyleName;
   line_width?: number;
   time_start?: number | null;
+  /** Price tag on the axis (default true). Off for dense sets of lines such as grid bots. */
+  axis_label?: boolean;
 }
 
 export interface BoxOverlay extends OverlayBase {

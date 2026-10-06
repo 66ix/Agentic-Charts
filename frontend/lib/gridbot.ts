@@ -269,6 +269,8 @@ export function gridOverlays(bot: Pick<GridBot, "id" | "params">, result: GridBo
       line_style: "dotted",
       line_width: 1,
       time_start: start,
+      // Hundreds of price tags would bury the axis; tag only the range ends.
+      axis_label: k === 0 || k === lines.length - 1,
     };
     out.push(line);
   });

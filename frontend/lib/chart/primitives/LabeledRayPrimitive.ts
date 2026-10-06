@@ -39,7 +39,7 @@ export class LabeledRayPrimitive extends PrimitiveBase {
   }
 
   priceAxisViews() {
-    return this.axis;
+    return this.line.axis_label === false ? [] : this.axis;
   }
 
   autoscaleInfo(): AutoscaleInfo {
