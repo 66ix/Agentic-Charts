@@ -18,6 +18,8 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useSta
 
 import KimiPanel from "./KimiPanel";
 
+import { useChartEvents } from "@/hooks/useChartEvents";
+
 import { apiRequest, fetchKimi, fetchKlines } from "@/lib/api";
 import { mergeCandles, readCandles, writeCandles } from "@/lib/candleCache";
 import { AxisMaskPrimitive } from "@/lib/chart/primitives/AxisMaskPrimitive";
@@ -25,6 +27,7 @@ import { LabelResetPrimitive } from "@/lib/chart/primitives/base";
 import { BoxZonePrimitive } from "@/lib/chart/primitives/BoxZonePrimitive";
 import { CountdownPrimitive } from "@/lib/chart/primitives/CountdownPrimitive";
 import { DrawingLayerPrimitive } from "@/lib/chart/primitives/DrawingLayerPrimitive";
+import { EventLinesPrimitive, type EventLine } from "@/lib/chart/primitives/EventLinesPrimitive";
 import { KimiPrimitive } from "@/lib/chart/primitives/KimiPrimitive";
 import { LabeledRayPrimitive } from "@/lib/chart/primitives/LabeledRayPrimitive";
 import { TrendLinePrimitive } from "@/lib/chart/primitives/TrendLinePrimitive";
@@ -295,6 +298,7 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
   const layerRef = useRef<DrawingLayerPrimitive | null>(null);
   const countdownRef = useRef<CountdownPrimitive | null>(null);
   const profileRef = useRef<VolumeProfilePrimitive | null>(null);
+  const eventsRef = useRef<EventLinesPrimitive | null>(null);
   const overlayPrims = useRef<Array<BoxZonePrimitive | LabeledRayPrimitive | TrendLinePrimitive>>([]);
   const kimiPrimRef = useRef<KimiPrimitive | null>(null);
   const markersRef = useRef<{ ai: SeriesMarker<Time>[]; kimi: SeriesMarker<Time>[] }>({ ai: [], kimi: [] });
@@ -319,6 +323,7 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
   const custom = isCustom(props.symbol);
 
   const [legend, setLegend] = useState<Legend | null>(null);
+  const [eventTip, setEventTip] = useState<{ x: number; y: number; item: EventLine } | null>(null);
   const [textInput, setTextInput] = useState<{ x: number; y: number; point: ChartPoint } | null>(null);
   const [loading, setLoading] = useState(true);
   const [plotHeight, setPlotHeight] = useState(0); // container minus time axis, for sub-pane labels
@@ -456,6 +461,8 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
     candles.attachPrimitive(axisMask);
     const profile = new VolumeProfilePrimitive(mapperRef.current);
     candles.attachPrimitive(profile);
+    const events = new EventLinesPrimitive(mapperRef.current, []);
+    candles.attachPrimitive(events);
     const countdown = new CountdownPrimitive(mapperRef.current);
     candles.attachPrimitive(countdown);
 
@@ -479,6 +486,7 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
     layerRef.current = layer;
     countdownRef.current = countdown;
     profileRef.current = profile;
+    eventsRef.current = events;
 
     // Sub-pane labels are placed in px: track the plot height (container minus time axis).
     // The time axis only gets its height on the first paint, hence the size-change hook too.
@@ -500,6 +508,7 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
       layerRef.current = null;
       countdownRef.current = null;
       profileRef.current = null;
+      eventsRef.current = null;
       overlayPrims.current = [];
       kimiPrimRef.current = null;
     };
@@ -1015,6 +1024,12 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
     applyMarkers();
   }, [props.overlays, loading, applyMarkers]);
 
+  // ---------------------------------------------------- economic events and news (Calendar tab → "Show on chart")
+  const eventItems = useChartEvents(custom ? "BTCUSDT" : props.symbol);
+  useEffect(() => {
+    eventsRef.current?.setItems(eventItems);
+  }, [eventItems]);
+
   // ---------------------------------------------------- Kimi Cooked
   const kimiOn = !!props.indicators.kimi && !custom;
   useEffect(() => {
@@ -1150,6 +1165,8 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
         const c = data[data.length - 1];
         setLegend(c ? { c, change: ((c.close - c.open) / c.open) * 100 } : null);
       }
+      const tip = param.point ? eventsRef.current?.itemAt(param.point.x, param.point.y) : null;
+      setEventTip((cur) => (tip ? (cur?.item === tip ? cur : { x: param.point!.x, y: param.point!.y, item: tip }) : null));
       if (!syncingRef.current) p.onCrosshairTime?.(param.point && param.time !== undefined ? (param.time as number) : null);
       if (p.tool === "crosshair" || !pendingRef.current.length || !param.point) return;
       const pt = toPoint(param.point.x, param.point.y);
@@ -1393,6 +1410,14 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
           {paneVals.cvd && <span style={{ color: CVD_COLOR }}>{paneVals.cvd}</span>}
           {cvdError && <span className="text-yellow-300">{cvdError}</span>}
         </PaneLabel>
+      )}
+      {eventTip && (
+        <div
+          className="pointer-events-none absolute z-20 max-w-72 rounded border border-line bg-panel px-2 py-1 text-[11px] text-ink shadow-lg"
+          style={{ left: Math.max(4, eventTip.x - 140), top: eventTip.y + 14 }}
+        >
+          {eventTip.item.title ?? eventTip.item.label}
+        </div>
       )}
       {kimiOn && <KimiPanel data={kimi.data} loading={kimi.loading} error={kimi.error} />}
       {loading && (
