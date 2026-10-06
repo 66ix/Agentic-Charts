@@ -34,6 +34,7 @@ from .schemas import (
     BoxOverlay,
     HorizontalLineOverlay,
     Navigate,
+    is_custom_symbol,
 )
 from .ta_agent import _fmt, analyze, describe, higher_timeframes, rgba
 from .trade_plan import build_plan, plan_overlays
@@ -222,7 +223,11 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
     # timeframe only when the user asked to switch ("H4 supply" on a 1h chart is drawn on the 1h chart).
     symbol = intent.symbol or req.symbol
     tf = intent.timeframe or req.interval
-    moving = symbol != req.symbol or intent.switch_chart
+    # A ratio or index chart is built in the browser: analyse the candles it sent, on its own timeframe only.
+    custom_chart = is_custom_symbol(symbol)
+    if custom_chart:
+        tf = req.interval
+    moving = symbol != req.symbol or (intent.switch_chart and not custom_chart)
     chart_interval = tf if moving else req.interval
     navigate = Navigate(symbol=symbol, interval=chart_interval) if (symbol, chart_interval) != (
         req.symbol, req.interval) else None
@@ -236,10 +241,12 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
     async def candles_for_chart():
         if req.candles and symbol == req.symbol and tf == req.interval and len(req.candles) >= 30:
             return req.candles, "client"
+        if custom_chart:
+            raise ValueError("This chart is still loading; ask again once its candles are on screen.")
         return await market.get_klines(symbol, tf, req.limit)
 
     async def windows() -> dict:
-        if "window_levels" not in features:
+        if "window_levels" not in features or custom_chart:
             return {}
         res = await asyncio.gather(*(market.get_klines(symbol, w, 5) for w in intent.window_timeframes),
                                    return_exceptions=True)
@@ -250,11 +257,12 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
             return []
         return await scan(market, req.watchlist or DEFAULT_WATCHLIST, tf, intent.scan_filter)
 
-    want_deriv = derivatives is not None and bool(req.prompt.strip())
+    want_deriv = derivatives is not None and bool(req.prompt.strip()) and not custom_chart
     # The user's own indicator: read it when they name it or switch it on.
-    want_kimi = "kimi" in intent.indicators_on or bool(KIMI_WORDS.search(req.prompt))
+    want_kimi = ("kimi" in intent.indicators_on or bool(KIMI_WORDS.search(req.prompt))) and not custom_chart
     (candles, source), higher, frames, rows, deriv, kimi_facts = await asyncio.gather(
-        candles_for_chart(), windows(), _confluence_frames(market, symbol, tf, features), scan_rows(),
+        candles_for_chart(), windows(),
+        _confluence_frames(market, symbol, tf, [] if custom_chart else features), scan_rows(),
         derivatives.symbol_snapshot(symbol) if want_deriv else _none(),
         _kimi_facts(kimi, symbol, tf) if want_kimi else _none())
 

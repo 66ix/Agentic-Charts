@@ -94,3 +94,23 @@ def test_intent_schema_is_strict_compatible():
                 check(v)
 
     check(INTENT_SCHEMA)
+
+
+def test_ratio_chart_uses_the_client_candles():
+    """A ratio chart (ETH priced in BTC) has no Binance pair: the agent analyses the candles the browser sent."""
+    import math
+
+    candles = [{"time": 1_700_000_000 + i * 14400, "open": 0.05 + 0.002 * math.sin(i / 5),
+                "high": 0.0505 + 0.002 * math.sin(i / 5), "low": 0.0495 + 0.002 * math.sin(i / 5),
+                "close": 0.05 + 0.002 * math.sin((i + 1) / 5), "volume": 1.0} for i in range(300)]
+    with TestClient(app) as client:
+        r = client.post("/api/agent/analyze", json={"symbol": "ETHUSDT/BTCUSDT", "interval": "4h",
+                                                     "prompt": "key levels", "candles": candles})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["symbol"] == "ETHUSDT/BTCUSDT" and body["navigate"] is None
+        assert body["overlays"] and all(0.04 < (o.get("price") or o.get("price_low")) < 0.06
+                                        for o in body["overlays"] if o["type"] in ("box", "horizontal_line"))
+
+        r = client.post("/api/agent/analyze", json={"symbol": "INDEX:TOTAL2", "interval": "1d", "prompt": "levels"})
+        assert r.status_code == 422 and "loading" in r.json()["detail"]

@@ -290,8 +290,14 @@ class ScanResult(BaseModel):
     data_source: str = "binance"
 
 
+def is_custom_symbol(symbol: str) -> bool:
+    """A ratio of two pairs ("ETHUSDT/BTCUSDT") or a market-cap index ("INDEX:TOTAL2"): charts the browser builds,
+    which have no Binance stream of their own."""
+    return "/" in symbol or symbol.startswith("INDEX:")
+
+
 class AnalyzeRequest(BaseModel):
-    symbol: str = Field("INJUSDT", min_length=2, max_length=20)
+    symbol: str = Field("INJUSDT", min_length=2, max_length=40)
     interval: Interval = "4h"
     prompt: str = Field("", max_length=2000)
     limit: int = Field(500, ge=100, le=1000)
@@ -306,7 +312,13 @@ class AnalyzeRequest(BaseModel):
     @field_validator("symbol")
     @classmethod
     def _norm_symbol(cls, v: str) -> str:
-        return v.replace("/", "").replace("-", "").upper()
+        v = v.strip().upper()
+        if v.startswith("INDEX:"):
+            return v
+        parts = v.split("/")
+        if len(parts) == 2 and all(len(p) > 4 and p.endswith(("USDT", "USDC", "FDUSD")) for p in parts):
+            return v  # a ratio chart of two pairs
+        return v.replace("/", "").replace("-", "")
 
     @field_validator("watchlist")
     @classmethod

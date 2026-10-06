@@ -31,7 +31,8 @@ export class CountdownPrimitive extends PrimitiveBase {
     super(mapper);
     this.axis = [
       {
-        coordinate: () => (this.price === null ? -100 : (this.y(this.price) ?? -100) + 19),
+        coordinate: () => this.at(),
+        fixedCoordinate: () => this.at(), // see LabeledRayPrimitive: keeps the last-price label in place
         text: () => countdownText(this.close),
         textColor: () => "#e5e7eb",
         backColor: () => this.color,
@@ -39,6 +40,11 @@ export class CountdownPrimitive extends PrimitiveBase {
         tickVisible: () => false,
       },
     ];
+  }
+
+  /** Just under the last-price label. */
+  private at(): number {
+    return this.price === null ? -100 : (this.y(this.price) ?? -100) + 19;
   }
 
   paneViews() {

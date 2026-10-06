@@ -106,7 +106,7 @@ function engineNote(r: AnalyzeResponse): string {
 /** What a change to the drawings list did, for the undo button's tooltip. */
 function drawingChange(before: Drawing[], after: Drawing[]): string {
   if (after.length > before.length) return "new drawing";
-  if (after.length < before.length) return after.length === 0 ? "delete all drawings" : "delete drawing";
+  if (after.length < before.length) return before.length - after.length > 1 ? "delete drawings" : "delete drawing";
   return "drawing edit";
 }
 
@@ -452,14 +452,13 @@ export default function ChartWorkspace() {
 
   // Auto-detect levels on load, unless this chart already has saved AI overlays.
   const onDataReady = useCallback(() => {
-    if (layout.autoLevels && overlaysLoaded && convoRef.current.overlays.length === 0 && !isCustom(symbol)) {
-      void runAnalysis("", { silent: true });
-    }
-  }, [layout.autoLevels, overlaysLoaded, runAnalysis, symbol]);
+    if (layout.autoLevels && overlaysLoaded && convoRef.current.overlays.length === 0) void runAnalysis("", { silent: true });
+  }, [layout.autoLevels, overlaysLoaded, runAnalysis]);
 
   // ------------------------------------------------------------------ drawing actions
   const selectedDrawing = drawings.find((d) => d.id === selectedId);
-  const selectedAlert = selectedDrawing ? alertFromDrawing(selectedDrawing) : null;
+  // Alerts watch a Binance pair, so ratio and index charts can't have them.
+  const selectedAlert = selectedDrawing && !isCustom(symbol) ? alertFromDrawing(selectedDrawing) : null;
 
   const deleteSelected = useCallback(() => {
     if (locked) return;

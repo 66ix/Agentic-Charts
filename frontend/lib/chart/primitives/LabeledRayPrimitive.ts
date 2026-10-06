@@ -22,6 +22,9 @@ export class LabeledRayPrimitive extends PrimitiveBase {
     this.axis = [
       {
         coordinate: () => this.y(this.line.price) ?? -100,
+        // Without a fixed coordinate lightweight-charts treats this label as sitting at 0 when it lines labels
+        // up, and pushes the last-price label to the top of the axis.
+        fixedCoordinate: () => this.y(this.line.price) ?? -100,
         text: () => formatPrice(this.line.price),
         textColor: () => "#ffffff",
         backColor: () => this.line.color,
