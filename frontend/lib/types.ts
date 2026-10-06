@@ -104,6 +104,59 @@ export interface AnalysisIntent {
   keep_existing: boolean;
   alert_prices: number[];
   alert_targets: string[];
+  symbol: string | null;
+  switch_chart: boolean;
+  scan_watchlist: boolean;
+  scan_filter: string;
+  trade_plan: "long" | "short" | "auto" | null;
+  indicators_on: string[];
+  indicators_off: string[];
+}
+
+export interface Navigate {
+  symbol: string;
+  interval: Interval;
+}
+
+export interface PlanTarget {
+  price: number;
+  label: string;
+  rr: number;
+}
+
+/** Entry/stop/targets built from detected levels. Mirrors TradePlan in schemas.py. */
+export interface TradePlan {
+  direction: "long" | "short";
+  entry: number;
+  stop: number;
+  targets: PlanTarget[];
+  basis: string;
+  risk_pct: number;
+  notes: string[];
+}
+
+/** One coin's row in a watchlist scan. Mirrors ScanResult in schemas.py. */
+export interface ScanResult {
+  symbol: string;
+  interval: Interval;
+  last_price: number;
+  change_pct: number | null;
+  trend: "up" | "down" | "range";
+  rsi: number | null;
+  nearest_kind: string | null;
+  nearest_low: number | null;
+  nearest_high: number | null;
+  distance_pct: number | null;
+  signals: string[];
+  score: number;
+  data_source: string;
+}
+
+export interface Ticker {
+  symbol: string;
+  price: number;
+  change_pct: number | null;
+  source: string;
 }
 
 export interface ChatTurn {
@@ -120,16 +173,22 @@ export interface AlertSpec {
   label: string;
 }
 
-/** A client-side price alert (stored in localStorage, watched over the kline WebSocket). */
+/** A price alert stored and evaluated by the backend. Mirrors PriceAlert in schemas.py. */
 export interface PriceAlert extends AlertSpec {
   id: string;
   symbol: string;
   armed: boolean;
   created_at: number; // ms
-  triggered_at?: number; // ms
-  triggered_price?: number;
-  /** Where price was last seen relative to the level, so we fire on the transition. */
-  last_side?: "above" | "below" | "inside";
+  triggered_at?: number | null; // ms
+  triggered_price?: number | null;
+  /** Where price was last seen relative to the level, so it fires on the transition. */
+  last_side?: "above" | "below" | "inside" | null;
+}
+
+/** Notification channels configured on the backend. */
+export interface AlertChannels {
+  telegram: boolean;
+  discord: boolean;
 }
 
 export interface AnalyzeResponse {
@@ -151,6 +210,11 @@ export interface AnalyzeResponse {
   engine: Record<string, string>;
   data_source: string;
   alerts: AlertSpec[];
+  navigate: Navigate | null;
+  indicators: Record<string, boolean>;
+  scan: ScanResult[];
+  plan: TradePlan | null;
+  steps: string[];
   generated_at: string;
 }
 
@@ -212,7 +276,19 @@ export interface IndicatorState {
   ema50: boolean;
   psar: boolean;
   volume: boolean;
+  // Added later: states saved before these existed lack the keys, so read them as `!!ind.rsi`.
+  rsi: boolean;
+  macd: boolean;
+  vwap: boolean;
 }
+
+/** One chart in the multi-chart grid. */
+export interface ChartCell {
+  symbol: string;
+  interval: Interval;
+}
+
+export type GridMode = 1 | 2 | 4;
 
 export interface LayoutState {
   logScale: boolean;

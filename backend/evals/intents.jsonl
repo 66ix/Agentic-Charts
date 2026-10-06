@@ -1,0 +1,54 @@
+{"prompt": "Identify the current H4 supply zone and key resistance high", "expect": {"features": ["supply_demand", "window_levels"], "timeframe": "4h", "switch_chart": false, "max_zones": 1}}
+{"prompt": "show daily support and resistance", "expect": {"features": ["support_resistance"], "timeframe": "1d"}}
+{"prompt": "mark swing highs and lows on 15m", "expect": {"features": ["swings"], "timeframe": "15m"}}
+{"prompt": "draw trendlines", "expect": {"features": ["trendlines"], "timeframe": null}}
+{"prompt": "analyse this", "expect": {"features": ["support_resistance"], "keep_existing": false}}
+{"prompt": "Full analysis: zones, windows, trendlines", "expect": {"features": ["support_resistance", "supply_demand", "window_levels", "trendlines"]}}
+{"prompt": "find order blocks", "expect": {"features": ["order_blocks"], "features_none": ["supply_demand"]}}
+{"prompt": "any fair value gaps on the 1h?", "expect": {"features": ["fvg"], "timeframe": "1h"}}
+{"prompt": "show me imbalances", "expect": {"features": ["fvg"]}}
+{"prompt": "were there any liquidity sweeps or stop hunts?", "expect": {"features": ["liquidity_sweeps"]}}
+{"prompt": "is it ranging or forming a triangle?", "expect": {"features": ["patterns"]}}
+{"prompt": "double top?", "expect": {"features": ["patterns"]}}
+{"prompt": "is this a rising wedge", "expect": {"features": ["patterns"], "features_none": ["trendlines"]}}
+{"prompt": "show the volume profile and POC", "expect": {"features": ["volume_profile"]}}
+{"prompt": "switch to daily", "expect": {"timeframe": "1d", "switch_chart": true, "features": [], "symbol": null}}
+{"prompt": "go to the 1h chart", "expect": {"timeframe": "1h", "switch_chart": true}}
+{"prompt": "change the timeframe to weekly", "expect": {"timeframe": "1w", "switch_chart": true}}
+{"prompt": "show me ETH", "expect": {"symbol": "ETHUSDT"}}
+{"prompt": "open SOL on the 4h", "expect": {"symbol": "SOLUSDT", "timeframe": "4h", "switch_chart": true}}
+{"prompt": "pull up the bitcoin daily chart", "expect": {"symbol": "BTCUSDT", "timeframe": "1d", "switch_chart": true}}
+{"prompt": "ETHUSDT supply and demand on 4h", "expect": {"symbol": "ETHUSDT", "features": ["supply_demand"], "timeframe": "4h"}}
+{"prompt": "how does dogecoin look", "expect": {"symbol": "DOGEUSDT"}}
+{"prompt": "show near support", "expect": {"symbol": null, "features": ["support_resistance"]}}
+{"prompt": "what about NEAR?", "expect": {"symbol": "NEARUSDT"}}
+{"prompt": "same on solana", "previous": {"features": ["supply_demand"], "timeframe": "4h"}, "expect": {"symbol": "SOLUSDT", "features": ["supply_demand"]}}
+{"prompt": "same on daily", "previous": {"features": ["supply_demand"], "timeframe": "4h"}, "expect": {"timeframe": "1d", "features": ["supply_demand"], "keep_existing": false}}
+{"prompt": "also show swings", "previous": {"features": ["supply_demand"], "timeframe": "4h"}, "expect": {"features": ["swings"], "features_none": ["supply_demand"], "keep_existing": true}}
+{"prompt": "remove the trendline", "previous": {"features": ["trendlines"]}, "expect": {"remove": ["trendlines"], "features": [], "keep_existing": true}}
+{"prompt": "clear the chart", "expect": {"remove": ["all"]}}
+{"prompt": "remove the order blocks and the fvg", "expect": {"remove": ["order_blocks", "fvg"]}}
+{"prompt": "set entry at 24.2, stop at 23.8 and target at 27", "expect": {"features": [], "custom_levels_count": 3, "trade_plan": null}}
+{"prompt": "draw a line at 25.40", "expect": {"custom_levels_count": 1, "features": []}}
+{"prompt": "box 24 to 25.5 and alert me if price enters it", "expect": {"custom_levels_count": 1, "alert_targets": ["new"]}}
+{"prompt": "alert me at 65k", "expect": {"alert_prices": [65000.0]}}
+{"prompt": "alert me if it enters the supply zone", "expect": {"alert_targets": ["supply"]}}
+{"prompt": "which of my coins are near demand?", "expect": {"scan_watchlist": true, "scan_filter": "near_support", "features": []}}
+{"prompt": "scan my watchlist for oversold coins", "expect": {"scan_watchlist": true, "scan_filter": "oversold"}}
+{"prompt": "any of my coins breaking out?", "expect": {"scan_watchlist": true, "scan_filter": "breakout"}}
+{"prompt": "which coins look bearish on the daily", "expect": {"scan_watchlist": true, "scan_filter": "bearish", "timeframe": "1d"}}
+{"prompt": "screen the watchlist", "expect": {"scan_watchlist": true, "scan_filter": "any"}}
+{"prompt": "give me a long setup", "expect": {"trade_plan": "long"}}
+{"prompt": "short setup on BTC 1h", "expect": {"trade_plan": "short", "symbol": "BTCUSDT", "timeframe": "1h"}}
+{"prompt": "what's the trade here?", "expect": {"trade_plan": "auto"}}
+{"prompt": "where should I buy?", "expect": {"trade_plan": "long"}}
+{"prompt": "give me a long setup and alert me at the entry", "expect": {"trade_plan": "long", "alert_targets": ["entry"]}}
+{"prompt": "add RSI", "expect": {"indicators_on": ["rsi"], "features": []}}
+{"prompt": "show MACD and VWAP", "expect": {"indicators_on": ["macd", "vwap"]}}
+{"prompt": "hide the rsi", "expect": {"indicators_off": ["rsi"], "remove": []}}
+{"prompt": "turn off volume bars and add the 50 ema", "expect": {"indicators_off": ["volume"], "indicators_on": ["ema50"]}}
+{"prompt": "show rsi, remove the trendline", "previous": {"features": ["trendlines"]}, "expect": {"indicators_on": ["rsi"], "remove": ["trendlines"]}}
+{"prompt": "does the daily agree with the 4h demand?", "llm_only": true, "expect": {"features": ["supply_demand"]}}
+{"prompt": "compare this with ETH", "llm_only": true, "expect": {"symbol": "ETHUSDT"}}
+{"prompt": "short setup on btc, alert me at the stop and the targets", "expect": {"trade_plan": "short", "symbol": "BTCUSDT", "alert_targets": ["stop", "targets"]}}
+{"prompt": "remove the take profit lines", "expect": {"remove": ["targets"]}}

@@ -1,10 +1,10 @@
 "use client";
 
 import clsx from "clsx";
-import { Bell, Bot, Camera, ChevronDown, LayoutGrid, LineChart, Maximize2, Search } from "lucide-react";
+import { Bell, Bot, Camera, ChevronDown, Columns2, Grid2x2, LayoutGrid, LineChart, List, Maximize2, Search, Square } from "lucide-react";
 
 import { displaySymbol, formatPct, formatPrice } from "@/lib/format";
-import { TIMEFRAMES, type DataSource, type IndicatorState, type Interval, type LayoutState } from "@/lib/types";
+import { TIMEFRAMES, type DataSource, type GridMode, type IndicatorState, type Interval, type LayoutState } from "@/lib/types";
 
 import { Menu, MenuToggle } from "./Menu";
 
@@ -36,7 +36,17 @@ interface Props {
   onFit(): void;
   onToggleAgent(): void;
   onToggleAlerts(): void;
+  gridMode: GridMode;
+  onGridMode(mode: GridMode): void;
+  watchlistOpen: boolean;
+  onToggleWatchlist(): void;
 }
+
+const GRID_MODES: Array<{ mode: GridMode; label: string; Icon: typeof Square }> = [
+  { mode: 1, label: "One chart", Icon: Square },
+  { mode: 2, label: "Two charts", Icon: Columns2 },
+  { mode: 4, label: "Four charts", Icon: Grid2x2 },
+];
 
 export default function ChartHeader(p: Props) {
   const badge = SOURCE_BADGE[p.source] ?? SOURCE_BADGE.connecting;
@@ -92,7 +102,10 @@ export default function ChartHeader(p: Props) {
         <MenuToggle label="EMA 20" hint="amber" checked={p.indicators.ema20} onChange={(v) => p.onIndicators({ ...p.indicators, ema20: v })} />
         <MenuToggle label="EMA 50" hint="violet" checked={p.indicators.ema50} onChange={(v) => p.onIndicators({ ...p.indicators, ema50: v })} />
         <MenuToggle label="Parabolic SAR" checked={p.indicators.psar} onChange={(v) => p.onIndicators({ ...p.indicators, psar: v })} />
+        <MenuToggle label="VWAP" hint="cyan" checked={!!p.indicators.vwap} onChange={(v) => p.onIndicators({ ...p.indicators, vwap: v })} />
         <MenuToggle label="Volume" checked={p.indicators.volume} onChange={(v) => p.onIndicators({ ...p.indicators, volume: v })} />
+        <MenuToggle label="RSI 14" checked={!!p.indicators.rsi} onChange={(v) => p.onIndicators({ ...p.indicators, rsi: v })} />
+        <MenuToggle label="MACD" hint="12 26 9" checked={!!p.indicators.macd} onChange={(v) => p.onIndicators({ ...p.indicators, macd: v })} />
       </Menu>
 
       <Menu title="Chart layout" trigger={<LayoutGrid className="h-4 w-4" />}>
@@ -100,6 +113,23 @@ export default function ChartHeader(p: Props) {
         <MenuToggle label="Log scale" checked={p.layout.logScale} onChange={(v) => p.onLayout({ ...p.layout, logScale: v })} />
         <MenuToggle label="Grid lines" checked={p.layout.grid} onChange={(v) => p.onLayout({ ...p.layout, grid: v })} />
       </Menu>
+
+      <div className="flex shrink-0 items-center" role="radiogroup" aria-label="Chart grid">
+        {GRID_MODES.map(({ mode, label, Icon }) => (
+          <button
+            key={mode}
+            type="button"
+            role="radio"
+            aria-checked={p.gridMode === mode}
+            title={label}
+            aria-label={label}
+            onClick={() => p.onGridMode(mode)}
+            className={clsx("btn-ghost", p.gridMode === mode && "bg-panel2 text-ink")}
+          >
+            <Icon className="h-4 w-4" />
+          </button>
+        ))}
+      </div>
 
       <button type="button" className="btn-ghost shrink-0" title="Fit chart" aria-label="Fit chart" onClick={p.onFit}>
         <Maximize2 className="h-4 w-4" />
@@ -113,6 +143,16 @@ export default function ChartHeader(p: Props) {
 
       <div className="flex-1" />
 
+      <button
+        type="button"
+        onClick={p.onToggleWatchlist}
+        title="Watchlist"
+        aria-label="Watchlist"
+        aria-pressed={p.watchlistOpen}
+        className={clsx("btn-ghost mr-1 shrink-0", p.watchlistOpen && "bg-panel2 text-ink")}
+      >
+        <List className="h-4 w-4" />
+      </button>
       <button
         type="button"
         onClick={p.onToggleAlerts}

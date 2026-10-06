@@ -4,6 +4,7 @@ import {
   ColorType,
   createChart,
   CrosshairMode,
+  LineStyle,
   PriceScaleMode,
   type IChartApi,
   type ISeriesApi,
@@ -12,9 +13,11 @@ import {
   type Time,
   type UTCTimestamp,
 } from "lightweight-charts";
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState, type ReactNode } from "react";
 
 import { fetchKlines } from "@/lib/api";
+import { mergeCandles, readCandles, writeCandles } from "@/lib/candleCache";
+import { AxisMaskPrimitive } from "@/lib/chart/primitives/AxisMaskPrimitive";
 import { BoxZonePrimitive } from "@/lib/chart/primitives/BoxZonePrimitive";
 import { DrawingLayerPrimitive } from "@/lib/chart/primitives/DrawingLayerPrimitive";
 import { LabeledRayPrimitive } from "@/lib/chart/primitives/LabeledRayPrimitive";
@@ -22,7 +25,7 @@ import { TrendLinePrimitive } from "@/lib/chart/primitives/TrendLinePrimitive";
 import { TimeMapper } from "@/lib/chart/timeMapper";
 import { HISTORY_BARS, WS_URL } from "@/lib/config";
 import { formatCompact, formatPrice, pricePrecision } from "@/lib/format";
-import { ema, parabolicSar } from "@/lib/indicators";
+import { ema, macd, parabolicSar, rsi, vwap, type MacdResult, type Point } from "@/lib/indicators";
 import {
   INTERVAL_SECONDS,
   TOOL_POINTS,
@@ -89,6 +92,75 @@ interface Legend {
   change: number;
 }
 
+// ------------------------------------------------- indicator sub-panes
+// lightweight-charts v4 has no native panes, so RSI and MACD get their own
+// overlay price scales, and each scale is squeezed into a horizontal band of
+// the chart with scaleMargins (fractions of the plot height, from top/bottom).
+const RSI_PERIOD = 14;
+const MACD_PARAMS = [12, 26, 9] as const;
+const VWAP_COLOR = "#22d3ee";
+const RSI_COLOR = "#c084fc";
+const MACD_COLOR = "#3b82f6";
+const SIGNAL_COLOR = "#f97316";
+const HIST_UP = "rgba(34,197,94,0.45)";
+const HIST_DOWN = "rgba(239,68,68,0.45)";
+const SUB_PANE = 0.18; // height of each sub-pane
+const SUB_PAD_TOP = 0.04; // room for the pane label
+const SUB_PAD_BOTTOM = 0.02;
+const VOL_SHARE = 0.18; // volume band at the bottom of the main area
+
+interface PaneLayout {
+  mainBottom: number; // where the main price area ends (fraction of plot height from the top)
+  rsi: number | null; // top of the RSI band, null when off
+  macd: number | null; // top of the MACD band, null when off
+}
+
+/** Main price area on top, then RSI, then MACD, each sub-pane SUB_PANE tall when on. */
+function paneLayout(ind: IndicatorState): PaneLayout {
+  const mainBottom = 1 - SUB_PANE * (Number(!!ind.rsi) + Number(!!ind.macd));
+  const rsiTop = ind.rsi ? mainBottom : null;
+  const macdTop = ind.macd ? mainBottom + (ind.rsi ? SUB_PANE : 0) : null;
+  return { mainBottom, rsi: rsiTop, macd: macdTop };
+}
+
+/** Sets the scaleMargins of every price scale (price, "vol", "rsi", "macd") so the panes stack without overlap. */
+function layoutPanes(chart: IChartApi, ind: IndicatorState): PaneLayout {
+  const l = paneLayout(ind);
+  const below = 1 - l.mainBottom; // height taken by the sub-panes
+  chart.priceScale("right").applyOptions({
+    scaleMargins: { top: 0.08, bottom: below + l.mainBottom * (ind.volume ? 0.22 : 0.06) },
+  });
+  chart.priceScale("vol").applyOptions({ scaleMargins: { top: l.mainBottom * (1 - VOL_SHARE), bottom: below } });
+  const band = (top: number | null) => {
+    const t = top ?? 1 - SUB_PANE; // a hidden pane keeps a valid band; nothing is drawn there
+    return { top: t + SUB_PAD_TOP, bottom: Math.max(0, 1 - t - SUB_PANE) + SUB_PAD_BOTTOM };
+  };
+  chart.priceScale("rsi").applyOptions({ scaleMargins: band(l.rsi) });
+  chart.priceScale("macd").applyOptions({ scaleMargins: band(l.macd) });
+  return l;
+}
+
+/** Indicator values span ~1e-8 (MACD on micro-priced coins) to 1e4 (MACD on BTC daily). */
+function formatIndicator(v: number): string {
+  const a = Math.abs(v);
+  if (a >= 1000) return v.toFixed(0);
+  if (a >= 1) return v.toFixed(2);
+  return a === 0 ? "0" : v.toPrecision(3);
+}
+
+interface PaneValues {
+  rsi: string | null;
+  macd: { macd: string; signal: string; hist: string; up: boolean } | null;
+}
+
+function PaneLabel({ top, children }: { top: number; children: ReactNode }) {
+  return (
+    <div className="pointer-events-none absolute inset-x-0 z-10 border-t border-line" style={{ top: Math.round(top) }}>
+      <div className="flex gap-2 px-3 pt-0.5 font-mono text-[10px] leading-4 text-mute">{children}</div>
+    </div>
+  );
+}
+
 const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart(props, ref) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -97,6 +169,11 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
   const ema20Ref = useRef<ISeriesApi<"Line"> | null>(null);
   const ema50Ref = useRef<ISeriesApi<"Line"> | null>(null);
   const psarRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const vwapRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const rsiRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const macdRef = useRef<{ hist: ISeriesApi<"Histogram">; line: ISeriesApi<"Line">; signal: ISeriesApi<"Line"> } | null>(null);
+  const filledRef = useRef(new Set<object>()); // indicator series currently holding data
+  const axisMaskRef = useRef<AxisMaskPrimitive | null>(null);
   const mapperRef = useRef(new TimeMapper(INTERVAL_SECONDS[props.interval]));
   const layerRef = useRef<DrawingLayerPrimitive | null>(null);
   const overlayPrims = useRef<Array<BoxZonePrimitive | LabeledRayPrimitive | TrendLinePrimitive>>([]);
@@ -114,6 +191,8 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
   const [legend, setLegend] = useState<Legend | null>(null);
   const [textInput, setTextInput] = useState<{ x: number; y: number; point: ChartPoint } | null>(null);
   const [loading, setLoading] = useState(true);
+  const [plotHeight, setPlotHeight] = useState(0); // container minus time axis, for sub-pane labels
+  const [paneVals, setPaneVals] = useState<PaneValues>({ rsi: null, macd: null });
 
   useImperativeHandle(ref, () => ({
     screenshot: () => chartRef.current?.takeScreenshot() ?? null,
@@ -166,6 +245,32 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
       pointMarkersVisible: true,
       pointMarkersRadius: 1.5,
     });
+    const vwapLine = chart.addLineSeries({ ...lineOpts, color: VWAP_COLOR });
+    // Sub-pane series sit on their own overlay scales; their last values and the
+    // RSI 70/30 levels are labelled on the right axis, inside their band.
+    const rsiLine = chart.addLineSeries({
+      ...lineOpts,
+      color: RSI_COLOR,
+      priceScaleId: "rsi",
+      lastValueVisible: true,
+      priceFormat: { type: "price", precision: 1, minMove: 0.1 },
+      autoscaleInfoProvider: () => ({ priceRange: { minValue: 0, maxValue: 100 } }),
+    });
+    for (const price of [70, 30]) {
+      rsiLine.createPriceLine({ price, color: "#6b7280", lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: true, title: "" });
+    }
+    const macdFormat = { type: "custom" as const, formatter: formatIndicator, minMove: 1e-10 };
+    const macdHist = chart.addHistogramSeries({
+      priceScaleId: "macd",
+      priceFormat: macdFormat,
+      lastValueVisible: false,
+      priceLineVisible: false,
+    });
+    const macdLine = chart.addLineSeries({ ...lineOpts, color: MACD_COLOR, priceScaleId: "macd", priceFormat: macdFormat, lastValueVisible: true });
+    const macdSignal = chart.addLineSeries({ ...lineOpts, color: SIGNAL_COLOR, priceScaleId: "macd", priceFormat: macdFormat, lastValueVisible: true });
+
+    const axisMask = new AxisMaskPrimitive("#0b0e14"); // hides price ticks inside the sub-panes
+    candles.attachPrimitive(axisMask);
 
     const layer = new DrawingLayerPrimitive(mapperRef.current);
     candles.attachPrimitive(layer);
@@ -176,9 +281,24 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
     ema20Ref.current = e20;
     ema50Ref.current = e50;
     psarRef.current = psar;
+    vwapRef.current = vwapLine;
+    rsiRef.current = rsiLine;
+    macdRef.current = { hist: macdHist, line: macdLine, signal: macdSignal };
+    axisMaskRef.current = axisMask;
     layerRef.current = layer;
 
+    // Sub-pane labels are placed in px: track the plot height (container minus time axis).
+    // The time axis only gets its height on the first paint, hence the size-change hook too.
+    const measure = () => setPlotHeight(Math.max(0, el.clientHeight - chart.timeScale().height()));
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    chart.timeScale().subscribeSizeChange(measure);
+    const filled = filledRef.current;
+
     return () => {
+      ro.disconnect();
+      chart.timeScale().unsubscribeSizeChange(measure);
+      filled.clear();
       chart.remove();
       chartRef.current = null;
       candleRef.current = null;
@@ -214,20 +334,53 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
     const data = candlesRef.current;
     if (!data.length) return;
     const ind = propsRef.current.indicators;
-    const pairs: Array<[ISeriesApi<"Line"> | null, boolean, () => { time: number; value: number }[]]> = [
+    const filled = filledRef.current;
+    // Computed lazily (and once) so indicators that are off cost nothing.
+    let rsiPts: Point[] | undefined;
+    let macdRes: MacdResult | undefined;
+    const getRsi = () => (rsiPts ??= rsi(data, RSI_PERIOD));
+    const getMacd = () => (macdRes ??= macd(data, ...MACD_PARAMS));
+    const histColor = (v: number) => (v >= 0 ? HIST_UP : HIST_DOWN);
+    const m = macdRef.current;
+    const feeds: Array<[ISeriesApi<"Line" | "Histogram"> | null, boolean, () => Point[], ((v: number) => string)?]> = [
       [ema20Ref.current, ind.ema20, () => ema(data, 20)],
       [ema50Ref.current, ind.ema50, () => ema(data, 50)],
       [psarRef.current, ind.psar, () => parabolicSar(data)],
+      [vwapRef.current, !!ind.vwap, () => vwap(data, INTERVAL_SECONDS[propsRef.current.interval])],
+      [rsiRef.current, !!ind.rsi, getRsi],
+      [m?.hist ?? null, !!ind.macd, () => getMacd().hist, histColor],
+      [m?.line ?? null, !!ind.macd, () => getMacd().macd],
+      [m?.signal ?? null, !!ind.macd, () => getMacd().signal],
     ];
-    for (const [series, on, compute] of pairs) {
-      if (!series || !on) continue;
-      const pts = compute();
-      if (full) series.setData(pts.map((p) => ({ time: toTime(p.time), value: p.value })));
-      else if (pts.length) {
-        const last = pts[pts.length - 1];
-        series.update({ time: toTime(last.time), value: last.value });
+    for (const [series, on, compute, color] of feeds) {
+      if (!series) continue;
+      if (!on) {
+        // Drop data of switched-off series on a full refresh so stale points from
+        // another symbol or timeframe don't linger on the shared time scale.
+        if (full && filled.delete(series)) series.setData([]);
+        continue;
       }
+      const pts = compute();
+      const toData = (p: Point) => ({ time: toTime(p.time), value: p.value, ...(color && { color: color(p.value) }) });
+      if (full) {
+        series.setData(pts.map(toData));
+        filled.add(series);
+      } else if (pts.length) series.update(toData(pts[pts.length - 1]));
     }
+
+    const lastOf = (pts: Point[]) => pts[pts.length - 1]?.value;
+    const r = ind.rsi ? lastOf(getRsi()) : undefined;
+    const mv = ind.macd ? lastOf(getMacd().macd) : undefined;
+    const sv = ind.macd ? lastOf(getMacd().signal) : undefined;
+    const hv = ind.macd ? lastOf(getMacd().hist) : undefined;
+    const next: PaneValues = {
+      rsi: r === undefined ? null : r.toFixed(1),
+      macd:
+        mv === undefined || sv === undefined || hv === undefined
+          ? null
+          : { macd: formatIndicator(mv), signal: formatIndicator(sv), hist: formatIndicator(hv), up: hv >= 0 },
+    };
+    setPaneVals((prev) => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
   }, []);
 
   const emitFeed = useCallback((source: DataSource, force = false) => {
@@ -304,47 +457,82 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
       };
     };
 
-    const load = () =>
-      fetchKlines(symbol, interval, HISTORY_BARS, abort.signal)
-        .then((res) => {
-          if (disposed) return;
-          const data = res.candles;
-          candlesRef.current = data;
-          const lastBar = data[data.length - 1];
-          setLegend(lastBar ? { c: lastBar, change: ((lastBar.close - lastBar.open) / lastBar.open) * 100 } : null);
-          mapperRef.current.setData(data.map((d) => d.time), INTERVAL_SECONDS[interval]);
-          const precision = pricePrecision(data[data.length - 1]?.close ?? 1);
-          candleRef.current?.applyOptions({
-            priceFormat: { type: "price", precision, minMove: 1 / 10 ** precision },
-          });
-          candleRef.current?.setData(
-            data.map((c) => ({ time: toTime(c.time), open: c.open, high: c.high, low: c.low, close: c.close })),
-          );
-          volumeRef.current?.setData(
-            data.map((c) => ({
-              time: toTime(c.time),
-              value: c.volume,
-              color: c.close >= c.open ? "rgba(34,197,94,0.35)" : "rgba(239,68,68,0.35)",
-            })),
-          );
-          refreshIndicators(true);
-          chartRef.current
-            ?.timeScale()
-            .setVisibleLogicalRange({ from: Math.max(0, data.length - 160), to: data.length + 10 });
-          source = res.source as DataSource;
-          emitFeed(source, true);
-          setLoading(false);
-          propsRef.current.onError?.(null);
-          propsRef.current.onDataReady?.(data);
-          connect();
-        })
-        .catch((err: Error) => {
-          if (disposed || err.name === "AbortError") return;
-          setLoading(false);
-          propsRef.current.onFeed({ price: NaN, open24: null, source: "offline" });
-          propsRef.current.onError?.(err.message);
-          retryTimer = setTimeout(load, 5000); // keep retrying until the API is up
+    const load = async () => {
+      // Puts a full dataset on the chart: the cached bars at once, then the network's.
+      const render = (data: Candle[], src: DataSource) => {
+        candlesRef.current = data;
+        const lastBar = data[data.length - 1];
+        setLegend(lastBar ? { c: lastBar, change: ((lastBar.close - lastBar.open) / lastBar.open) * 100 } : null);
+        mapperRef.current.setData(data.map((d) => d.time), INTERVAL_SECONDS[interval]);
+        const precision = pricePrecision(data[data.length - 1]?.close ?? 1);
+        candleRef.current?.applyOptions({
+          priceFormat: { type: "price", precision, minMove: 1 / 10 ** precision },
         });
+        candleRef.current?.setData(
+          data.map((c) => ({ time: toTime(c.time), open: c.open, high: c.high, low: c.low, close: c.close })),
+        );
+        volumeRef.current?.setData(
+          data.map((c) => ({
+            time: toTime(c.time),
+            value: c.volume,
+            color: c.close >= c.open ? "rgba(34,197,94,0.35)" : "rgba(239,68,68,0.35)",
+          })),
+        );
+        refreshIndicators(true);
+        chartRef.current
+          ?.timeScale()
+          .setVisibleLogicalRange({ from: Math.max(0, data.length - 160), to: data.length + 10 });
+        source = src;
+        emitFeed(source, true);
+        setLoading(false);
+      };
+
+      try {
+        // A retry keeps what an earlier attempt drew from the cache rather than re-reading it.
+        let cached: Candle[] | null = candlesRef.current.length ? candlesRef.current : null;
+        if (!cached) {
+          const hit = await readCandles(symbol, interval);
+          if (disposed) return;
+          const last = hit?.candles[hit.candles.length - 1];
+          const gap = last ? Date.now() / 1000 - last.time : Infinity;
+          // Only real Binance bars, and only when the missing ones fit in one request.
+          if (hit?.source === "binance" && gap < HISTORY_BARS * INTERVAL_SECONDS[interval]) {
+            cached = hit.candles;
+            render(cached, "connecting");
+          }
+        }
+
+        let data: Candle[] | null = null;
+        let src = "";
+        if (cached) {
+          // Ask only for the bars from the newest cached one on (it may have been open) and merge them in.
+          const since = cached[cached.length - 1].time;
+          const delta = await fetchKlines(symbol, interval, HISTORY_BARS, abort.signal, since);
+          const first = delta.candles[0]?.time;
+          if (delta.source === "binance" && first !== undefined && first <= since) {
+            data = mergeCandles(cached, delta.candles);
+            src = delta.source;
+          }
+        }
+        if (!data) {
+          const res = await fetchKlines(symbol, interval, HISTORY_BARS, abort.signal);
+          data = res.candles;
+          src = res.source;
+        }
+        if (disposed) return;
+        render(data, src as DataSource);
+        propsRef.current.onError?.(null);
+        propsRef.current.onDataReady?.(data);
+        connect();
+        if (src === "binance") void writeCandles(symbol, interval, data, src);
+      } catch (err) {
+        if (disposed || (err as Error).name === "AbortError") return;
+        setLoading(false);
+        propsRef.current.onFeed({ price: NaN, open24: null, source: "offline" });
+        propsRef.current.onError?.((err as Error).message);
+        retryTimer = setTimeout(load, 5000); // keep retrying until the API is up
+      }
+    };
     load();
 
     return () => {
@@ -368,7 +556,11 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
     ema50Ref.current?.applyOptions({ visible: ema50 });
     psarRef.current?.applyOptions({ visible: psar });
     volumeRef.current?.applyOptions({ visible: volume });
-    candleRef.current?.priceScale().applyOptions({ scaleMargins: { top: 0.08, bottom: volume ? 0.22 : 0.06 } });
+    vwapRef.current?.applyOptions({ visible: !!props.indicators.vwap });
+    rsiRef.current?.applyOptions({ visible: !!props.indicators.rsi });
+    const m = macdRef.current;
+    for (const s of m ? [m.hist, m.line, m.signal] : []) s.applyOptions({ visible: !!props.indicators.macd });
+    if (chartRef.current) axisMaskRef.current?.setFrom(layoutPanes(chartRef.current, props.indicators).mainBottom);
     refreshIndicators(true);
   }, [props.indicators, refreshIndicators]);
 
@@ -591,6 +783,7 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
   };
 
   const lg = legend?.c;
+  const panes = paneLayout(props.indicators);
   return (
     <div className="relative h-full w-full">
       <div ref={containerRef} className={`h-full w-full ${props.tool !== "crosshair" ? "cursor-crosshair" : ""}`} />
@@ -610,6 +803,24 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
             Vol <span className="text-ink">{formatCompact(lg.volume)}</span>
           </span>
         </div>
+      )}
+      {plotHeight > 0 && panes.rsi !== null && (
+        <PaneLabel top={panes.rsi * plotHeight}>
+          <span>RSI {RSI_PERIOD}</span>
+          {paneVals.rsi && <span style={{ color: RSI_COLOR }}>{paneVals.rsi}</span>}
+        </PaneLabel>
+      )}
+      {plotHeight > 0 && panes.macd !== null && (
+        <PaneLabel top={panes.macd * plotHeight}>
+          <span>MACD {MACD_PARAMS.join(" ")}</span>
+          {paneVals.macd && (
+            <>
+              <span style={{ color: MACD_COLOR }}>{paneVals.macd.macd}</span>
+              <span style={{ color: SIGNAL_COLOR }}>{paneVals.macd.signal}</span>
+              <span className={paneVals.macd.up ? "text-up" : "text-down"}>{paneVals.macd.hist}</span>
+            </>
+          )}
+        </PaneLabel>
       )}
       {loading && (
         <div className="pointer-events-none absolute inset-0 z-10 grid place-items-center text-sm text-mute">

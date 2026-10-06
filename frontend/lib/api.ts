@@ -1,5 +1,18 @@
 import { API_URL } from "./config";
-import type { AnalysisIntent, AnalyzeResponse, Candle, ChatTurn, Interval, MarketMetrics, Overlay } from "./types";
+import type {
+  AlertChannels,
+  AlertSpec,
+  AnalysisIntent,
+  AnalyzeResponse,
+  Candle,
+  ChatTurn,
+  Interval,
+  MarketMetrics,
+  Overlay,
+  PriceAlert,
+  ScanResult,
+  Ticker,
+} from "./types";
 
 export class ApiError extends Error {
   constructor(message: string, readonly status: number) {
@@ -41,8 +54,10 @@ async function request<T>(path: string, init?: RequestInit & { timeoutMs?: numbe
   }
 }
 
-export function fetchKlines(symbol: string, interval: Interval, limit: number, signal?: AbortSignal) {
+/** `since` (UNIX seconds) returns only the bars opening at or after it, for topping up a cached series. */
+export function fetchKlines(symbol: string, interval: Interval, limit: number, signal?: AbortSignal, since?: number) {
   const q = new URLSearchParams({ symbol, interval, limit: String(limit) });
+  if (since !== undefined) q.set("since", String(since));
   return request<{ symbol: string; interval: Interval; source: string; candles: Candle[] }>(`/api/klines?${q}`, {
     signal,
   });
@@ -65,6 +80,7 @@ export function analyze(
     history?: ChatTurn[];
     overlays?: Overlay[];
     previous_intent?: AnalysisIntent | null;
+    watchlist?: string[];
   },
   signal?: AbortSignal,
 ) {
@@ -74,4 +90,41 @@ export function analyze(
     signal,
     timeoutMs: 90_000, // local LLMs can be slow on first load
   });
+}
+
+export function fetchTickers(symbols: string[], signal?: AbortSignal) {
+  const q = new URLSearchParams({ symbols: symbols.join(",") });
+  return request<{ tickers: Ticker[] }>(`/api/tickers?${q}`, { signal });
+}
+
+export function fetchWatchlistScan(symbols: string[], interval: Interval, signal?: AbortSignal) {
+  const q = new URLSearchParams({ symbols: symbols.join(","), interval });
+  return request<ScanResult[]>(`/api/watchlist/scan?${q}`, { signal, timeoutMs: 60_000 });
+}
+
+// ------------------------------------------------------------- alerts --
+
+export function fetchAlerts(signal?: AbortSignal) {
+  return request<{ alerts: PriceAlert[]; channels: AlertChannels }>("/api/alerts", { signal });
+}
+
+export function createAlerts(symbol: string, alerts: AlertSpec[]) {
+  return request<{ alerts: PriceAlert[] }>("/api/alerts", { method: "POST", body: JSON.stringify({ symbol, alerts }) });
+}
+
+export function deleteAlert(id: string) {
+  return request<{ ok: boolean }>(`/api/alerts/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export function rearmAlert(id: string) {
+  return request<{ alert: PriceAlert }>(`/api/alerts/${encodeURIComponent(id)}/rearm`, { method: "POST" });
+}
+
+export function clearTriggeredAlerts() {
+  return request<{ removed: number }>("/api/alerts/clear-triggered", { method: "POST" });
+}
+
+/** Sends a test message to every configured channel → which ones delivered it. */
+export function testAlertChannels() {
+  return request<{ results: Partial<Record<keyof AlertChannels, boolean>> }>("/api/alerts/test", { method: "POST" });
 }

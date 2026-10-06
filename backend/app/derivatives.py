@@ -88,6 +88,20 @@ def sum_open_interest(histories: list[list[dict]]) -> OpenInterest:
     return OpenInterest(usd=now_total, change_pct=change, symbols=used)
 
 
+def parse_symbol_snapshot(premium: dict | None, oi_rows: list[dict] | None) -> dict | None:
+    """premiumIndex + 1h openInterestHist rows → {funding_rate_pct, oi_usd, oi_change_24h_pct}."""
+    out: dict = {}
+    if isinstance(premium, dict) and premium.get("lastFundingRate") not in (None, ""):
+        out["funding_rate_pct"] = round(float(premium["lastFundingRate"]) * 100, 4)
+    if isinstance(oi_rows, list) and oi_rows:
+        rows = sorted(oi_rows, key=lambda r: int(r["timestamp"]))
+        now = float(rows[-1]["sumOpenInterestValue"])
+        out["oi_usd"] = round(now)
+        if len(rows) >= 25 and float(rows[0]["sumOpenInterestValue"]) > 0:
+            out["oi_change_24h_pct"] = round((now / float(rows[0]["sumOpenInterestValue"]) - 1) * 100, 2)
+    return out or None
+
+
 class LiquidationTracker:
     """Rolling 24h window of liquidation notionals, persisted to a small JSON file."""
 
@@ -145,6 +159,7 @@ class DerivativesService:
         self._client = httpx.AsyncClient(timeout=httpx.Timeout(8.0, connect=4.0),
                                          headers={"User-Agent": "agentic-charts/1.0"})
         self._oi_cache: tuple[float, OpenInterest] | None = None
+        self._symbol_cache: dict[str, tuple[float, dict | None]] = {}
         self._task: asyncio.Task | None = None
 
     def start(self) -> None:
@@ -185,6 +200,29 @@ class DerivativesService:
         oi = sum_open_interest(histories)
         self._oi_cache = (time.monotonic() + 300, oi)  # 1h buckets: no point refreshing faster
         return oi
+
+    # ----------------------------------------------------------- per symbol
+    async def symbol_snapshot(self, symbol: str) -> dict | None:
+        """Funding rate and 24h open-interest change for one perpetual, or None when unavailable
+        (spot-only coin, Binance futures blocked, or derivatives off). Cached for a minute."""
+        if not self.enabled:
+            return None
+        cached = self._symbol_cache.get(symbol)
+        if cached and cached[0] > time.monotonic():
+            return cached[1]
+        base = self.s.binance_futures_rest_url
+        out: dict | None = None
+        try:
+            prem, hist = await asyncio.gather(
+                self._client.get(f"{base}/fapi/v1/premiumIndex", params={"symbol": symbol}, timeout=4.0),
+                self._client.get(f"{base}/futures/data/openInterestHist",
+                                 params={"symbol": symbol, "period": "1h", "limit": 25}, timeout=4.0))
+            out = parse_symbol_snapshot(prem.json() if prem.status_code == 200 else None,
+                                        hist.json() if hist.status_code == 200 else None)
+        except (httpx.HTTPError, ValueError) as exc:
+            log.info("Derivatives for %s unavailable: %s", symbol, exc)
+        self._symbol_cache[symbol] = (time.monotonic() + 60, out)
+        return out
 
     # --------------------------------------------------------- liquidations
     def liquidation_snapshot(self) -> Liquidations | None:

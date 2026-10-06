@@ -12,6 +12,14 @@ the agent draws is grounded in the data:
 * window highs / lows     — high/low of the last *completed* higher-timeframe bar
 * trendlines              — lines through the two latest swing highs / lows
 * market structure        — HH / HL / LH / LL labels on swing points
+* HTF confluence          — zones re-detected on the next two timeframes up;
+                            overlapping zones score higher (`mark_confluence`)
+* sweeps, FVGs, order blocks, ranges, triangles, double tops/bottoms
+                          — `patterns.py`
+* RSI, divergences, structure breaks, volume profile
+                          — `indicators.py`
+
+Trade plans built from these levels live in `trade_plan.py`.
 
 All functions are pure and operate on a DataFrame with columns
 time, open, high, low, close, volume (oldest → newest).
@@ -27,6 +35,8 @@ import pandas as pd
 from scipy.cluster.hierarchy import fcluster, linkage
 from scipy.signal import find_peaks
 
+from .indicators import rsi, rsi_divergence, structure_breaks, volume_profile, volume_stats
+from .patterns import detect_double, detect_range, detect_triangle, fair_value_gaps, liquidity_sweeps, order_blocks
 from .schemas import (
     AnalysisIntent,
     AnalysisStats,
@@ -35,6 +45,7 @@ from .schemas import (
     MarkerOverlay,
     TrendlineOverlay,
 )
+from .trade_plan import Level
 
 TF_LABEL = {
     "1m": "M1", "5m": "M5", "15m": "M15", "30m": "M30", "1h": "H1", "3h": "H3",
@@ -333,6 +344,42 @@ def window_levels(df: pd.DataFrame, tf: str) -> dict[str, float | int] | None:
             "tf": tf}
 
 
+# ------------------------------------------------------------- confluence
+
+HTF_LADDER: tuple[str, ...] = ("1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w", "1M")
+
+
+def higher_timeframes(tf: str, n: int = 2) -> list[str]:
+    """The next `n` timeframes up the ladder (3h sits between 1h and 4h)."""
+    if tf == "3h":
+        return ["4h", "1d"][:n]
+    if tf not in HTF_LADDER:
+        return []
+    i = HTF_LADDER.index(tf)
+    return list(HTF_LADDER[i + 1:i + 1 + n])
+
+
+def htf_zones(df: pd.DataFrame) -> list[Zone]:
+    """S/R and supply/demand zones on a higher-timeframe frame, for confluence checks."""
+    df = df.reset_index(drop=True)
+    if len(df) < 30:
+        return []
+    atr_s = atr(df)
+    a = float(atr_s.iloc[-1])
+    highs, lows = find_swings(df, a)
+    return cluster_levels(highs + lows, a, float(df["close"].iloc[-1]), len(df)) + supply_demand_zones(df, atr_s)
+
+
+def mark_confluence(zones: list[Zone], frames: dict[str, list[Zone]]) -> None:
+    """Tag zones that overlap a zone on a higher timeframe and raise their score."""
+    for z in zones:
+        hits = [TF_LABEL.get(tf, tf) for tf, hz in frames.items()
+                if any(min(z.price_high, h.price_high) > max(z.price_low, h.price_low) for h in hz)]
+        if hits:
+            z.meta["htf"] = hits
+            z.score = min(1.0, z.score + 0.15 * len(hits))
+
+
 # --------------------------------------------------------------- engine
 
 
@@ -341,6 +388,10 @@ class AnalysisResult:
     overlays: list
     stats: AnalysisStats
     facts: dict
+    levels: list[Level] = field(default_factory=list)  # everything detected, for trade plans and scans
+    swing_highs: list[float] = field(default_factory=list)
+    swing_lows: list[float] = field(default_factory=list)
+    bias: str | None = None  # direction of the latest structure break
 
 
 def _fmt(p: float) -> str:
@@ -351,13 +402,32 @@ def _fmt(p: float) -> str:
     return f"{p:.6f}".rstrip("0").rstrip(".")
 
 
+def _zone_fact(z: Zone, last: float, atr_v: float, count_key: str, count: int) -> dict:
+    inside = z.price_low <= last <= z.price_high
+    edge = z.price_low if z.price_low > last else z.price_high
+    out = {"low": z.price_low, "high": z.price_high, count_key: count,
+           "distance_atr": 0.0 if inside else round(abs(edge - last) / atr_v, 2), "inside": inside}
+    if z.meta.get("htf"):
+        out["htf_confluence"] = z.meta["htf"]
+    return out
+
+
+def _zone_label(tfl: str, z: Zone, suffix: str = "") -> str:
+    htf = z.meta.get("htf")
+    return f"{tfl} {z.kind.title()}{suffix}" + (f" + {'/'.join(htf)}" if htf else "")
+
+
 def analyze(
     df: pd.DataFrame,
     intent: AnalysisIntent,
     tf: str,
     higher_tf: dict[str, pd.DataFrame] | None = None,
+    confluence: dict[str, pd.DataFrame] | None = None,
 ) -> AnalysisResult:
-    """Run the requested detectors and return overlays + stats + facts for narration."""
+    """Run the requested detectors and return overlays + stats + facts for narration.
+
+    `higher_tf` holds the frames for window levels; `confluence` the higher-timeframe frames whose zones
+    are checked against this timeframe's zones."""
     if len(df) < 30:
         raise ValueError("Need at least 30 candles for analysis")
     df = df.reset_index(drop=True)
@@ -365,6 +435,7 @@ def analyze(
     atr_s = atr(df)
     atr_v = float(atr_s.iloc[-1])
     last = float(df["close"].iloc[-1])
+    last_time = int(df["time"].iloc[-1])
     ema_f = ema(df["close"], 20)
     ema_s = ema(df["close"], 50)
     highs, lows = find_swings(df, atr_v)
@@ -379,37 +450,63 @@ def analyze(
 
     overlays: list = []
     facts: dict = {"timeframe": tfl, "last_price": last, "trend": trend, "atr": atr_v}
+    levels: list[Level] = []
     feats = set(intent.features)
     sr_zones: list[Zone] = []
+    htf = {wtf: htf_zones(frame) for wtf, frame in (confluence or {}).items()}
+
+    # Momentum, structure and volume are cheap and always useful context for the answer.
+    rsi_s = rsi(df["close"])
+    rsi_v = float(rsi_s.iloc[-1]) if not np.isnan(rsi_s.iloc[-1]) else None
+    momentum: dict = {"rsi": round(rsi_v, 1) if rsi_v is not None else None}
+    div = rsi_divergence(df, rsi_s, highs, lows)
+    if div:
+        momentum["divergence"] = f"{div['kind']} {div['type']} ({_fmt(div['price1'])} → {_fmt(div['price2'])})"
+    facts["momentum"] = momentum
+    breaks = structure_breaks(df, highs, lows)
+    bias = None
+    if breaks:
+        b = breaks[-1]
+        bias = b["direction"]
+        facts["last_structure_break"] = {"type": b["type"], "direction": b["direction"], "level": b["level"],
+                                         "bars_ago": len(df) - 1 - b["idx"]}
+    facts["volume"] = volume_stats(df)
 
     if "support_resistance" in feats:
-        sr_zones = pick_nearest(cluster_levels(highs + lows, atr_v, last, len(df)), last, intent.max_zones)
+        zones = cluster_levels(highs + lows, atr_v, last, len(df))
+        mark_confluence(zones, htf)
+        sr_zones = pick_nearest(zones, last, intent.max_zones)
         for z in sr_zones:
             color = RED if z.kind == "resistance" else GREEN
+            label = _zone_label(tfl, z)
             overlays.append(BoxOverlay(
-                label=f"{tfl} {z.kind.title()}", kind=z.kind, price_high=z.price_high, price_low=z.price_low,
+                label=label, kind=z.kind, price_high=z.price_high, price_low=z.price_low,
                 color=rgba(color, 0.22), border_color=rgba(color, 0.7), time_start=z.first_time,
                 strength=round(min(z.score, 1.0), 2),
             ))
-        facts["resistance"] = sorted([(z.price_low, z.price_high, z.touches) for z in sr_zones
-                                      if z.kind == "resistance"])
-        facts["support"] = sorted([(z.price_low, z.price_high, z.touches) for z in sr_zones
-                                   if z.kind == "support"], reverse=True)
+            levels.append(Level(z.kind, z.price_low, z.price_high, label, z.score))
+        facts["resistance"] = sorted([_zone_fact(z, last, atr_v, "touches", z.touches) for z in sr_zones
+                                      if z.kind == "resistance"], key=lambda f: f["low"])
+        facts["support"] = sorted([_zone_fact(z, last, atr_v, "touches", z.touches) for z in sr_zones
+                                   if z.kind == "support"], key=lambda f: -f["high"])
 
     if "supply_demand" in feats:
         sd = supply_demand_zones(df, atr_s)
         sd = [z for z in sd if not any(z.overlap_ratio(s) > 0.5 for s in sr_zones)]
+        mark_confluence(sd, htf)
         sd = pick_nearest(sd, last, intent.max_zones)
         for z in sd:
             color = ORANGE if z.kind == "supply" else TEAL
+            label = _zone_label(tfl, z, " (fresh)" if z.tests == 0 else "")
             overlays.append(BoxOverlay(
-                label=f"{tfl} {z.kind.title()}" + (" (fresh)" if z.tests == 0 else ""), kind=z.kind,
-                price_high=z.price_high, price_low=z.price_low, color=rgba(color, 0.18),
+                label=label, kind=z.kind, price_high=z.price_high, price_low=z.price_low, color=rgba(color, 0.18),
                 border_color=rgba(color, 0.65), time_start=z.first_time, strength=round(min(z.score, 1.0), 2),
             ))
-        facts["supply"] = sorted([(z.price_low, z.price_high, z.tests) for z in sd if z.kind == "supply"])
-        facts["demand"] = sorted([(z.price_low, z.price_high, z.tests) for z in sd if z.kind == "demand"],
-                                 reverse=True)
+            levels.append(Level(z.kind, z.price_low, z.price_high, label, z.score))
+        facts["supply"] = sorted([_zone_fact(z, last, atr_v, "tests", z.tests) for z in sd if z.kind == "supply"],
+                                 key=lambda f: f["low"])
+        facts["demand"] = sorted([_zone_fact(z, last, atr_v, "tests", z.tests) for z in sd if z.kind == "demand"],
+                                 key=lambda f: -f["high"])
 
     if "window_levels" in feats:
         facts["windows"] = []
@@ -423,7 +520,9 @@ def analyze(
                                                   color=RED, line_style=style, time_start=lv["time"]))
             overlays.append(HorizontalLineOverlay(label=f"{wl} window low", kind="window_low", price=lv["low"],
                                                   color=GREEN, line_style=style, time_start=lv["time"]))
-            facts["windows"].append((wl, lv["high"], lv["low"]))
+            levels.append(Level("window_high", lv["high"], lv["high"], f"{wl} window high", 0.5))
+            levels.append(Level("window_low", lv["low"], lv["low"], f"{wl} window low", 0.5))
+            facts["windows"].append({"tf": wl, "high": lv["high"], "low": lv["low"]})
 
     if "swings" in feats:
         for s in sorted(highs[-6:] + lows[-6:], key=lambda s: s.idx):
@@ -449,6 +548,92 @@ def analyze(
                     color=color, label=f"{tfl} {name}", kind="trendline",
                 ))
 
+    if "liquidity_sweeps" in feats:
+        sweeps = liquidity_sweeps(df, highs, lows)[:3]
+        for sw in sweeps:
+            bearish = sw["direction"] == "bearish"
+            color = RED if bearish else GREEN
+            overlays.append(HorizontalLineOverlay(
+                label=f"{tfl} swept {'high' if bearish else 'low'}", kind="sweep", price=sw["level"], color=color,
+                line_style="dotted", time_start=sw["swing_time"]))
+            overlays.append(MarkerOverlay(
+                time=sw["time"], price=sw["extreme"], position="above" if bearish else "below",
+                shape="arrowDown" if bearish else "arrowUp", label="Sweep", color=color, kind="sweep"))
+        facts["sweeps"] = [{"direction": sw["direction"], "side": sw["side"], "level": sw["level"],
+                            "bars_ago": len(df) - 1 - int(df.index[df["time"] == sw["time"]][0])} for sw in sweeps]
+
+    if "fvg" in feats:
+        gaps = fair_value_gaps(df, atr_v)
+        gaps = ([g for g in gaps if g["direction"] == "bullish"][:intent.max_zones]
+                + [g for g in gaps if g["direction"] == "bearish"][:intent.max_zones])
+        for g in gaps:
+            color = "#22d3ee" if g["direction"] == "bullish" else "#f472b6"
+            kind = f"fvg_{g['direction']}"
+            label = f"{tfl} {g['direction'].title()} FVG" + (" (part filled)" if g.get("filled_pct", 0) > 0 else "")
+            overlays.append(BoxOverlay(label=label, kind=kind, price_low=g["price_low"], price_high=g["price_high"],
+                                       color=rgba(color, 0.14), border_color=rgba(color, 0.55), time_start=g["time"]))
+            levels.append(Level(kind, g["price_low"], g["price_high"], label, 0.45))
+        facts["fvg"] = [{"direction": g["direction"], "low": g["price_low"], "high": g["price_high"],
+                         "filled_pct": g.get("filled_pct", 0)} for g in gaps]
+
+    if "order_blocks" in feats:
+        obs = order_blocks(df, highs, lows, atr_s)
+        obs = ([o for o in obs if o["direction"] == "bullish"][:intent.max_zones]
+               + [o for o in obs if o["direction"] == "bearish"][:intent.max_zones])
+        for o in obs:
+            color = "#60a5fa" if o["direction"] == "bullish" else "#e879f9"
+            kind = f"ob_{o['direction']}"
+            label = f"{tfl} {o['direction'].title()} OB"
+            overlays.append(BoxOverlay(label=label, kind=kind, price_low=o["price_low"], price_high=o["price_high"],
+                                       color=rgba(color, 0.16), border_color=rgba(color, 0.6), time_start=o["time"]))
+            levels.append(Level(kind, o["price_low"], o["price_high"], label, 0.6 / (1 + o.get("tests", 0))))
+        facts["order_blocks"] = [{"direction": o["direction"], "low": o["price_low"], "high": o["price_high"],
+                                  "tests": o.get("tests", 0)} for o in obs]
+
+    if "patterns" in feats:
+        found: list[str] = []
+        rng = detect_range(df, atr_v, min_bars=30)
+        if rng:
+            overlays.append(BoxOverlay(label=f"{tfl} Range ({rng['bars']} bars)", kind="pattern_range",
+                                       price_low=rng["price_low"], price_high=rng["price_high"],
+                                       color=rgba(SLATE, 0.10), border_color=rgba(SLATE, 0.6),
+                                       time_start=rng["time_start"], time_end=rng["time_end"]))
+            levels.append(Level("support", rng["price_low"], rng["price_low"], "Range low", 0.5))
+            levels.append(Level("resistance", rng["price_high"], rng["price_high"], "Range high", 0.5))
+            found.append(f"range {_fmt(rng['price_low'])}–{_fmt(rng['price_high'])} for {rng['bars']} bars")
+        tri = detect_triangle(df, highs, lows, atr_v)
+        if tri:
+            name = tri["type"].replace("_", " ")
+            for side, color in (("upper", RED), ("lower", GREEN)):
+                ln = tri[side]
+                overlays.append(TrendlineOverlay(time1=ln["time1"], price1=ln["price1"], time2=ln["time2"],
+                                                 price2=ln["price2"], extend_right=True, color=color,
+                                                 label=f"{tfl} {name.capitalize()}", kind="pattern_line"))
+            found.append(name + (f", broken {tri['broken']}" if tri.get("broken") else ""))
+        dbl = detect_double(df, highs, lows, atr_v)
+        if dbl:
+            top = dbl["type"] == "double_top"
+            for n, (t, p) in enumerate(((dbl["time1"], dbl["price1"]), (dbl["time2"], dbl["price2"])), 1):
+                overlays.append(MarkerOverlay(time=t, price=p, position="above" if top else "below",
+                                              shape="circle", label=f"{'Top' if top else 'Bottom'} {n}",
+                                              color=RED if top else GREEN, kind="pattern_point"))
+            overlays.append(HorizontalLineOverlay(label="Double top neckline" if top else "Double bottom neckline",
+                                                  kind="pattern_neckline", price=dbl["neckline"], color=SLATE,
+                                                  line_style="dashed", time_start=dbl["time1"]))
+            found.append(f"{dbl['type'].replace('_', ' ')} with neckline {_fmt(dbl['neckline'])}"
+                         + (" (confirmed)" if dbl["confirmed"] else " (not confirmed)"))
+        facts["patterns"] = found
+
+    if "volume_profile" in feats:
+        vp = volume_profile(df)
+        if vp:
+            for key, color, style, width in (("poc", "#facc15", "solid", 2), ("vah", SLATE, "dashed", 1),
+                                             ("val", SLATE, "dashed", 1)):
+                overlays.append(HorizontalLineOverlay(label=f"{tfl} {key.upper()}", kind=key, price=vp[key],
+                                                      color=color, line_style=style, line_width=width))
+                levels.append(Level(key, vp[key], vp[key], key.upper(), 0.5))
+            facts["volume_profile"] = vp
+
     for i, ov in enumerate(overlays):
         ov.id = f"ai-{ov.type}-{i}"
         for name in ("price", "price_high", "price_low", "price1", "price2"):
@@ -459,11 +644,22 @@ def analyze(
         last_price=last, atr=atr_v, trend=trend, ema_fast=float(ema_f.iloc[-1]), ema_slow=float(ema_s.iloc[-1]),
         swing_highs=len(highs), swing_lows=len(lows),
     )
-    return AnalysisResult(overlays, stats, facts)
+    facts["last_bar_time"] = last_time
+    return AnalysisResult(overlays, stats, facts, levels, [s.price for s in highs], [s.price for s in lows], bias)
 
 
 def _touches(n: int) -> str:
     return f"{n} touch" if n == 1 else f"{n} touches"
+
+
+def _where(z: dict) -> str:
+    if z.get("inside"):
+        return ", price inside"
+    return f", {z['distance_atr']} ATR away" if z.get("distance_atr") is not None else ""
+
+
+def _htf(z: dict) -> str:
+    return f", lines up with {'/'.join(z['htf_confluence'])}" if z.get("htf_confluence") else ""
 
 
 def describe(facts: dict, symbol: str) -> str:
@@ -471,26 +667,75 @@ def describe(facts: dict, symbol: str) -> str:
     tf = facts["timeframe"]
     lines = [f"{symbol} on {tf}: last {_fmt(facts['last_price'])}, trend {facts['trend']} "
              f"(ATR {_fmt(facts['atr'])})."]
+    lines += facts.get("navigation", [])
     if facts.get("resistance"):
-        lo, hi, t = facts["resistance"][0]
-        lines.append(f"Nearest {tf} resistance {_fmt(lo)}–{_fmt(hi)} ({_touches(t)}).")
+        z = facts["resistance"][0]
+        lines.append(f"Nearest {tf} resistance {_fmt(z['low'])}–{_fmt(z['high'])} ({_touches(z['touches'])}"
+                     f"{_where(z)}{_htf(z)}).")
     if facts.get("support"):
-        lo, hi, t = facts["support"][0]
-        lines.append(f"Nearest {tf} support {_fmt(lo)}–{_fmt(hi)} ({_touches(t)}).")
+        z = facts["support"][0]
+        lines.append(f"Nearest {tf} support {_fmt(z['low'])}–{_fmt(z['high'])} ({_touches(z['touches'])}"
+                     f"{_where(z)}{_htf(z)}).")
     if "supply" in facts and not facts["supply"]:
         lines.append(f"No unmitigated {tf} supply zone above price right now.")
     if "demand" in facts and not facts["demand"]:
         lines.append(f"No unmitigated {tf} demand zone below price right now.")
-    if facts.get("supply"):
-        lo, hi, t = facts["supply"][0]
-        lines.append(f"Unmitigated supply {_fmt(lo)}–{_fmt(hi)}" + (" (untested)." if t == 0 else f" (tested {t}x)."))
-    if facts.get("demand"):
-        lo, hi, t = facts["demand"][0]
-        lines.append(f"Unmitigated demand {_fmt(lo)}–{_fmt(hi)}" + (" (untested)." if t == 0 else f" (tested {t}x)."))
-    for wl, hi, lo in facts.get("windows", []):
-        lines.append(f"{wl} window: high {_fmt(hi)}, low {_fmt(lo)}.")
+    for key in ("supply", "demand"):
+        if facts.get(key):
+            z = facts[key][0]
+            tested = " (untested" if z["tests"] == 0 else f" (tested {z['tests']}x"
+            lines.append(f"Unmitigated {key} {_fmt(z['low'])}–{_fmt(z['high'])}{tested}{_where(z)}{_htf(z)}).")
+    for w in facts.get("windows", []):
+        lines.append(f"{w['tf']} window: high {_fmt(w['high'])}, low {_fmt(w['low'])}.")
     if facts.get("structure"):
         lines.append("Recent structure: " + " → ".join(facts["structure"]) + ".")
+    br = facts.get("last_structure_break")
+    if br and (facts.get("structure") is not None or br["bars_ago"] <= 20):
+        lines.append(f"Last break: {br['direction']} {br['type']} through {_fmt(br['level'])}, "
+                     f"{br['bars_ago']} bars ago.")
+    mom = facts.get("momentum") or {}
+    if mom.get("divergence"):
+        lines.append(f"RSI {mom.get('rsi')} with {mom['divergence']} divergence.")
+    elif mom.get("rsi") is not None and (mom["rsi"] >= 70 or mom["rsi"] <= 30):
+        lines.append(f"RSI {mom['rsi']} ({'overbought' if mom['rsi'] >= 70 else 'oversold'}).")
+    for sw in facts.get("sweeps", [])[:2]:
+        lines.append(f"{sw['direction'].title()} sweep of {_fmt(sw['level'])} {sw['bars_ago']} bars ago.")
+    if "sweeps" in facts and not facts["sweeps"]:
+        lines.append("No liquidity sweeps in the last 30 bars.")
+    for g in facts.get("fvg", [])[:2]:
+        lines.append(f"Unfilled {g['direction']} FVG {_fmt(g['low'])}–{_fmt(g['high'])}.")
+    for o in facts.get("order_blocks", [])[:2]:
+        lines.append(f"{o['direction'].title()} order block {_fmt(o['low'])}–{_fmt(o['high'])}.")
+    if facts.get("patterns"):
+        lines.append("Patterns: " + "; ".join(facts["patterns"]) + ".")
+    elif "patterns" in facts:
+        lines.append("No range, triangle, wedge or double top/bottom right now.")
+    if facts.get("volume_profile"):
+        vp = facts["volume_profile"]
+        lines.append(f"Volume profile: POC {_fmt(vp['poc'])}, value area {_fmt(vp['val'])}–{_fmt(vp['vah'])}.")
+    if facts.get("derivatives"):
+        d = facts["derivatives"]
+        bits = []
+        if d.get("funding_rate_pct") is not None:
+            bits.append(f"funding {d['funding_rate_pct']}%")
+        if d.get("oi_change_24h_pct") is not None:
+            bits.append(f"open interest {d['oi_change_24h_pct']:+}% in 24h")
+        if bits:
+            lines.append("Futures: " + ", ".join(bits) + ".")
+    if facts.get("plan"):
+        p = facts["plan"]
+        tgts = ", ".join(f"{_fmt(t['price'])} ({t['rr']}R)" for t in p["targets"])
+        lines.append(f"{p['direction'].title()} plan from {p['basis']}: entry {_fmt(p['entry'])}, "
+                     f"stop {_fmt(p['stop'])}, targets {tgts}.")
+        lines += p.get("notes", [])
+    elif "plan" in facts:
+        lines.append("No clean trade plan here: no zone or swing to put a stop behind.")
+    if facts.get("scan"):
+        best = facts["scan"][:3]
+        lines.append("Watchlist: " + "; ".join(f"{r['symbol']} " + (", ".join(r["signals"][:2]) or r["trend"])
+                                               for r in best) + ".")
+    elif "scan" in facts:
+        lines.append("Couldn't scan the watchlist.")
     lines += facts.get("actions", [])
     if len(lines) == 1:
         lines.append("No qualifying levels found for this request.")
