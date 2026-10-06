@@ -1,11 +1,15 @@
 # Agentic Charts
 
 Real-time crypto charting with AI-detected market structure. A dark, TradingView-style
-workspace: live Binance candles, a global market header, a manual drawing toolbar, and a
-chart agent that turns plain-English requests ("Identify the current H4 supply zone and key
-resistance high") into zones, levels and lines drawn on the chart.
+workspace: live Binance candles, a global market header, a manual drawing toolbar, a watchlist,
+up to four charts side by side, and a chart agent that turns plain-English requests ("Identify the
+current H4 supply zone and key resistance high", "open ETH on the daily", "which of my coins is
+sitting in demand?", "give me a long setup") into zones, levels, trade plans and alerts drawn on
+the chart.
 
 ![Agent overlays](docs/screenshot-agent.png)
+
+![Four charts with a long plan and the watchlist](docs/screenshot-grid.png)
 
 ## How it works
 
@@ -16,15 +20,19 @@ resistance high") into zones, levels and lines drawn on the chart.
  │ AgenticChart ── GET /api/klines ──────────┼──────────▶ │ market_data.py     Binance REST     │
  │              ── WS  /ws/klines ───────────┼──────────▶ │ stream_hub.py      Binance WS fan-out│
  │ AgentPanel ──── POST /api/agent/analyze ──┼──────────▶ │ agent.py                            │
- │   ▲ overlays JSON → custom primitives     │            │   llm.py      prompt → intent (JSON)│
- │   BoxZone / LabeledRay / TrendLine        │            │   ta_agent.py SciPy detectors       │
- │ DrawingLayer (user drawings)              │            │   llm.py      facts → summary       │
+ │   ▲ overlays JSON → custom primitives     │            │   agent_loop.py tools → intent      │
+ │   BoxZone / LabeledRay / TrendLine        │            │   ta_agent.py   SciPy detectors     │
+ │ DrawingLayer (user drawings)              │            │   trade_plan.py entry/stop/targets  │
+ │ Watchlist ───── GET /api/watchlist/scan ──┼──────────▶ │ scanner.py      zones per coin      │
+ │ AlertsPanel ─── WS  /ws/alerts ───────────┼──────────▶ │ alerts.py       Telegram / Discord  │
  └───────────────────────────────────────────┘            └─────────────────────────────────────┘
 ```
 
-The LLM never invents prices. It only chooses which detectors to run (via a JSON-schema
-structured output) and phrases the result. Every level comes from the SciPy engine, and
-the whole pipeline works with no LLM at all (a keyword parser and templated summary take over).
+The LLM never invents prices. It plans: it can look at any coin or timeframe, scan the watchlist
+and read funding and open interest through read-only tools, then calls `draw_on_chart` with a
+JSON-schema plan saying which detectors to run, which chart to show and what to alert on. Every
+level, zone and trade plan price comes from the SciPy engine, and the whole pipeline works with no
+LLM at all (a keyword parser and templated summary take over).
 
 ## Project structure
 
@@ -33,10 +41,18 @@ agentic-charts/
 ├── backend/
 │   ├── app/
 │   │   ├── main.py            FastAPI app: REST + WebSocket routes
-│   │   ├── ta_agent.py        Swings, S/R clustering, supply/demand, window levels, trendlines
+│   │   ├── ta_agent.py        Swings, S/R clustering, supply/demand, window levels, trendlines, HTF confluence
+│   │   ├── indicators.py      RSI, MACD, divergences, structure breaks (BOS/CHoCH), volume profile, VWAP
+│   │   ├── patterns.py        Liquidity sweeps, fair value gaps, order blocks, ranges, triangles, double tops
+│   │   ├── trade_plan.py      Entry / stop / targets built from detected levels
 │   │   ├── agent.py           prompt → intent → data → detectors → summary
+│   │   ├── agent_loop.py      Tool-calling planner (look at any chart, scan watchlist, read funding/OI)
 │   │   ├── llm.py             Ollama / OpenAI-compatible / Anthropic structured outputs + rule fallback
+│   │   ├── symbols.py         "eth", "solana", "$NEAR" → Binance pairs
+│   │   ├── scanner.py         Watchlist scan and tickers
 │   │   ├── market_data.py     Binance klines (paginated, 3h resampled), synthetic fallback
+│   │   ├── candle_store.py    SQLite candle cache (only new bars are downloaded)
+│   │   ├── ratelimit.py       Per-client rate limits and a daily agent cap
 │   │   ├── stream_hub.py      Shared upstream Binance kline streams, fan-out to browsers
 │   │   ├── market_metrics.py  Header metrics (CoinGecko, Fear & Greed, Binance futures)
 │   │   ├── derivatives.py     Open interest + rolling 24h liquidations from Binance futures
@@ -44,13 +60,18 @@ agentic-charts/
 │   │   ├── schemas.py         Pydantic models (overlay contract)
 │   │   └── config.py          Env configuration
 │   ├── tests/                 pytest: detectors, API, conversation, payloads (mocked) + opt-in live checks
+│   ├── evals/                 Prompt → plan cases for the rule parser and any LLM provider
+│   ├── Dockerfile
 │   ├── requirements.txt
 │   └── .env.example
 ├── frontend/
 │   ├── app/                   layout, page, globals.css
 │   ├── components/
-│   │   ├── AgenticChart.tsx   Chart engine, live feed, overlays, drawing interaction
-│   │   ├── ChartWorkspace.tsx State + wiring (tools, indicators, agent, persistence)
+│   │   ├── AgenticChart.tsx   Chart engine, live feed, overlays, drawing interaction, RSI/MACD panes
+│   │   ├── ChartWorkspace.tsx State + wiring (grid, watchlist, tools, indicators, agent, persistence)
+│   │   ├── ChartCell.tsx      One chart in the 1/2/4 grid
+│   │   ├── Watchlist.tsx      Watchlist sidebar with prices and nearest-zone badges
+│   │   ├── AlertsPanel.tsx    Alerts list and notification channel status
 │   │   ├── MarketHeader.tsx   Global metrics bar
 │   │   ├── ChartHeader.tsx    Ticker, timeframes, indicators, layout, search, screenshot
 │   │   ├── DrawingToolbar.tsx Left toolbar
@@ -59,8 +80,10 @@ agentic-charts/
 │   ├── lib/chart/
 │   │   ├── primitives/        BoxZone, LabeledRay, TrendLine, DrawingLayer (LWC series primitives)
 │   │   └── timeMapper.ts      Time ↔ x mapping for points between/beyond bars
-│   ├── lib/                   api client, types, indicators (EMA, Parabolic SAR), formatting
+│   ├── lib/                   api client, types, indicators (EMA, SAR, RSI, MACD, VWAP), IndexedDB candle cache
+│   ├── Dockerfile
 │   └── package.json
+├── docker-compose.yml
 └── README.md
 ```
 
@@ -125,8 +148,13 @@ ANTHROPIC_API_KEY=sk-ant-...
 ANTHROPIC_MODEL=claude-sonnet-5-5
 ```
 
-If the model is unreachable or returns invalid JSON, the backend logs a warning, falls back to
-the rule parser for that request, and skips the LLM for 30 seconds.
+By default (`AGENT_MODE=tools`) the model gets up to `AGENT_MAX_STEPS` tool calls to look at other
+timeframes or coins, scan the watchlist or check funding and open interest before it decides what to
+draw; the agent panel lists those steps. Anthropic and OpenAI models force a tool call; Ollama models
+need tool support (llama3.1, qwen2.5, mistral-nemo). `AGENT_MODE=single` skips the tools and asks for
+the plan in one call. If the model is unreachable, has no tool support or returns invalid JSON, the
+backend logs a warning, falls back to the single-call plan and then the rule parser, and skips the LLM
+for 30 seconds.
 
 ## Configuration
 
@@ -140,6 +168,12 @@ the rule parser for that request, and skips the LLM for 30 seconds.
 | `DERIVATIVES` | `on` | Live open interest and liquidations from Binance futures (`off` to mock them) |
 | `OI_TOP_SYMBOLS` | `40` | Open interest sums this many top USDT perpetuals by volume |
 | `LLM_PROVIDER` | `ollama` | `ollama`, `openai`, `anthropic`, `none` |
+| `AGENT_MODE` | `tools` | `tools` = the model may look at other charts before drawing, `single` = one planning call |
+| `AGENT_MAX_STEPS` | `4` | Tool calls allowed per request before the model must draw |
+| `AGENT_RATE_LIMIT` | `20/minute` | Agent requests per client (`0` = off); also `/second`, `/hour`, `/day` |
+| `API_RATE_LIMIT` | `300/minute` | All other `/api/` requests per client (`0` = off) |
+| `AGENT_DAILY_LIMIT` | `0` | Agent requests per day for the whole server, to cap LLM spend (`0` = off) |
+| `TRUST_PROXY` | `0` | Number of reverse proxies in front of the API; the rate limiter then reads the client IP from `X-Forwarded-For` |
 | `CORS_ORIGINS` | `http://localhost:3000,...` | Comma-separated frontend origins |
 | `METRICS_CACHE_SECONDS` | `60` | Header metrics cache |
 | `ALERTS_STORE` | `backend/.cache/alerts.json` | Where price alerts are saved; `memory` = not saved |
@@ -195,7 +229,9 @@ they are uploaded once the first time the app connects to a backend that has non
 | GET | `/api/klines?symbol=INJUSDT&interval=4h&limit=500` | Historical candles (`3h` is resampled from `1h`); `&since=<unix s>` returns only bars from that time on |
 | GET | `/api/symbols` | Tradable USDT spot pairs |
 | GET | `/api/market/metrics` | Header metrics, each tagged `live` or `mock` |
-| POST | `/api/agent/analyze` | `{symbol, interval, prompt, candles?, history?, overlays?, previous_intent?}` → overlays + summary + alerts |
+| GET | `/api/tickers?symbols=BTCUSDT,ETHUSDT` | Last price and 24h change per symbol |
+| GET | `/api/watchlist/scan?symbols=BTCUSDT,ETHUSDT&interval=4h` | Per symbol: trend, RSI, nearest zone and its distance, signals (cached 60s) |
+| POST | `/api/agent/analyze` | `{symbol, interval, prompt, candles?, history?, overlays?, previous_intent?, watchlist?}` → overlays, summary, alerts, and when relevant `navigate` (chart to switch to), `plan`, `scan`, `indicators`, `steps` |
 | GET | `/api/alerts` | `{alerts, channels: {telegram, discord}}` |
 | POST | `/api/alerts` | `{symbol, alerts: [{kind: "cross"\|"zone", price?, price_low?, price_high?, label}]}` → created alerts |
 | DELETE | `/api/alerts/{id}` | Delete an alert |
@@ -226,7 +262,7 @@ curl -s localhost:8000/api/agent/analyze -H 'content-type: application/json' \
 ```
 
 Overlay types: `box`, `horizontal_line`, `trendline`, `marker` (see `backend/app/schemas.py` and
-`frontend/lib/types.ts`).
+`frontend/lib/types.ts`). Requests over the rate limit get HTTP 429 with a `Retry-After` header.
 
 ## Detection methods (`ta_agent.py`)
 
@@ -235,13 +271,23 @@ Overlay types: `box`, `horizontal_line`, `trendline`, `marker` (see `backend/app
 - **Supply/demand zones:** a base of up to 3 small-bodied candles followed by an impulse ≥ 1.6 ATR. Zones a later candle has closed through are discarded; untested ones are marked "fresh".
 - **Window highs/lows:** the high and low of the last completed H4 / D1 (or requested) candle, drawn as rays from that candle.
 - **Trendlines:** through the two latest swing highs (if falling) and swing lows (if rising), extended right.
+- **Higher-timeframe confluence:** S/R and supply/demand zones are also detected on the next two timeframes up (H4 → D1, W1). A zone overlapping one of them scores higher and is labelled, e.g. "H4 Demand + D1/W1".
+- **Liquidity sweeps:** a wick through a swing high/low that closes back inside (`patterns.py`).
+- **Fair value gaps:** three-candle gaps that price has not filled yet. **Order blocks:** the last opposite candle before an impulse that broke structure, while unmitigated.
+- **Patterns:** ranges (a flat box that held for 30+ bars), triangles and wedges (lines fitted through swings), double tops/bottoms with their neckline.
+- **Volume profile:** point of control and the 70% value area over the loaded bars.
+- **Momentum and structure (facts for the agent):** RSI with regular divergences, the last break of structure or change of character, relative volume, funding and open interest.
+- **Trade plans (`trade_plan.py`):** the entry is the best-scored support or demand zone below price for a long (resistance or supply above for a short), the stop sits 0.25 ATR beyond it, and targets are the next opposing levels or swing extremes at least 0.8R away. R-multiples are used only when no level lies beyond price. The plan notes when it runs against the trend or the entry is far away.
 
 ## Using the app
 
-- **Agent:** press `/` or click **Agent**, then type a request or tap a suggestion. Mention a timeframe ("H4", "daily") to analyse it regardless of the chart's timeframe. The agent remembers the conversation and what it drew, so you can follow up: "also show swings", "same on daily", "remove the trendlines", "clear the chart", or give your own prices ("line at 25.4", "zone 24 to 25", "entry at 24.2, stop at 23.8, target at 27"). **Clear** removes AI overlays and the trash icon starts a new conversation. AI overlays are saved per symbol and timeframe and the conversation per symbol, so a reload keeps them. With **Auto AI levels** on (layout menu), key levels are drawn when a chart has none saved.
-- **Alerts:** ask the agent ("alert me at 65k", "alert me if price enters the supply zone", "alert me on these levels"), or select a horizontal ray or rectangle and press the bell in the toolbar. Alerts show as amber dotted lines, are listed under the bell in the header, and fire once with a sound, a toast and a desktop notification (if allowed). The backend checks them against live 1m prices, so they also fire with the app closed; set up [Telegram or Discord](#alerts) to hear about those.
+- **Agent:** press `/` or click **Agent**, then type a request or tap a suggestion. Mention a timeframe ("H4", "daily") to draw its zones on the current chart; say "switch to the daily" or "open ETH on the 1h" to move the chart. Naming another coin ("what about SOL?", "$NEAR supply zones") always opens it. "Which of my coins are near support?" or "scan my watchlist" scans every watchlist coin and lists them; click a row to open it. "Give me a long setup" (or short, or just "setup") draws an entry, stop and targets from detected levels, with a card showing risk and R multiples. "Show RSI" or "hide the MACD" toggles indicators. The agent remembers the conversation and what it drew, so you can follow up: "also show swings", "same on daily", "remove the trendlines", "clear the chart", or give your own prices ("line at 25.4", "zone 24 to 25", "entry at 24.2, stop at 23.8, target at 27"). **Clear** removes AI overlays and the trash icon starts a new conversation. AI overlays are saved per symbol and timeframe and the conversation per symbol, so a reload keeps them. With **Auto AI levels** on (layout menu), key levels are drawn when a chart has none saved.
+- **Alerts:** ask the agent ("alert me at 65k", "alert me if price enters the supply zone", "alert me on these levels", "long setup and alert me at the entry"), or select a horizontal ray or rectangle and press the bell in the toolbar. Alerts show as amber dotted lines, are listed under the bell in the header, and fire once with a sound, a toast and a desktop notification (if allowed). The backend checks them against live 1m prices, so they also fire with the app closed; set up [Telegram or Discord](#alerts) to hear about those.
 - **Drawing tools:** Trendline `T`, Horizontal ray `H`, Fibonacci `F`, Rectangle `R`, Text `N`, XABCD pattern `P`, Measure `M`. Click to place points; `Esc` cancels. In crosshair mode, click a drawing to select it, drag to move it, `Delete` to remove it. Magnet snaps to the nearest OHLC price; Lock freezes drawings. Drawings are saved per symbol in the browser.
-- **Indicators:** EMA 20, EMA 50, Parabolic SAR, Volume. **Layout:** log scale, grid, auto levels. The camera button saves a PNG.
+- **Watchlist:** the list icon in the chart header opens it. Each coin shows its price, 24h change and the nearest zone on the active timeframe ("In demand", "Supply 0.8%"). Click a coin to open it, **+** to add one; the scan button asks the agent to rank them.
+- **Multiple charts:** the layout buttons in the chart header show 1, 2 or 4 charts. Click a chart to make it active (blue header); the timeframe buttons, toolbar and agent act on the active chart. Each chart keeps its own coin, timeframe and overlays.
+- **Indicators:** EMA 20, EMA 50, Parabolic SAR, VWAP, Volume, and RSI 14 and MACD in panes under the price. **Layout:** log scale, grid, auto levels. The camera button saves a PNG.
+- **Caching:** candles are kept in the browser (IndexedDB) and on the backend (SQLite), so opening the app draws the chart from cache at once and only the bars since the last visit are downloaded.
 
 ## Tests
 
@@ -253,13 +299,58 @@ cd frontend && npm run typecheck && npm run lint && npm run build
 cd backend && LIVE_TESTS=1 pytest tests/test_live.py -v -rs
 ```
 
+The agent's planning is checked against `backend/evals/intents.jsonl`, about 50 prompts with the plan
+each should produce (features, timeframe, coin, chart switch, alerts, trade plan):
+
+```bash
+cd backend
+python -m evals.run          # the rule parser; CI runs this through pytest
+python -m evals.run --llm    # the configured LLM_PROVIDER, to compare models or prompt changes
+```
+
 GitHub Actions runs the unit tests, lint, typecheck and build on every push and PR
 (`.github/workflows/ci.yml`), and the live checks weekly and on demand
 (`live-smoke.yml`). Binance futures blocks GitHub's US runners, so those checks skip there.
 
+## Deploy
+
+Any small VPS with Docker works (1 vCPU and 1 GB RAM is enough without Ollama). Pick a region where
+Binance answers: spot data has a US mirror, but open interest and liquidations come from Binance
+futures, which blocks US IPs, so a host in Europe or Asia keeps those live.
+
+1. Point a domain at the server, e.g. `charts.example.com`.
+2. On the server:
+
+   ```bash
+   git clone https://github.com/66ix/Agentic-Charts.git && cd Agentic-Charts
+   cp backend/.env.example backend/.env      # set LLM_PROVIDER and keys, TELEGRAM_* / DISCORD_WEBHOOK_URL
+   PUBLIC_ORIGIN=https://charts.example.com PUBLIC_API_URL=https://charts.example.com \
+     docker compose up -d --build
+   ```
+
+3. Put [Caddy](https://caddyserver.com) in front for HTTPS and one domain. `/etc/caddy/Caddyfile`:
+
+   ```
+   charts.example.com {
+       @api path /api/* /ws/*
+       reverse_proxy @api 127.0.0.1:8000
+       reverse_proxy 127.0.0.1:3000
+   }
+   ```
+
+   Then `sudo systemctl reload caddy`. Caddy gets the certificate by itself.
+
+The compose file binds both containers to `127.0.0.1` so only the proxy reaches them, and sets
+`TRUST_PROXY=1` so rate limits apply per visitor. The candle cache, liquidation history and alerts live
+in the `backend-cache` volume and survive rebuilds. `NEXT_PUBLIC_API_URL` is baked into the frontend
+at build time, so rebuild (`docker compose up -d --build`) after changing `PUBLIC_API_URL`. For a local
+model, add `--profile ollama` and run `docker compose exec ollama ollama pull llama3.1:8b`; a cloud
+provider is lighter on a small VPS. A public deployment with a cloud LLM should keep
+`AGENT_DAILY_LIMIT` (500 by default in compose) so nobody can run up the bill.
+
 ## Production notes
 
-- Run the API with several workers behind a reverse proxy that supports WebSockets, e.g. `uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2` (each worker keeps its own Binance upstreams).
-- Set `CORS_ORIGINS` and `NEXT_PUBLIC_API_URL` / `NEXT_PUBLIC_WS_URL` to your real domains (`wss://` behind TLS).
+- Run the API as a single worker (the Docker image does). Alerts and the Binance streams run inside the process, so a second worker would fire every alert twice.
+- Put it behind a reverse proxy that supports WebSockets, and set `CORS_ORIGINS` and `NEXT_PUBLIC_API_URL` / `NEXT_PUBLIC_WS_URL` to your real domains (`wss://` behind TLS).
 - Open interest and liquidations cover Binance only. For cross-exchange totals, plug a CoinGlass (or similar) key into `market_metrics.py`.
 - Nothing here is financial advice; detections are heuristics.

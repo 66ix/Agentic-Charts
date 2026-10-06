@@ -71,19 +71,22 @@ class DailyCap:
 
 class RateLimitMiddleware:
     def __init__(self, app: ASGIApp, agent_rate: str = "20/minute", api_rate: str = "300/minute",
-                 agent_daily: int = 0, trust_proxy: bool = False) -> None:
+                 agent_daily: int = 0, trust_proxy: int = 0) -> None:
         self.app = app
         agent, api = parse_rate(agent_rate), parse_rate(api_rate)
         self.agent = RateLimiter(*agent) if agent else None
         self.api = RateLimiter(*api) if api else None
         self.daily = DailyCap(agent_daily) if agent_daily > 0 else None
-        self.trust_proxy = trust_proxy
+        self.trust_proxy = int(trust_proxy)  # number of reverse proxies in front of the API
 
     def _client(self, scope: Scope) -> str:
         if self.trust_proxy:
-            for name, value in scope.get("headers", []):
-                if name == b"x-forwarded-for":
-                    return value.decode("latin-1").split(",")[0].strip()
+            # Each proxy appends the address it saw, so count from the right: entries further left
+            # come from the client and can be forged.
+            hops = [h.strip() for name, value in scope.get("headers", []) if name == b"x-forwarded-for"
+                    for h in value.decode("latin-1").split(",") if h.strip()]
+            if hops:
+                return hops[-min(self.trust_proxy, len(hops))]
         client = scope.get("client")
         return client[0] if client else "unknown"
 

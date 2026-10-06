@@ -12,6 +12,14 @@ the agent draws is grounded in the data:
 * window highs / lows     — high/low of the last *completed* higher-timeframe bar
 * trendlines              — lines through the two latest swing highs / lows
 * market structure        — HH / HL / LH / LL labels on swing points
+* HTF confluence          — zones re-detected on the next two timeframes up;
+                            overlapping zones score higher (`mark_confluence`)
+* sweeps, FVGs, order blocks, ranges, triangles, double tops/bottoms
+                          — `patterns.py`
+* RSI, divergences, structure breaks, volume profile
+                          — `indicators.py`
+
+Trade plans built from these levels live in `trade_plan.py`.
 
 All functions are pure and operate on a DataFrame with columns
 time, open, high, low, close, volume (oldest → newest).

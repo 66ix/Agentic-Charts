@@ -48,7 +48,13 @@ def test_middleware_limits_agent_and_trusts_proxy_only_when_told():
     assert _call(mw, path="/api/klines")[0] == 200  # separate, looser budget
     assert _call(mw, xff="9.9.9.9")[0] == 429  # header ignored without TRUST_PROXY
 
-    proxied = RateLimitMiddleware(None, agent_rate="1/minute", trust_proxy=True)
+    proxied = RateLimitMiddleware(None, agent_rate="1/minute", trust_proxy=1)
     assert _call(proxied, xff="5.5.5.5")[0] == 200
-    assert _call(proxied, xff="6.6.6.6, 10.0.0.1")[0] == 200
+    assert _call(proxied, xff="10.0.0.1, 6.6.6.6")[0] == 200
     assert _call(proxied, xff="5.5.5.5")[0] == 429
+    # A forged left-hand entry does not buy a fresh budget: the proxy's own entry (rightmost) counts.
+    assert _call(proxied, xff="7.7.7.7, 5.5.5.5")[0] == 429
+
+    two_hops = RateLimitMiddleware(None, agent_rate="1/minute", trust_proxy=2)
+    assert _call(two_hops, xff="1.1.1.1, 8.8.8.8, 172.16.0.2")[0] == 200
+    assert _call(two_hops, xff="2.2.2.2, 8.8.8.8, 172.16.0.3")[0] == 429  # same client behind a CDN

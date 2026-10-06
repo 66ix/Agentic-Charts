@@ -12,4 +12,5 @@ USER appuser
 VOLUME ["/app/.cache"]
 
 EXPOSE 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]
+# One worker: alerts and the Binance streams run in-process (TRUST_PROXY handles client IPs behind a proxy).
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

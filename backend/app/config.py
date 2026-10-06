@@ -20,6 +20,13 @@ def _env(name: str, default: str) -> str:
     return value.strip() if value and value.strip() else default
 
 
+def _proxy_hops(value: str) -> int:
+    value = value.lower()
+    if value in ("true", "on", "yes"):
+        return 1
+    return int(value) if value.isdigit() else 0
+
+
 @dataclass(frozen=True)
 class Settings:
     data_source: str = field(default_factory=lambda: _env("DATA_SOURCE", "auto").lower())
@@ -59,7 +66,8 @@ class Settings:
     agent_rate_limit: str = field(default_factory=lambda: _env("AGENT_RATE_LIMIT", "20/minute"))
     api_rate_limit: str = field(default_factory=lambda: _env("API_RATE_LIMIT", "300/minute"))
     agent_daily_limit: int = field(default_factory=lambda: int(_env("AGENT_DAILY_LIMIT", "0")))
-    trust_proxy: bool = field(default_factory=lambda: _env("TRUST_PROXY", "0").lower() in ("1", "true", "on"))
+    # How many reverse proxies sit in front of the API (0 = ignore X-Forwarded-For).
+    trust_proxy: int = field(default_factory=lambda: _proxy_hops(_env("TRUST_PROXY", "0")))
 
     cors_origins: tuple[str, ...] = field(
         default_factory=lambda: tuple(
