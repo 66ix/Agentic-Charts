@@ -15,6 +15,25 @@ export function writeStored(key: string, value: unknown) {
   }
 }
 
+/** Read a stored value without subscribing to it (e.g. the pins of a chart the user is not looking at). */
+export function readStored<T>(key: string, fallback: T): T {
+  try {
+    const raw = window.localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+/** Every key this app saves under, for the backup file and workspaces. */
+export function storedKeys(): string[] {
+  try {
+    return Object.keys(window.localStorage).filter((k) => k.startsWith("ac:"));
+  } catch {
+    return [];
+  }
+}
+
 /**
  * useState mirrored to localStorage. Storage can be unavailable (private
  * mode, blocked cookies), so every access is guarded and the state still

@@ -87,17 +87,32 @@ export class DrawingLayerPrimitive extends PrimitiveBase {
     return out;
   }
 
+  /** A trendline's ends after extending it left and/or right to the pane edges. */
+  private extended(d: Drawing, a: Px, b: Px, width: number): [Px, Px] {
+    const ext = (from: Px, to: Px, edge: number): Px => {
+      if (to.x === from.x) return to;
+      const t = (edge - from.x) / (to.x - from.x);
+      return t > 1 ? { x: edge, y: from.y + (to.y - from.y) * t } : to;
+    };
+    const left = a.x <= b.x ? 0 : width;
+    const right = a.x <= b.x ? width : 0;
+    return [d.style?.extendLeft ? ext(b, a, left) : a, d.style?.extendRight ? ext(a, b, right) : b];
+  }
+
   private hits(d: Drawing, pts: Px[], p: Px, width: number): boolean {
     switch (d.type) {
       case "trendline":
-      case "ruler":
-        return pts.length === 2 && distToSegment(p, pts[0], pts[1]) <= HIT_PX;
+      case "ruler": {
+        if (pts.length !== 2) return false;
+        const [a, b] = d.type === "trendline" ? this.extended(d, pts[0], pts[1], width) : [pts[0], pts[1]];
+        return distToSegment(p, a, b) <= HIT_PX;
+      }
       case "hray":
-        return Math.abs(p.y - pts[0].y) <= HIT_PX && p.x >= pts[0].x - HIT_PX && p.x <= width;
+        return Math.abs(p.y - pts[0].y) <= HIT_PX && p.x >= (d.style?.extendLeft ? 0 : pts[0].x - HIT_PX) && p.x <= width;
       case "rect": {
         const [a, b] = pts;
         const l = Math.min(a.x, b.x) - HIT_PX;
-        const r = Math.max(a.x, b.x) + HIT_PX;
+        const r = d.style?.extendRight ? width : Math.max(a.x, b.x) + HIT_PX;
         const t = Math.min(a.y, b.y) - HIT_PX;
         const btm = Math.max(a.y, b.y) + HIT_PX;
         return p.x >= l && p.x <= r && p.y >= t && p.y <= btm;
@@ -108,8 +123,9 @@ export class DrawingLayerPrimitive extends PrimitiveBase {
         return FIB_LEVELS.some((lv) => Math.abs(p.y - (b.y + (a.y - b.y) * lv)) <= HIT_PX);
       }
       case "text": {
-        const w = (d.text?.length ?? 0) * 7 + 10;
-        return p.x >= pts[0].x - 4 && p.x <= pts[0].x + w && Math.abs(p.y - pts[0].y) <= 10;
+        const size = d.style?.fontSize ?? 13;
+        const w = (d.text?.length ?? 0) * size * 0.55 + 10;
+        return p.x >= pts[0].x - 4 && p.x <= pts[0].x + w && Math.abs(p.y - pts[0].y) <= size * 0.8;
       }
       case "pattern":
         return pts.some((a, i) => i > 0 && distToSegment(p, pts[i - 1], a) <= HIT_PX);
@@ -132,23 +148,28 @@ export class DrawingLayerPrimitive extends PrimitiveBase {
     const pts = this.px(d);
     if (!pts || pts.length === 0) return;
     ctx.save();
-    ctx.lineWidth = selected ? 2 : 1.5;
+    const width = d.style?.width ?? 1.5;
+    ctx.lineWidth = selected ? width + 0.5 : width;
     ctx.strokeStyle = d.color;
     ctx.fillStyle = d.color;
-    dash(ctx, preview && d.type !== "ruler" ? "dashed" : "solid");
+    dash(ctx, preview && d.type !== "ruler" ? "dashed" : (d.style?.dash ?? "solid"));
 
     switch (d.type) {
       case "trendline":
-        if (pts.length >= 2) this.segment(ctx, pts[0], pts[1]);
+        if (pts.length >= 2) {
+          const [a, b] = this.extended(d, pts[0], pts[1], size.width);
+          this.segment(ctx, a, b);
+        }
         break;
 
       case "hray": {
         const y = Math.round(pts[0].y) + 0.5;
-        this.segment(ctx, { x: pts[0].x, y }, { x: size.width, y });
+        this.segment(ctx, { x: d.style?.extendLeft ? 0 : pts[0].x, y }, { x: size.width, y });
         drawLabel(ctx, formatPrice(d.points[0].price), size.width - 6, y - 10, {
           color: "#fff",
           bg: d.color,
           align: "right",
+          labels: this.labels,
         });
         break;
       }
@@ -156,9 +177,11 @@ export class DrawingLayerPrimitive extends PrimitiveBase {
       case "rect":
         if (pts.length >= 2) {
           const [a, b] = pts;
+          const left = Math.min(a.x, b.x);
+          const right = d.style?.extendRight ? size.width : Math.max(a.x, b.x);
           ctx.fillStyle = withAlpha(d.color, 0.15);
-          ctx.fillRect(Math.min(a.x, b.x), Math.min(a.y, b.y), Math.abs(b.x - a.x), Math.abs(b.y - a.y));
-          ctx.strokeRect(Math.min(a.x, b.x), Math.min(a.y, b.y), Math.abs(b.x - a.x), Math.abs(b.y - a.y));
+          ctx.fillRect(left, Math.min(a.y, b.y), right - left, Math.abs(b.y - a.y));
+          ctx.strokeRect(left, Math.min(a.y, b.y), right - left, Math.abs(b.y - a.y));
         }
         break;
 
@@ -167,7 +190,7 @@ export class DrawingLayerPrimitive extends PrimitiveBase {
         break;
 
       case "text":
-        ctx.font = "600 13px Inter, ui-sans-serif, system-ui, sans-serif";
+        ctx.font = `600 ${d.style?.fontSize ?? 13}px Inter, ui-sans-serif, system-ui, sans-serif`;
         ctx.textBaseline = "middle";
         ctx.fillText(d.text || "Text", pts[0].x, pts[0].y);
         break;

@@ -9,8 +9,11 @@ REST
   GET  /api/watchlist/scan       nearest zone and signals per watchlist symbol
   GET  /api/indicators/kimi      Kimi Cooked v5.7.4: levels, signals, forecast and its two tables
   POST /api/agent/analyze        prompt → structured chart overlays
+  *    /api/alerts*              price alerts, signal alerts and the alert history
+  *    /api/brief*               the scheduled market brief
 WebSocket
   /ws/klines?symbol=INJUSDT&interval=4h   live candle updates
+  /ws/alerts                              alert snapshots, fires and history items
 """
 
 from __future__ import annotations
@@ -20,22 +23,30 @@ import contextlib
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
 from .agent import run_analysis
-from .alerts import AlertService
+from .alerts import AlertPatch, AlertService
+from .backtest import BacktestRequest, run_backtest
+from .brief import BriefService, BriefSettings, NoChannelError
 from .config import get_settings
 from .derivatives import DerivativesService
+from .gridbot import GridBotCreate, GridBotPatch, GridBotService, GridSimulateRequest, error_text
+from .journal import JournalPatch, JournalService, NewJournalEntry, entry_json
+from .events import EventsService
+from .futures_data import FUTURES_PERIODS, FuturesDataService
 from .kimi_service import KimiService
 from .llm import LLMClient
 from .market_data import MarketData, MarketDataError
+from .market_index import MarketIndexService
 from .market_metrics import MarketMetricsService
 from .ratelimit import RateLimitMiddleware
 from .scanner import WatchlistCache, tickers
 from .schemas import (INTERVALS, AnalyzeRequest, AnalyzeResponse, CreateAlertsRequest, KimiResponse, MarketMetrics,
                       ScanResult)
+from .signal_alerts import SIGNALS, CreateSignalAlertsRequest, SignalAlertPatch, SignalAlertService
 from .stream_hub import StreamHub
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -55,9 +66,25 @@ async def lifespan(app: FastAPI):
     app.state.kimi = KimiService(market)
     app.state.alerts = AlertService(app.state.hub)
     await app.state.alerts.start()
+    app.state.gridbots = GridBotService(market)  # grid bot tracker: saved bots, results cached per 1m bar
+    app.state.journal = JournalService(market)  # trade journal: entries tracked on 1m candles
+    # Market data panel (futures, order flow, estimated liquidation levels), calendar + news, market-cap indexes.
+    app.state.futures = FuturesDataService(market, app.state.derivatives)
+    app.state.events = EventsService()
+    app.state.indexes = MarketIndexService(market)
+    # Signal alerts and the scheduled brief (signal_alerts.py, brief.py); both notify through app.state.alerts.
+    # The brief lists today's high-impact economic events from the calendar.
+    app.state.signal_alerts = SignalAlertService(app.state.hub, market, app.state.kimi, app.state.alerts)
+    await app.state.signal_alerts.start()
+    app.state.brief = BriefService(market, app.state.kimi, app.state.derivatives, app.state.alerts,
+                                   events_provider=app.state.events.upcoming_events)
+    app.state.brief.start()
     log.info("Data source: %s | LLM provider: %s %s", market.settings.data_source,
              app.state.llm.provider, app.state.llm.model)
     yield
+    await app.state.brief.close()
+    await app.state.signal_alerts.close()
+    await asyncio.gather(app.state.futures.close(), app.state.events.close(), app.state.indexes.close())
     await app.state.alerts.close()
     await app.state.hub.shutdown()
     await asyncio.gather(market.close(), app.state.llm.close(), app.state.metrics.close(),
@@ -70,7 +97,7 @@ app = FastAPI(title="Agentic Charts API", version="1.0.0", lifespan=lifespan)
 app.add_middleware(RateLimitMiddleware, agent_rate=settings.agent_rate_limit, api_rate=settings.api_rate_limit,
                    agent_daily=settings.agent_daily_limit, trust_proxy=settings.trust_proxy)
 app.add_middleware(CORSMiddleware, allow_origins=list(settings.cors_origins), allow_credentials=False,
-                   allow_methods=["GET", "POST", "DELETE"], allow_headers=["*"])
+                   allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"], allow_headers=["*"])
 app.add_middleware(GZipMiddleware, minimum_size=2048)
 
 
@@ -158,8 +185,129 @@ async def kimi_cooked(request: Request, symbol: str = Query("INJUSDT"), interval
 @app.post("/api/agent/analyze", response_model=AnalyzeResponse)
 async def agent_analyze(req: AnalyzeRequest, request: Request) -> AnalyzeResponse:
     try:
-        return await run_analysis(req, request.app.state.market, request.app.state.llm, request.app.state.derivatives,
-                                  request.app.state.kimi)
+        st = request.app.state
+        return await run_analysis(req, st.market, st.llm, st.derivatives, st.kimi,
+                                  getattr(st, "futures", None), getattr(st, "events", None))
+    except MarketDataError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+# ------------------------------- signal alerts, history and the brief --
+# (ahead of the price-alert routes so DELETE /api/alerts/history is not read as an alert id)
+#   PATCH  /api/alerts/{id}               edit price / zone / label / note / repeat / expires_at
+#   GET    /api/alerts/history?limit=     every fire (price, signal, brief), newest first
+#   DELETE /api/alerts/history            clear it
+#   GET    /api/signal-alerts             {alerts, signals: [{id, name, description}]}
+#   POST   /api/signal-alerts             {symbols, interval, signal, repeat?, note?} → one alert per symbol
+#   PATCH  /api/signal-alerts/{id}        {armed?, repeat?, note?}
+#   DELETE /api/signal-alerts/{id}
+#   GET    /api/signal-alerts/preview     symbol, interval, signal, bars → when it would have fired
+#   GET    /api/brief/settings            {settings, channels, last_sent_at, default_symbols}
+#   PUT    /api/brief/settings            BriefSettings → the same shape
+#   GET    /api/brief/preview             {text, messages, generated_at, ...}; symbols/interval override
+#   POST   /api/brief/send                sends it now; 400 without a channel
+#   WS     /ws/alerts                     also {type:"signal_snapshot"|"signal_fired"|"history"}
+
+
+@app.patch("/api/alerts/{alert_id}")
+async def update_alert(alert_id: str, patch: AlertPatch, request: Request) -> dict:
+    try:
+        alert = await request.app.state.alerts.update(alert_id, patch)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    if alert is None:
+        raise HTTPException(404, "Alert not found")
+    return {"alert": alert.model_dump()}
+
+
+@app.get("/api/alerts/history")
+async def alert_history(request: Request, limit: int = Query(100, ge=1, le=500)) -> dict:
+    return {"items": request.app.state.alerts.history.list(limit)}
+
+
+@app.delete("/api/alerts/history")
+async def clear_alert_history(request: Request) -> dict:
+    return {"removed": request.app.state.alerts.history.clear()}
+
+
+@app.get("/api/signal-alerts")
+async def list_signal_alerts(request: Request) -> dict:
+    service: SignalAlertService = request.app.state.signal_alerts
+    return {"alerts": [a.model_dump() for a in service.list()],
+            "signals": [{"id": k, "name": v.name, "description": v.description} for k, v in SIGNALS.items()]}
+
+
+@app.post("/api/signal-alerts")
+async def create_signal_alerts(req: CreateSignalAlertsRequest, request: Request) -> dict:
+    try:
+        created = await request.app.state.signal_alerts.add(req.symbols, req.interval, req.signal, req.repeat,
+                                                            req.note)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"alerts": [a.model_dump() for a in created]}
+
+
+@app.get("/api/signal-alerts/preview")
+async def preview_signal_alert(request: Request, symbol: str = Query(...), interval: str = Query("4h"),
+                               signal: str = Query(...), bars: int = Query(300, ge=10, le=1000)) -> dict:
+    try:
+        return await request.app.state.signal_alerts.preview(_norm_symbol(symbol), _check_interval(interval),
+                                                             signal, bars)
+    except MarketDataError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.patch("/api/signal-alerts/{alert_id}")
+async def update_signal_alert(alert_id: str, patch: SignalAlertPatch, request: Request) -> dict:
+    alert = await request.app.state.signal_alerts.update(alert_id, patch)
+    if alert is None:
+        raise HTTPException(404, "Signal alert not found")
+    return {"alert": alert.model_dump()}
+
+
+@app.delete("/api/signal-alerts/{alert_id}")
+async def delete_signal_alert(alert_id: str, request: Request) -> dict:
+    if not await request.app.state.signal_alerts.remove(alert_id):
+        raise HTTPException(404, "Signal alert not found")
+    return {"ok": True}
+
+
+@app.get("/api/brief/settings")
+async def brief_settings(request: Request) -> dict:
+    return request.app.state.brief.status()
+
+
+@app.put("/api/brief/settings")
+async def save_brief_settings(settings_in: BriefSettings, request: Request) -> dict:
+    service: BriefService = request.app.state.brief
+    service.update_settings(settings_in)
+    return service.status()
+
+
+@app.get("/api/brief/preview")
+async def brief_preview(request: Request, symbols: str | None = Query(None, description="Comma-separated override"),
+                        interval: str | None = Query(None)) -> dict:
+    try:
+        brief = await request.app.state.brief.build(_symbol_list(symbols) if symbols else None,
+                                                    _check_interval(interval) if interval else None)
+    except MarketDataError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return brief.model_dump(mode="json")
+
+
+@app.post("/api/brief/send")
+async def brief_send(request: Request, symbols: str | None = Query(None), interval: str | None = Query(None)) -> dict:
+    try:
+        return await request.app.state.brief.send(_symbol_list(symbols) if symbols else None,
+                                                  _check_interval(interval) if interval else None)
+    except NoChannelError as exc:
+        raise HTTPException(400, str(exc)) from exc
     except MarketDataError as exc:
         raise HTTPException(502, str(exc)) from exc
     except ValueError as exc:
@@ -218,6 +366,75 @@ async def rearm_alert(alert_id: str, request: Request) -> dict:
     if alert is None:
         raise HTTPException(404, "Alert not found")
     return {"alert": alert.model_dump()}
+
+
+# --------------------------------------------------------------- grid bots --
+#   POST   /api/gridbot/simulate          GridBotParams (+ binance?) → GridBotResult, nothing saved
+#   GET    /api/gridbots                  {bots: [GridBot]}
+#   POST   /api/gridbots                  {name?, params, binance?} → {bot, result}
+#   PATCH  /api/gridbots/{id}             {name?, params? (partial), binance? (null clears)} → {bot, result}
+#   DELETE /api/gridbots/{id}             {ok}
+#   GET    /api/gridbots/{id}/result      GridBotResult (recomputed at most once per 1m bar)
+# Bodies are validated here rather than by FastAPI so a bad setting comes back as one readable 422 message.
+
+
+def _gridbot_body(model, body: dict):
+    try:
+        return model.model_validate(body)
+    except ValueError as exc:  # pydantic's ValidationError is a ValueError
+        raise HTTPException(422, error_text(exc)) from None
+
+
+async def _gridbot_run(coro):
+    try:
+        return await coro
+    except MarketDataError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, error_text(exc)) from None
+
+
+@app.post("/api/gridbot/simulate")
+async def gridbot_simulate(request: Request, body: dict = Body(...)) -> dict:
+    req: GridSimulateRequest = _gridbot_body(GridSimulateRequest, body)
+    result = await _gridbot_run(request.app.state.gridbots.simulate(req, req.binance))
+    return result.model_dump()
+
+
+@app.get("/api/gridbots")
+async def gridbots_list(request: Request) -> dict:
+    return {"bots": [b.model_dump() for b in request.app.state.gridbots.list()]}
+
+
+@app.post("/api/gridbots")
+async def gridbots_create(request: Request, body: dict = Body(...)) -> dict:
+    req: GridBotCreate = _gridbot_body(GridBotCreate, body)
+    bot, result = await _gridbot_run(request.app.state.gridbots.create(req))
+    return {"bot": bot.model_dump(), "result": result.model_dump()}
+
+
+@app.patch("/api/gridbots/{bot_id}")
+async def gridbots_update(bot_id: str, request: Request, body: dict = Body(...)) -> dict:
+    patch: GridBotPatch = _gridbot_body(GridBotPatch, body)
+    out = await _gridbot_run(request.app.state.gridbots.update(bot_id, patch))
+    if out is None:
+        raise HTTPException(404, "Grid bot not found")
+    return {"bot": out[0].model_dump(), "result": out[1].model_dump()}
+
+
+@app.delete("/api/gridbots/{bot_id}")
+async def gridbots_delete(bot_id: str, request: Request) -> dict:
+    if not request.app.state.gridbots.delete(bot_id):
+        raise HTTPException(404, "Grid bot not found")
+    return {"ok": True}
+
+
+@app.get("/api/gridbots/{bot_id}/result")
+async def gridbots_result(bot_id: str, request: Request) -> dict:
+    result = await _gridbot_run(request.app.state.gridbots.result(bot_id))
+    if result is None:
+        raise HTTPException(404, "Grid bot not found")
+    return result.model_dump()
 
 
 @app.websocket("/ws/alerts")
@@ -283,3 +500,142 @@ async def ws_klines(ws: WebSocket, symbol: str = "INJUSDT", interval: str = "4h"
                 await t
         await hub.unsubscribe(sym, iv, queue)
 
+
+# ------------------------------------------------------ trade journal + backtests --
+#   GET    /api/journal                   entries, each with its evaluation (status, fills, exits, R, PnL)
+#   GET    /api/journal/stats             ?symbol=&setup=&direction= → win rate, R, breakdowns, equity curve
+#   POST   /api/journal                   NewJournalEntry → {entry}
+#   PATCH  /api/journal/{id}              {notes?, tags?, setup?, cancel?, close?: {price?, time?}} → {entry}
+#   DELETE /api/journal/{id}
+#   POST   /api/backtest                  BacktestRequest → trades, stats, equity, notes
+
+
+@app.get("/api/journal")
+async def list_journal(request: Request) -> dict:
+    service: JournalService = request.app.state.journal
+    return {"entries": [entry_json(e, ev) for e, ev in await service.rows()]}
+
+
+@app.get("/api/journal/stats")
+async def journal_stats(request: Request, symbol: str | None = Query(None), setup: str | None = Query(None),
+                        direction: str | None = Query(None, pattern="^(long|short)$")) -> dict:
+    service: JournalService = request.app.state.journal
+    return await service.stats(_norm_symbol(symbol) if symbol else None, setup or None, direction)
+
+
+@app.post("/api/journal")
+async def create_journal_entry(req: NewJournalEntry, request: Request) -> dict:
+    try:
+        entry, ev = await request.app.state.journal.add(req)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"entry": entry_json(entry, ev)}
+
+
+@app.patch("/api/journal/{entry_id}")
+async def update_journal_entry(entry_id: str, patch: JournalPatch, request: Request) -> dict:
+    try:
+        res = await request.app.state.journal.update(entry_id, patch)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if res is None:
+        raise HTTPException(404, "Trade not found")
+    return {"entry": entry_json(*res)}
+
+
+@app.delete("/api/journal/{entry_id}")
+async def delete_journal_entry(entry_id: str, request: Request) -> dict:
+    if not await request.app.state.journal.remove(entry_id):
+        raise HTTPException(404, "Trade not found")
+    return {"ok": True}
+
+
+@app.post("/api/backtest")
+async def backtest(req: BacktestRequest, request: Request) -> dict:
+    try:
+        return (await run_backtest(request.app.state.market, request.app.state.kimi, req)).model_dump()
+    except MarketDataError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+# ------------------------------------------- market data panel, calendar + news, market-cap indexes --
+# Every response carries `source`: "binance" (live), "synthetic" (demo data) or "unavailable" (with a `note`);
+# calendar and news use "live", "stale" (last good copy) or "unavailable". See futures_data.py, events.py and
+# market_index.py.
+#   GET /api/futures/funding?symbol=BTCUSDT&limit=100               current rate, annualised, history, 24h average
+#   GET /api/futures/open-interest?symbol=BTCUSDT&period=1h&limit=200
+#   GET /api/futures/long-short?symbol=BTCUSDT&period=1h&limit=200  account ratio + top-trader position ratio
+#   GET /api/futures/liquidation-levels?symbol=BTCUSDT               estimated clusters + recent real liquidations
+#   GET /api/cvd?symbol=BTCUSDT&interval=1h&limit=500                spot taker buy/sell volume and its running sum
+#   GET /api/orderbook/walls?symbol=BTCUSDT&range_pct=5&market=spot  big resting orders near price
+#   GET /api/calendar?days=7&impact=high&past_days=0                 economic events (Forex Factory)
+#   GET /api/news?symbol=BTCUSDT&limit=30                            RSS headlines tagged with coins
+#   GET /api/index/klines?name=TOTAL2&interval=4h&limit=500          market-cap index candles (top-20 approximation)
+
+
+def _futures_period(period: str) -> str:
+    if period not in FUTURES_PERIODS:
+        raise HTTPException(422, f"period must be one of {', '.join(FUTURES_PERIODS)}")
+    return period
+
+
+@app.get("/api/futures/funding")
+async def futures_funding(request: Request, symbol: str = Query("BTCUSDT"),
+                          limit: int = Query(100, ge=1, le=1000)) -> dict:
+    return await request.app.state.futures.funding(_norm_symbol(symbol), limit)
+
+
+@app.get("/api/futures/open-interest")
+async def futures_open_interest(request: Request, symbol: str = Query("BTCUSDT"), period: str = Query("1h"),
+                                limit: int = Query(200, ge=2, le=500)) -> dict:
+    return await request.app.state.futures.open_interest(_norm_symbol(symbol), _futures_period(period), limit)
+
+
+@app.get("/api/futures/long-short")
+async def futures_long_short(request: Request, symbol: str = Query("BTCUSDT"), period: str = Query("1h"),
+                             limit: int = Query(200, ge=2, le=500)) -> dict:
+    return await request.app.state.futures.long_short(_norm_symbol(symbol), _futures_period(period), limit)
+
+
+@app.get("/api/futures/liquidation-levels")
+async def futures_liquidation_levels(request: Request, symbol: str = Query("BTCUSDT")) -> dict:
+    return await request.app.state.futures.liquidation_levels(_norm_symbol(symbol))
+
+
+@app.get("/api/cvd")
+async def cvd(request: Request, symbol: str = Query("BTCUSDT"), interval: str = Query("1h"),
+              limit: int = Query(500, ge=2, le=1500)) -> dict:
+    return await request.app.state.futures.cvd(_norm_symbol(symbol), _check_interval(interval), limit)
+
+
+@app.get("/api/orderbook/walls")
+async def orderbook_walls(request: Request, symbol: str = Query("BTCUSDT"),
+                          range_pct: float = Query(5.0, ge=0.5, le=20.0),
+                          market: str = Query("spot", pattern="^(spot|futures)$")) -> dict:
+    return await request.app.state.futures.walls(_norm_symbol(symbol), range_pct, market)
+
+
+@app.get("/api/calendar")
+async def economic_calendar(request: Request, days: int = Query(7, ge=0, le=14),
+                            impact: str = Query("high", pattern="^(high|medium|all)$"),
+                            past_days: int = Query(0, ge=0, le=7)) -> dict:
+    return await request.app.state.events.calendar(days, impact, past_days)
+
+
+@app.get("/api/news")
+async def crypto_news(request: Request, symbol: str | None = Query(None),
+                      limit: int = Query(30, ge=1, le=200)) -> dict:
+    return await request.app.state.events.news(_norm_symbol(symbol) if symbol else None, limit)
+
+
+@app.get("/api/index/klines")
+async def index_klines(request: Request, name: str = Query("TOTAL", description="TOTAL, TOTAL2 or TOTAL3"),
+                       interval: str = Query("4h"), limit: int = Query(500, ge=10, le=1500)) -> dict:
+    try:
+        return await request.app.state.indexes.klines(name, _check_interval(interval), limit)
+    except MarketDataError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc

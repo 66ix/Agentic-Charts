@@ -54,6 +54,8 @@ export interface HorizontalLineOverlay extends OverlayBase {
   line_style?: LineStyleName;
   line_width?: number;
   time_start?: number | null;
+  /** Price tag on the axis (default true). Off for dense sets of lines such as grid bots. */
+  axis_label?: boolean;
 }
 
 export interface BoxOverlay extends OverlayBase {
@@ -171,6 +173,11 @@ export interface AlertSpec {
   price_low: number | null;
   price_high: number | null;
   label: string;
+  /** Stay armed after firing; fires again on a new crossing, at most every 5 minutes. Default false. */
+  repeat?: boolean;
+  /** ms; the alert disarms itself (expired) after this. */
+  expires_at?: number | null;
+  note?: string;
 }
 
 /** A price alert stored and evaluated by the backend. Mirrors PriceAlert in schemas.py. */
@@ -183,6 +190,9 @@ export interface PriceAlert extends AlertSpec {
   triggered_price?: number | null;
   /** Where price was last seen relative to the level, so it fires on the transition. */
   last_side?: "above" | "below" | "inside" | null;
+  fire_count?: number;
+  /** Disarmed because expires_at passed. */
+  expired?: boolean;
 }
 
 /** Notification channels configured on the backend. */
@@ -252,12 +262,26 @@ export interface ChartPoint {
 
 export type DrawingType = Exclude<ToolId, "crosshair">;
 
+/** Optional look of a drawing; anything left out uses the tool's default. */
+export interface DrawingStyle {
+  width?: number; // 1–4 px
+  dash?: LineStyleName;
+  /** Trendlines: extend past the first / second point. Horizontal rays: extendLeft draws a full-width line. */
+  extendLeft?: boolean;
+  extendRight?: boolean;
+  /** Text notes: font size in px. */
+  fontSize?: number;
+  /** Only show on these timeframes; empty or missing = every timeframe. */
+  timeframes?: Interval[];
+}
+
 export interface Drawing {
   id: string;
   type: DrawingType;
   points: ChartPoint[];
   color: string;
   text?: string;
+  style?: DrawingStyle;
 }
 
 /** Points each tool needs before the drawing is complete. */
@@ -271,6 +295,29 @@ export const TOOL_POINTS: Record<DrawingType, number> = {
   ruler: 2,
 };
 
+/** Lengths and colours the user can change in the Indicators menu. */
+export interface IndicatorSettings {
+  ema1: { length: number; color: string };
+  ema2: { length: number; color: string };
+  rsi: { length: number };
+  macd: { fast: number; slow: number; signal: number };
+  bb: { length: number; mult: number; color: string };
+  atr: { length: number };
+  stochRsi: { rsiLength: number; stochLength: number; k: number; d: number };
+  vwapColor: string;
+}
+
+export const DEFAULT_INDICATOR_SETTINGS: IndicatorSettings = {
+  ema1: { length: 20, color: "#f59e0b" },
+  ema2: { length: 50, color: "#a855f7" },
+  rsi: { length: 14 },
+  macd: { fast: 12, slow: 26, signal: 9 },
+  bb: { length: 20, mult: 2, color: "#38bdf8" },
+  atr: { length: 14 },
+  stochRsi: { rsiLength: 14, stochLength: 14, k: 3, d: 3 },
+  vwapColor: "#22d3ee",
+};
+
 export interface IndicatorState {
   ema20: boolean;
   ema50: boolean;
@@ -282,6 +329,13 @@ export interface IndicatorState {
   vwap: boolean;
   /** Kimi Cooked v5.7.4, the user's own indicator (computed by the backend). */
   kimi: boolean;
+  // Added with the indicator settings; read as `!!ind.x` like the ones above.
+  bb?: boolean;
+  atr?: boolean;
+  stochRsi?: boolean;
+  cvd?: boolean;
+  /** Volume profile of the visible range, drawn on the right edge. */
+  vprofile?: boolean;
 }
 
 /** One chart in the multi-chart grid. */
@@ -296,6 +350,14 @@ export interface LayoutState {
   logScale: boolean;
   grid: boolean;
   autoLevels: boolean;
+  /** "local" (the browser's zone), "UTC", or an IANA zone like "Europe/London". Missing = local. */
+  timezone?: string;
+  /** Countdown to the candle close under the price label. Missing = on. */
+  countdown?: boolean;
+  /** Grid charts: move the crosshair on every chart together. Missing = on. */
+  syncCrosshair?: boolean;
+  /** Grid charts: every chart follows the active chart's symbol (each keeps its timeframe). */
+  linkSymbol?: boolean;
 }
 
 // ------------------------------------------------------- kimi cooked --

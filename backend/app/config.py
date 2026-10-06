@@ -95,6 +95,35 @@ class Settings:
     telegram_chat_id: str = field(default_factory=lambda: _env("TELEGRAM_CHAT_ID", ""))
     discord_webhook_url: str = field(default_factory=lambda: _env("DISCORD_WEBHOOK_URL", ""), repr=False)
 
+    # Grid bot tracker (gridbot.py): saved Binance Spot Grid bots. GRIDBOTS_STORE=memory keeps them in memory only.
+    gridbots_store: str = field(default_factory=lambda: _env(
+        "GRIDBOTS_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "gridbots.json")))
+    # Trade journal (journal.py): logged trades. JOURNAL_STORE=memory keeps them in memory only (lost on restart).
+    journal_store: str = field(default_factory=lambda: _env(
+        "JOURNAL_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "journal.json")))
+
+    # ---- Economic calendar and crypto news (events.py) ----
+    # Forex Factory-format JSON feeds; next week's is often published late in the week, until then it is skipped.
+    calendar_urls: tuple[str, ...] = field(default_factory=lambda: tuple(u.strip() for u in _env(
+        "CALENDAR_URLS", "https://nfs.faireconomy.media/ff_calendar_thisweek.json,"
+                         "https://nfs.faireconomy.media/ff_calendar_nextweek.json").split(",") if u.strip()))
+    # Countries (currency codes) kept from the calendar; ALL keeps every one.
+    calendar_countries: tuple[str, ...] = field(default_factory=lambda: tuple(
+        c.strip().upper() for c in _env("CALENDAR_COUNTRIES", "USD").split(",") if c.strip()))
+    # RSS or Atom feeds for the news list.
+    news_feeds: tuple[str, ...] = field(default_factory=lambda: tuple(u.strip() for u in _env(
+        "NEWS_FEEDS", "https://www.coindesk.com/arc/outboundfeeds/rss/,https://cointelegraph.com/rss").split(",")
+        if u.strip()))
+
+    # Alert history, signal alerts and the morning brief (alerts.py, signal_alerts.py, brief.py).
+    # Each is a JSON file; `memory` keeps it in memory only (lost on restart).
+    alert_history_store: str = field(default_factory=lambda: _env(
+        "ALERT_HISTORY_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "alert_history.json")))
+    signal_alerts_store: str = field(default_factory=lambda: _env(
+        "SIGNAL_ALERTS_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "signal_alerts.json")))
+    brief_store: str = field(default_factory=lambda: _env(
+        "BRIEF_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "brief.json")))
+
 
 @lru_cache
 def get_settings() -> Settings:

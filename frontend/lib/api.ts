@@ -1,4 +1,5 @@
 import { API_URL } from "./config";
+import type { AlertPatch } from "./alerts";
 import type {
   AlertChannels,
   AlertSpec,
@@ -21,7 +22,8 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, init?: RequestInit & { timeoutMs?: number }): Promise<T> {
+/** JSON request to the backend with a timeout and readable errors. Feature modules (lib/gridbot.ts, …) use it too. */
+export async function apiRequest<T>(path: string, init?: RequestInit & { timeoutMs?: number }): Promise<T> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), init?.timeoutMs ?? 20_000);
   const outer = init?.signal;
@@ -59,17 +61,17 @@ async function request<T>(path: string, init?: RequestInit & { timeoutMs?: numbe
 export function fetchKlines(symbol: string, interval: Interval, limit: number, signal?: AbortSignal, since?: number) {
   const q = new URLSearchParams({ symbol, interval, limit: String(limit) });
   if (since !== undefined) q.set("since", String(since));
-  return request<{ symbol: string; interval: Interval; source: string; candles: Candle[] }>(`/api/klines?${q}`, {
+  return apiRequest<{ symbol: string; interval: Interval; source: string; candles: Candle[] }>(`/api/klines?${q}`, {
     signal,
   });
 }
 
 export function fetchMetrics(signal?: AbortSignal) {
-  return request<MarketMetrics>("/api/market/metrics", { signal });
+  return apiRequest<MarketMetrics>("/api/market/metrics", { signal });
 }
 
 export function fetchSymbols(signal?: AbortSignal) {
-  return request<{ symbols: string[] }>("/api/symbols", { signal });
+  return apiRequest<{ symbols: string[] }>("/api/symbols", { signal });
 }
 
 export function analyze(
@@ -85,7 +87,7 @@ export function analyze(
   },
   signal?: AbortSignal,
 ) {
-  return request<AnalyzeResponse>("/api/agent/analyze", {
+  return apiRequest<AnalyzeResponse>("/api/agent/analyze", {
     method: "POST",
     body: JSON.stringify(body),
     signal,
@@ -96,42 +98,51 @@ export function analyze(
 /** Kimi Cooked on the chart's closed candles. The first run on a chart takes a second or two. */
 export function fetchKimi(symbol: string, interval: Interval, signal?: AbortSignal) {
   const q = new URLSearchParams({ symbol, interval });
-  return request<KimiResult>(`/api/indicators/kimi?${q}`, { signal, timeoutMs: 60_000 });
+  return apiRequest<KimiResult>(`/api/indicators/kimi?${q}`, { signal, timeoutMs: 60_000 });
 }
 
 export function fetchTickers(symbols: string[], signal?: AbortSignal) {
   const q = new URLSearchParams({ symbols: symbols.join(",") });
-  return request<{ tickers: Ticker[] }>(`/api/tickers?${q}`, { signal });
+  return apiRequest<{ tickers: Ticker[] }>(`/api/tickers?${q}`, { signal });
 }
 
 export function fetchWatchlistScan(symbols: string[], interval: Interval, signal?: AbortSignal) {
   const q = new URLSearchParams({ symbols: symbols.join(","), interval });
-  return request<ScanResult[]>(`/api/watchlist/scan?${q}`, { signal, timeoutMs: 60_000 });
+  return apiRequest<ScanResult[]>(`/api/watchlist/scan?${q}`, { signal, timeoutMs: 60_000 });
 }
 
 // ------------------------------------------------------------- alerts --
 
 export function fetchAlerts(signal?: AbortSignal) {
-  return request<{ alerts: PriceAlert[]; channels: AlertChannels }>("/api/alerts", { signal });
+  return apiRequest<{ alerts: PriceAlert[]; channels: AlertChannels }>("/api/alerts", { signal });
 }
 
 export function createAlerts(symbol: string, alerts: AlertSpec[]) {
-  return request<{ alerts: PriceAlert[] }>("/api/alerts", { method: "POST", body: JSON.stringify({ symbol, alerts }) });
+  return apiRequest<{ alerts: PriceAlert[] }>("/api/alerts", { method: "POST", body: JSON.stringify({ symbol, alerts }) });
 }
 
 export function deleteAlert(id: string) {
-  return request<{ ok: boolean }>(`/api/alerts/${encodeURIComponent(id)}`, { method: "DELETE" });
+  return apiRequest<{ ok: boolean }>(`/api/alerts/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
 export function rearmAlert(id: string) {
-  return request<{ alert: PriceAlert }>(`/api/alerts/${encodeURIComponent(id)}/rearm`, { method: "POST" });
+  return apiRequest<{ alert: PriceAlert }>(`/api/alerts/${encodeURIComponent(id)}/rearm`, { method: "POST" });
 }
 
 export function clearTriggeredAlerts() {
-  return request<{ removed: number }>("/api/alerts/clear-triggered", { method: "POST" });
+  return apiRequest<{ removed: number }>("/api/alerts/clear-triggered", { method: "POST" });
+}
+
+/** Edit an alert (drag a line, rename, repeat, expiry). Moving the level never fires it. Signal alerts, the
+ *  alert history and the brief have their calls in lib/alerts.ts. */
+export function updateAlert(id: string, patch: AlertPatch) {
+  return apiRequest<{ alert: PriceAlert }>(`/api/alerts/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
 }
 
 /** Sends a test message to every configured channel → which ones delivered it. */
 export function testAlertChannels() {
-  return request<{ results: Partial<Record<keyof AlertChannels, boolean>> }>("/api/alerts/test", { method: "POST" });
+  return apiRequest<{ results: Partial<Record<keyof AlertChannels, boolean>> }>("/api/alerts/test", { method: "POST" });
 }

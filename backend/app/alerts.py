@@ -3,11 +3,19 @@
 Alerts live in a small JSON file (ALERTS_STORE). For each symbol with armed
 alerts the service holds one 1m subscription on the StreamHub (sharing the
 upstream Binance stream with any open charts) and checks every kline update's
-close against the alerts. A fired alert is disarmed, saved, pushed to Telegram /
-Discord if configured, and broadcast to `/ws/alerts` listeners for the in-app
-toast. Prices from the synthetic fallback feed are ignored unless
-DATA_SOURCE=synthetic, so a Binance outage never sends a notification for a
-made-up price.
+close against the alerts. A fired alert is disarmed (or, with `repeat`, stays
+armed for the next crossing, at most one fire per 5 minutes), saved, pushed to
+Telegram / Discord if configured, and broadcast to `/ws/alerts` listeners for
+the in-app toast. Alerts with `expires_at` disarm themselves once it passes,
+checked on every price and by a periodic task. Prices from the synthetic
+fallback feed are ignored unless DATA_SOURCE=synthetic, so a Binance outage
+never sends a notification for a made-up price.
+
+The service also owns `/ws/alerts` and the alert history (ALERT_HISTORY_STORE):
+every fire, whether a price alert, a signal alert (signal_alerts.py) or a brief
+(brief.py), is appended to one log that the panel's History tab reads. The other
+services broadcast through `broadcast` and add their own snapshot to every new
+listener with `add_snapshot_provider`.
 """
 
 from __future__ import annotations
@@ -25,6 +33,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Optional
 
 import httpx
+from pydantic import BaseModel, Field
 
 from .config import Settings, get_settings
 from .schemas import AlertSpec, PriceAlert
@@ -37,7 +46,11 @@ log = logging.getLogger(__name__)
 INTERVAL = "1m"
 MAX_ALERTS = 200
 LISTENER_QUEUE_SIZE = 64
+REPEAT_COOLDOWN_MS = 5 * 60_000  # a repeating alert fires at most this often
+EXPIRY_CHECK_SECONDS = 30.0
+MAX_HISTORY = 500
 Side = Literal["above", "below", "inside"]
+HistoryKind = Literal["price", "signal", "brief"]
 
 
 # ------------------------------------------------------------- evaluation --
@@ -55,18 +68,25 @@ def evaluate(alert: PriceAlert, price: float, now_ms: Optional[int] = None) -> t
     """Check one armed alert against a new price → (alert, fired). Fires on the transition only:
     a cross alert when price moves to the other side of the level, a zone alert when price moves
     into the zone (or jumps straight through it). The first observation only records the side.
-    Returns the same object when nothing changed. Port of `evaluateAlert` in frontend/lib/alerts.ts."""
+    A `repeat` alert stays armed after firing; a crossing within REPEAT_COOLDOWN_MS of its last fire
+    only moves `last_side`, so a choppy level cannot spam. An alert past `expires_at` is disarmed and
+    marked expired instead. Returns the same object when nothing changed."""
     if not alert.armed or not math.isfinite(price):
         return alert, False
+    now = now_ms if now_ms is not None else int(time.time() * 1000)
+    if alert.expires_at is not None and now >= alert.expires_at:
+        return alert.model_copy(update={"armed": False, "expired": True}), False
     side = _side(alert, price)
     prev = alert.last_side
     fired = False
     if prev and prev != side:
         fired = alert.kind == "cross" or side == "inside" or prev != "inside"  # above→below skips over the zone
+    if fired and alert.repeat and alert.triggered_at is not None and now - alert.triggered_at < REPEAT_COOLDOWN_MS:
+        return alert.model_copy(update={"last_side": side}), False
     if fired:
         return alert.model_copy(update={
-            "armed": False, "last_side": side, "triggered_price": price,
-            "triggered_at": now_ms if now_ms is not None else int(time.time() * 1000),
+            "armed": alert.repeat, "last_side": side, "triggered_price": price, "triggered_at": now,
+            "fire_count": alert.fire_count + 1,
         }), True
     return (alert if side == prev else alert.model_copy(update={"last_side": side})), False
 
@@ -90,13 +110,22 @@ def describe_fire(alert: PriceAlert, price: float) -> str:
     else:
         what = f"crossed {'above' if alert.last_side == 'above' else 'below'} {fmt_price(alert.price or 0)}"
     label = f" ({alert.label})" if alert.label else ""
-    return f"{alert.symbol}: price {what}{label} at {fmt_price(price)}"
+    note = f" — {alert.note}" if alert.note else ""
+    return f"{alert.symbol}: price {what}{label} at {fmt_price(price)}{note}"
 
 
-def _valid_spec(spec: AlertSpec) -> AlertSpec:
+def _check_expiry(expires_at: Optional[int], now_ms: Optional[int] = None) -> None:
+    now = now_ms if now_ms is not None else int(time.time() * 1000)
+    if expires_at is not None and expires_at <= now:
+        raise ValueError("the expiry time has already passed")
+
+
+def _valid_spec(spec: AlertSpec, now_ms: Optional[int] = None, check_expiry: bool = True) -> AlertSpec:
     def ok(p: Optional[float]) -> bool:
         return p is not None and math.isfinite(p) and p > 0
 
+    if check_expiry:
+        _check_expiry(spec.expires_at, now_ms)
     if spec.kind == "cross":
         if not ok(spec.price):
             raise ValueError("a cross alert needs a positive price")
@@ -106,6 +135,42 @@ def _valid_spec(spec: AlertSpec) -> AlertSpec:
     if spec.price_low > spec.price_high:  # type: ignore[operator]
         return spec.model_copy(update={"price_low": spec.price_high, "price_high": spec.price_low})
     return spec
+
+
+class AlertPatch(BaseModel):
+    """PATCH /api/alerts/{id}: only the fields sent change. `expires_at: null` removes the expiry; a null
+    label, note or repeat is ignored."""
+
+    price: Optional[float] = None
+    price_low: Optional[float] = None
+    price_high: Optional[float] = None
+    label: Optional[str] = Field(None, max_length=200)
+    note: Optional[str] = Field(None, max_length=500)
+    repeat: Optional[bool] = None
+    expires_at: Optional[int] = Field(None, description="UNIX milliseconds, or null for no expiry")
+
+
+def apply_patch(alert: PriceAlert, patch: AlertPatch, now_ms: Optional[int] = None) -> PriceAlert:
+    """The edited alert, validated like a new one. Moving a level forgets which side price was on, so the edit
+    itself never fires it; a new expiry (or none) on an expired alert arms it again."""
+    given = patch.model_dump(include=patch.model_fields_set)
+    for key in ("label", "note", "repeat"):
+        if key in given and given[key] is None:
+            del given[key]
+    levels = ("price",) if alert.kind == "cross" else ("price_low", "price_high")
+    if any(k in given for k in ("price", "price_low", "price_high") if k not in levels):
+        raise ValueError("a level alert takes `price`" if alert.kind == "cross"
+                         else "a zone alert takes `price_low` and `price_high`")
+    if "expires_at" in given:
+        _check_expiry(given["expires_at"], now_ms)
+    spec = _valid_spec(AlertSpec.model_validate({**alert.model_dump(include=set(AlertSpec.model_fields)), **given}),
+                       check_expiry=False)
+    update = spec.model_dump()
+    if any(getattr(spec, k) != getattr(alert, k) for k in levels):
+        update["last_side"] = None
+    if alert.expired and "expires_at" in given:
+        update.update(armed=True, expired=False, last_side=None)
+    return alert.model_copy(update=update)
 
 
 # --------------------------------------------------------------- channels --
@@ -119,6 +184,7 @@ class Channel:
     url: str
     body: Callable[[str], dict]
     secrets: tuple[str, ...]
+    limit: int = 4000  # characters per message; longer texts go out in several (send_long)
 
     async def send(self, client: httpx.AsyncClient, text: str) -> None:
         r = await client.post(self.url, json=self.body(text))
@@ -143,8 +209,51 @@ def build_channels(s: Settings) -> list[Channel]:
         url = s.discord_webhook_url
         token = url.rstrip("/").rsplit("/", 1)[-1]  # .../webhooks/<id>/<token>
         out.append(Channel("discord", url, lambda text: {"content": text[:2000]},
-                           (url, token) if len(token) >= 8 else (url,)))
+                           (url, token) if len(token) >= 8 else (url,), limit=2000))
     return out
+
+
+def split_message(text: str, limit: int) -> list[str]:
+    """Cut `text` into messages of at most `limit` characters, at blank lines where possible, then at line
+    breaks, and mid-line only for a line longer than `limit`."""
+    text = text.strip()
+    if len(text) <= limit:
+        return [text] if text else []
+    out: list[str] = []
+    cur = ""
+    for block in text.split("\n\n"):
+        for piece in ([block] if len(block) <= limit else _lines(block, limit)):
+            joined = f"{cur}\n\n{piece}" if cur else piece
+            if len(joined) <= limit:
+                cur = joined
+            else:
+                out.append(cur)
+                cur = piece
+    if cur:
+        out.append(cur)
+    return [m for m in out if m.strip()]
+
+
+def _lines(block: str, limit: int) -> list[str]:
+    """A paragraph longer than `limit` as chunks of whole lines (long lines hard-cut)."""
+    chunks: list[str] = []
+    cur = ""
+    for line in block.split("\n"):
+        while len(line) > limit:
+            if cur:
+                chunks.append(cur)
+                cur = ""
+            chunks.append(line[:limit])
+            line = line[limit:]
+        joined = f"{cur}\n{line}" if cur else line
+        if len(joined) <= limit:
+            cur = joined
+        else:
+            chunks.append(cur)
+            cur = line
+    if cur:
+        chunks.append(cur)
+    return chunks
 
 
 def _error_text(exc: Exception) -> str:
@@ -172,6 +281,26 @@ async def send_all(client: httpx.AsyncClient, channels: list[Channel], text: str
     return {c.name: ok for c, ok in zip(channels, results)}
 
 
+async def send_long(client: httpx.AsyncClient, channels: list[Channel], text: str,
+                    pause: float = 0.4) -> dict[str, bool]:
+    """Like send_all, for texts that may exceed a channel's limit: each channel gets the text split to its own
+    limit, in order, with a short pause between parts (Telegram rate-limits bursts). Never raises."""
+
+    async def one(ch: Channel) -> bool:
+        try:
+            for i, part in enumerate(split_message(text, ch.limit)):
+                if i:
+                    await asyncio.sleep(pause)
+                await ch.send(client, part)
+            return True
+        except Exception as exc:
+            log.warning("Notification via %s failed: %s", ch.name, ch.redact(_error_text(exc)))
+            return False
+
+    results = await asyncio.gather(*(one(c) for c in channels))
+    return {c.name: ok for c, ok in zip(channels, results)}
+
+
 class _RedactFilter(logging.Filter):
     """httpx logs every request URL at INFO; the Telegram and Discord URLs contain the secret."""
 
@@ -189,6 +318,73 @@ class _RedactFilter(logging.Filter):
         return True
 
 
+# ------------------------------------------------------------ JSON stores --
+
+
+def store_path(value: str) -> Optional[Path]:
+    """A *_STORE setting → its file, or None for `memory` (kept in memory only, as in tests)."""
+    value = value.strip()
+    return None if value.lower() in ("", "memory", "none", "off") else Path(value)
+
+
+def read_store(path: Optional[Path]) -> Optional[dict]:
+    if not path or not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        log.warning("Could not read %s (%s); starting empty", path, exc)
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def write_store(path: Optional[Path], data: dict) -> None:
+    """Atomic write (temp file + rename), so a crash mid-write never leaves a half file."""
+    if not path:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data))
+        tmp.replace(path)
+    except OSError as exc:
+        log.warning("Could not save %s: %s", path, exc)
+
+
+class AlertHistory:
+    """Every fire (price alert, signal alert, brief), the newest MAX_HISTORY kept, saved to ALERT_HISTORY_STORE.
+    Items: {id, time (ms), kind, symbol, title, text, price?, alert_id?}."""
+
+    def __init__(self, store: str) -> None:
+        self._path = store_path(store)
+        data = read_store(self._path) or {}
+        self._items: list[dict] = [i for i in data.get("items", []) if isinstance(i, dict) and "time" in i]
+        self._items = self._items[-MAX_HISTORY:]
+
+    def add(self, kind: HistoryKind, symbol: str, title: str, text: str, price: Optional[float] = None,
+            alert_id: Optional[str] = None, time_ms: Optional[int] = None) -> dict:
+        item: dict = {"id": uuid.uuid4().hex[:12], "time": time_ms or int(time.time() * 1000), "kind": kind,
+                      "symbol": symbol, "title": title, "text": text}
+        if price is not None:
+            item["price"] = price
+        if alert_id is not None:
+            item["alert_id"] = alert_id
+        self._items.append(item)
+        del self._items[:-MAX_HISTORY]
+        write_store(self._path, {"items": self._items})
+        return item
+
+    def list(self, limit: int = 100) -> list[dict]:
+        """Newest first."""
+        return self._items[::-1][:max(0, limit)]
+
+    def clear(self) -> int:
+        n = len(self._items)
+        self._items = []
+        write_store(self._path, {"items": []})
+        return n
+
+
 # ---------------------------------------------------------------- service --
 
 
@@ -197,14 +393,16 @@ class AlertService:
                  client: httpx.AsyncClient | None = None) -> None:
         self.hub = hub
         self.s = settings or get_settings()
-        store = self.s.alerts_store.strip()
-        self._store = None if store.lower() in ("memory", "none", "off") else Path(store)
+        self._store = store_path(self.s.alerts_store)
         self._alerts: dict[str, PriceAlert] = {}
         self._watches: dict[str, tuple[asyncio.Queue, asyncio.Task]] = {}
         self._listeners: set[asyncio.Queue] = set()
+        self._snapshot_providers: list[Callable[[], dict]] = []
         self._tasks: set[asyncio.Task] = set()
+        self._expiry_task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
         self._closed = False
+        self.history = AlertHistory(self.s.alert_history_store)
         self.channels = build_channels(self.s)
         self._log_filter = _RedactFilter(self.channels)
         logging.getLogger("httpx").addFilter(self._log_filter)
@@ -218,10 +416,17 @@ class AlertService:
         return {"telegram": "telegram" in names, "discord": "discord" in names}
 
     async def start(self) -> None:
+        self.expire_due()  # alerts that ran out while the server was down
         await self._sync()
+        if self._expiry_task is None:
+            self._expiry_task = asyncio.create_task(self._expiry_loop(), name="alerts:expiry")
 
     async def close(self) -> None:
         self._closed = True
+        if self._expiry_task:
+            self._expiry_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._expiry_task
         async with self._lock:
             watches = list(self._watches.items())
             self._watches.clear()
@@ -260,6 +465,19 @@ class AlertService:
         await self._sync()
         return created
 
+    async def update(self, alert_id: str, patch: AlertPatch) -> Optional[PriceAlert]:
+        """Edit an alert (see apply_patch) → the new alert, or None when it does not exist. Raises ValueError
+        for an invalid edit."""
+        a = self._alerts.get(alert_id)
+        if a is None:
+            return None
+        a = apply_patch(a, patch)
+        self._alerts[alert_id] = a
+        self._save()
+        self._changed()
+        await self._sync()
+        return a
+
     async def remove(self, alert_id: str) -> bool:
         if self._alerts.pop(alert_id, None) is None:
             return False
@@ -272,7 +490,11 @@ class AlertService:
         a = self._alerts.get(alert_id)
         if a is None:
             return None
-        a = a.model_copy(update={"armed": True, "last_side": None, "triggered_at": None, "triggered_price": None})
+        update: dict = {"armed": True, "expired": False, "last_side": None, "triggered_at": None,
+                        "triggered_price": None}
+        if a.expires_at is not None and a.expires_at <= int(time.time() * 1000):
+            update["expires_at"] = None  # re-arming an expired alert keeps it until it fires or is deleted
+        a = a.model_copy(update=update)
         self._alerts[alert_id] = a
         self._save()
         self._changed()
@@ -288,33 +510,88 @@ class AlertService:
             self._changed()
         return len(gone)
 
+    def expire_due(self, now_ms: Optional[int] = None) -> list[PriceAlert]:
+        """Disarm every armed alert whose `expires_at` has passed → the ones that expired."""
+        now = now_ms if now_ms is not None else int(time.time() * 1000)
+        expired = [a.model_copy(update={"armed": False, "expired": True}) for a in self._alerts.values()
+                   if a.armed and a.expires_at is not None and a.expires_at <= now]
+        if not expired:
+            return []
+        for a in expired:
+            self._alerts[a.id] = a
+            log.info("Alert expired: %s %s", a.symbol, a.label or a.id)
+        self._save()
+        self._changed()
+        if not self._closed:
+            self._spawn(self._sync())
+        return expired
+
+    async def _expiry_loop(self) -> None:
+        while True:
+            await asyncio.sleep(EXPIRY_CHECK_SECONDS)
+            try:
+                self.expire_due()
+            except Exception:
+                log.exception("Alert expiry check failed")
+
+    # ----------------------------------------------------- notifications
     async def send_test(self) -> dict[str, bool]:
         return await send_all(self._client, self.channels,
                               "Agentic Charts: test notification. Price alerts from this backend will arrive here.")
 
+    async def send_text(self, text: str) -> dict[str, bool]:
+        """Send any text (a signal alert, the brief) to every configured channel, split to each channel's
+        message limit → {channel: delivered}. Empty when no channel is configured."""
+        return await send_long(self._client, self.channels, text) if self.channels else {}
+
+    def notify(self, text: str) -> None:
+        """Fire-and-forget send_text, for use from stream callbacks."""
+        if self.channels and not self._closed:
+            self._spawn(self.send_text(text))
+
+    def record(self, kind: HistoryKind, symbol: str, title: str, text: str, price: Optional[float] = None,
+               alert_id: Optional[str] = None, time_ms: Optional[int] = None) -> dict:
+        """Append a fire to the history and push it to every `/ws/alerts` listener as {type: "history", item}."""
+        item = self.history.add(kind, symbol, title, text, price=price, alert_id=alert_id, time_ms=time_ms)
+        self.broadcast({"type": "history", "item": item})
+        return item
+
     # --------------------------------------------------------- listeners
     def subscribe(self) -> asyncio.Queue:
-        """A queue of `snapshot` / `fired` messages, starting with the current snapshot."""
+        """A queue of `/ws/alerts` messages, starting with the price-alert snapshot and every registered
+        provider's snapshot (signal alerts)."""
         queue: asyncio.Queue = asyncio.Queue(maxsize=LISTENER_QUEUE_SIZE)
         queue.put_nowait(self._snapshot())
+        for provider in self._snapshot_providers:
+            try:
+                queue.put_nowait(provider())
+            except Exception:
+                log.exception("Snapshot provider failed")
         self._listeners.add(queue)
         return queue
 
     def unsubscribe(self, queue: asyncio.Queue) -> None:
         self._listeners.discard(queue)
 
+    def add_snapshot_provider(self, provider: Callable[[], dict]) -> None:
+        """`provider()` → a message every new `/ws/alerts` listener receives after the price-alert snapshot."""
+        self._snapshot_providers.append(provider)
+
     def _snapshot(self) -> dict:
         return {"type": "snapshot", "alerts": [a.model_dump() for a in self._alerts.values()]}
 
-    def _broadcast(self, msg: dict) -> None:
+    def broadcast(self, msg: dict) -> None:
+        """Push `msg` to every `/ws/alerts` listener."""
         for q in list(self._listeners):
             if q.full():  # slow consumer: drop its oldest message rather than block
                 with contextlib.suppress(asyncio.QueueEmpty):
                     q.get_nowait()
             q.put_nowait(msg)
 
+    _broadcast = broadcast
+
     def _changed(self) -> None:
-        self._broadcast(self._snapshot())
+        self.broadcast(self._snapshot())
 
     # ---------------------------------------------------------- watching
     async def _sync(self) -> None:
@@ -346,32 +623,37 @@ class AlertService:
             except Exception:  # never let one bad message kill the watcher
                 log.exception("Alert evaluation failed for %s", symbol)
 
-    def on_price(self, symbol: str, price: float, source: str = "binance") -> list[PriceAlert]:
+    def on_price(self, symbol: str, price: float, source: str = "binance",
+                 now_ms: Optional[int] = None) -> list[PriceAlert]:
         """Evaluate every armed alert on `symbol` against `price`; returns the ones that fired."""
         fired: list[PriceAlert] = []
-        changed = False
+        changed = disarmed = False
         for a in list(self._alerts.values()):
             if a.symbol != symbol or not a.armed:
                 continue
-            new, did_fire = evaluate(a, price)
+            new, did_fire = evaluate(a, price, now_ms)
             if new is not a:
                 self._alerts[a.id] = new
                 changed = True
+                disarmed = disarmed or not new.armed
             if did_fire:
                 fired.append(new)
         if not changed:
             return fired
         self._save()
         for a in fired:
-            log.info("Alert fired: %s", describe_fire(a, price))
-            self._broadcast({"type": "fired", "alert": a.model_dump(), "price": price})
+            text = describe_fire(a, price)
+            log.info("Alert fired: %s", text)
+            self.broadcast({"type": "fired", "alert": a.model_dump(), "price": price})
+            self.record("price", a.symbol, a.label or "Price alert", text, price=price, alert_id=a.id,
+                        time_ms=a.triggered_at)
         self._changed()
-        if fired:
-            if self.channels:
-                lines = [describe_fire(a, price) for a in fired]
-                if source == "synthetic":
-                    lines.append("(synthetic demo data)")
-                self._spawn(send_all(self._client, self.channels, "\n".join(lines)))
+        if fired and self.channels:
+            lines = [describe_fire(a, price) for a in fired]
+            if source == "synthetic":
+                lines.append("(synthetic demo data)")
+            self._spawn(send_all(self._client, self.channels, "\n".join(lines)))
+        if disarmed:
             self._spawn(self._sync())  # drop the subscription if nothing is armed on this symbol any more
         return fired
 
@@ -401,12 +683,4 @@ class AlertService:
                      sum(a.armed for a in self._alerts.values()))
 
     def _save(self) -> None:
-        if not self._store:
-            return
-        try:
-            self._store.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self._store.with_suffix(".tmp")
-            tmp.write_text(json.dumps({"alerts": [a.model_dump() for a in self._alerts.values()]}))
-            tmp.replace(self._store)
-        except OSError as exc:
-            log.warning("Could not save alerts to %s: %s", self._store, exc)
+        write_store(self._store, {"alerts": [a.model_dump() for a in self._alerts.values()]})

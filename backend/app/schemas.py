@@ -228,8 +228,9 @@ class AnalysisIntent(BaseModel):
 
     @model_validator(mode="after")
     def _default_features(self) -> "AnalysisIntent":
-        # A request with nothing to draw, remove or alert on is a plain "analyse this".
-        if not self.features and not self.has_actions:
+        # A request with nothing to draw, remove or alert on is a plain "analyse this", unless it keeps the chart
+        # as it is (a question answered from facts, like "what does Kimi say?").
+        if not self.features and not self.has_actions and not self.keep_existing:
             self.features = ["support_resistance"]
         return self
 
@@ -248,6 +249,10 @@ class AlertSpec(BaseModel):
     price_low: Optional[float] = None
     price_high: Optional[float] = None
     label: str = ""
+    # Management options (alerts.py); the defaults keep older clients and stored alerts working.
+    repeat: bool = Field(False, description="Stay armed after firing; fire again on a new crossing, at most every 5 min")
+    expires_at: Optional[int] = Field(None, description="UNIX milliseconds; the alert disarms itself after this")
+    note: str = Field("", max_length=500)
 
 
 class Navigate(BaseModel):
@@ -289,8 +294,14 @@ class ScanResult(BaseModel):
     data_source: str = "binance"
 
 
+def is_custom_symbol(symbol: str) -> bool:
+    """A ratio of two pairs ("ETHUSDT/BTCUSDT") or a market-cap index ("INDEX:TOTAL2"): charts the browser builds,
+    which have no Binance stream of their own."""
+    return "/" in symbol or symbol.startswith("INDEX:")
+
+
 class AnalyzeRequest(BaseModel):
-    symbol: str = Field("INJUSDT", min_length=2, max_length=20)
+    symbol: str = Field("INJUSDT", min_length=2, max_length=40)
     interval: Interval = "4h"
     prompt: str = Field("", max_length=2000)
     limit: int = Field(500, ge=100, le=1000)
@@ -305,7 +316,13 @@ class AnalyzeRequest(BaseModel):
     @field_validator("symbol")
     @classmethod
     def _norm_symbol(cls, v: str) -> str:
-        return v.replace("/", "").replace("-", "").upper()
+        v = v.strip().upper()
+        if v.startswith("INDEX:"):
+            return v
+        parts = v.split("/")
+        if len(parts) == 2 and all(len(p) > 4 and p.endswith(("USDT", "USDC", "FDUSD")) for p in parts):
+            return v  # a ratio chart of two pairs
+        return v.replace("/", "").replace("-", "")
 
     @field_validator("watchlist")
     @classmethod
@@ -389,6 +406,8 @@ class PriceAlert(AlertSpec):
     triggered_price: Optional[float] = None
     last_side: Optional[Literal["above", "below", "inside"]] = Field(
         None, description="Where price was last seen relative to the level, so alerts fire on the transition")
+    fire_count: int = 0
+    expired: bool = Field(False, description="Disarmed because expires_at passed")
 
 
 class CreateAlertsRequest(BaseModel):

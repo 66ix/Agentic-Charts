@@ -67,7 +67,12 @@ export class BoxZonePrimitive extends PrimitiveBase {
       // Zone labels sit at the zone's left edge; level labels (rays) sit at the
       // right edge, so the two rarely collide when a level is inside a zone.
       const labelY = h > 20 ? b.top + 10 : b.top - 9;
-      drawLabel(ctx, this.box.label, Math.max(b.left + 6, 6), labelY, { color: "#e5e7eb", bg: border, bold: true });
+      drawLabel(ctx, this.box.label, Math.max(b.left + 6, 6), labelY, {
+        color: "#e5e7eb",
+        bg: border,
+        bold: true,
+        labels: this.labels,
+      });
     }
   }
 

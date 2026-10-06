@@ -55,7 +55,9 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "market_context",
-        "description": "24h change, futures funding rate and 24h open-interest change for one coin.",
+        "description": "24h change, futures funding (now and 24h average), open interest and its 24h change, long/short "
+                       "ratio, 24h spot CVD, the nearest order-book walls, estimated liquidation clusters, and "
+                       "high-impact economic events in the next 24h, for one coin.",
         "parameters": {
             "type": "object", "additionalProperties": False, "required": ["symbol"],
             "properties": {"symbol": {"type": "string", "description": "USDT pair, e.g. BTCUSDT"}},
@@ -134,7 +136,7 @@ async def _run_tool(box: Toolbox, name: str, args: dict, chart: ChartContext) ->
         return await box.kimi(sym, tf), f"Read Kimi Cooked on {sym} {tf}"
     if name == "market_context":
         sym = str(args.get("symbol") or chart.symbol).upper()
-        return await box.context(sym), f"Checked funding and open interest for {sym}"
+        return await box.context(sym), f"Checked futures data, order flow and upcoming events for {sym}"
     return {"error": f"unknown tool {name}"}, ""
 
 

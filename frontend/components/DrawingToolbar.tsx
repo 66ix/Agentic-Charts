@@ -9,12 +9,14 @@ import {
   LockOpen,
   Magnet,
   Minus,
+  Redo2,
   MoveUpRight,
   Ruler,
   Spline,
   Square,
   Trash2,
   Type,
+  Undo2,
   type LucideIcon,
 } from "lucide-react";
 
@@ -47,6 +49,13 @@ interface Props {
   onLock(v: boolean): void;
   onDelete(): void;
   onAlert(): void;
+  /** Undo / redo of drawings and AI levels; the labels say what would change ("delete drawing"). */
+  undoLabel: string | null;
+  redoLabel: string | null;
+  onUndo(): void;
+  onRedo(): void;
+  /** Phones: one scrollable row above the bottom tabs instead of the left column. */
+  horizontal?: boolean;
 }
 
 function ToolButton({ active, label, onClick, children, danger, disabled }: {
@@ -66,7 +75,7 @@ function ToolButton({ active, label, onClick, children, danger, disabled }: {
       disabled={disabled}
       onClick={onClick}
       className={clsx(
-        "grid h-9 w-9 place-items-center rounded-md transition-colors disabled:cursor-not-allowed disabled:opacity-30",
+        "grid h-9 w-9 shrink-0 place-items-center rounded-md transition-colors disabled:cursor-not-allowed disabled:opacity-30",
         active ? "bg-accent/20 text-accent" : "text-mute hover:bg-panel2 hover:text-ink",
         danger && !disabled && "hover:text-down",
       )}
@@ -78,13 +87,25 @@ function ToolButton({ active, label, onClick, children, danger, disabled }: {
 
 export default function DrawingToolbar(p: Props) {
   return (
-    <nav aria-label="Drawing tools" className="flex w-12 shrink-0 flex-col items-center gap-0.5 border-r border-line bg-panel py-2">
+    <nav
+      aria-label="Drawing tools"
+      className={clsx(
+        "flex shrink-0 items-center gap-0.5 bg-panel",
+        p.horizontal ? "h-11 overflow-x-auto border-t border-line px-1 scrollbar-none" : "w-12 flex-col border-r border-line py-2",
+      )}
+    >
       {TOOLS.map(({ id, icon: Icon, label, key }) => (
         <ToolButton key={id} label={`${label} (${key})`} active={p.tool === id} onClick={() => p.onTool(id)} disabled={p.locked && id !== "crosshair"}>
           <Icon className="h-[18px] w-[18px]" strokeWidth={1.75} />
         </ToolButton>
       ))}
-      <div className="my-1.5 h-px w-7 bg-line" />
+      <div className={p.horizontal ? "mx-1 h-6 w-px shrink-0 bg-line" : "my-1.5 h-px w-7 bg-line"} />
+      <ToolButton label={p.undoLabel ? `Undo ${p.undoLabel} (Ctrl+Z)` : "Nothing to undo"} onClick={p.onUndo} disabled={!p.undoLabel}>
+        <Undo2 className="h-[18px] w-[18px]" strokeWidth={1.75} />
+      </ToolButton>
+      <ToolButton label={p.redoLabel ? `Redo ${p.redoLabel} (Ctrl+Y)` : "Nothing to redo"} onClick={p.onRedo} disabled={!p.redoLabel}>
+        <Redo2 className="h-[18px] w-[18px]" strokeWidth={1.75} />
+      </ToolButton>
       <ToolButton label="Magnet mode: snap to OHLC" active={p.magnet} onClick={() => p.onMagnet(!p.magnet)}>
         <Magnet className="h-[18px] w-[18px]" strokeWidth={1.75} />
       </ToolButton>
