@@ -601,7 +601,7 @@ class LLMClient:
 
         if self.provider == "ollama":
             r = await self._client.post(f"{self.s.ollama_url}/api/chat", json={
-                "model": self.s.ollama_model, "stream": False, "options": {"temperature": 0},
+                "model": self.s.ollama_model, "stream": False, "options": self._ollama_options(0),
                 "tools": [{"type": "function", "function": {"name": t["name"], "description": t["description"],
                                                             "parameters": t["parameters"]}} for t in tools],
                 "messages": [{"role": "system", "content": system}, *_to_ollama(messages)],
@@ -637,11 +637,17 @@ class LLMClient:
         return fallback, "template"
 
     # -------------------------------------------------------- providers
+    def _ollama_options(self, temperature: float) -> dict:
+        opts: dict = {"temperature": temperature}
+        if self.s.ollama_num_ctx > 0:
+            opts["num_ctx"] = self.s.ollama_num_ctx
+        return opts
+
     async def _structured(self, system: str, user: str, schema: dict, name: str) -> dict:
         if self.provider == "ollama":
             r = await self._client.post(f"{self.s.ollama_url}/api/chat", json={
                 "model": self.s.ollama_model, "stream": False, "format": schema,
-                "options": {"temperature": 0},
+                "options": self._ollama_options(0),
                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
             })
             r.raise_for_status()
@@ -677,7 +683,7 @@ class LLMClient:
     async def _text(self, system: str, user: str) -> str:
         if self.provider == "ollama":
             r = await self._client.post(f"{self.s.ollama_url}/api/chat", json={
-                "model": self.s.ollama_model, "stream": False, "options": {"temperature": 0.2},
+                "model": self.s.ollama_model, "stream": False, "options": self._ollama_options(0.2),
                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
             })
             r.raise_for_status()

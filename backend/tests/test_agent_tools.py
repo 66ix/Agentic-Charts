@@ -100,8 +100,11 @@ def test_openai_tool_loop_messages_and_strict_tools():
 
 
 def test_ollama_without_tool_call_falls_back_to_single_shot():
+    contexts = []
+
     def handler(req: httpx.Request) -> httpx.Response:
         body = json.loads(req.content)
+        contexts.append(body["options"].get("num_ctx"))
         if "tools" in body:
             return httpx.Response(200, json={"message": {"role": "assistant", "content": "I think..."}})
         if "format" in body:
@@ -111,6 +114,8 @@ def test_ollama_without_tool_call_falls_back_to_single_shot():
     res = _run(_llm("ollama", handler), "add rsi")
     assert res.engine["intent"] == "ollama:llama3.1:8b"
     assert res.indicators == {"rsi": True}
+    # Tool loop, single-shot plan and narration all ask for a window the tool schemas fit in.
+    assert len(contexts) == 3 and set(contexts) == {8192}
 
 
 def test_navigation_scan_plan_and_indicators_with_rules():

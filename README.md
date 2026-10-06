@@ -94,6 +94,10 @@ agentic-charts/
 Requirements: **Python 3.11+**, **Node.js 18.18+** (20 or 22 recommended).
 Optional: **[Ollama](https://ollama.com)** for the local LLM.
 
+With Docker Desktop instead (Windows, Mac or Linux): `docker compose up -d --build` in the repo root,
+then open <http://localhost:3000>. Settings go in `backend/.env`. An Ollama app installed on the same
+computer is found at `host.docker.internal:11434` and keeps using its GPU.
+
 ### 1. Backend
 
 ```bash
@@ -170,6 +174,7 @@ for 30 seconds.
 | `DERIVATIVES` | `on` | Live open interest and liquidations from Binance futures (`off` to mock them) |
 | `OI_TOP_SYMBOLS` | `40` | Open interest sums this many top USDT perpetuals by volume |
 | `LLM_PROVIDER` | `ollama` | `ollama`, `openai`, `anthropic`, `none` |
+| `OLLAMA_NUM_CTX` | `8192` | Context window requested from Ollama. Its own default on GPUs under 24 GB is 4096, too small for the agent's tool calls (`0` = Ollama's default) |
 | `AGENT_MODE` | `tools` | `tools` = the model may look at other charts before drawing, `single` = one planning call |
 | `AGENT_MAX_STEPS` | `4` | Tool calls allowed per request before the model must draw |
 | `AGENT_RATE_LIMIT` | `20/minute` | Agent requests per client (`0` = off); also `/second`, `/hour`, `/day` |
@@ -397,8 +402,8 @@ The compose file binds both containers to `127.0.0.1` so only the proxy reaches 
 `TRUST_PROXY=1` so rate limits apply per visitor. The candle cache, liquidation history and alerts live
 in the `backend-cache` volume and survive rebuilds. `NEXT_PUBLIC_API_URL` is baked into the frontend
 at build time, so rebuild (`docker compose up -d --build`) after changing `PUBLIC_API_URL`. For a local
-model, add `--profile ollama` and run `docker compose exec ollama ollama pull llama3.1:8b`; a cloud
-provider is lighter on a small VPS. A public deployment with a cloud LLM should keep
+model on the server, run `OLLAMA_URL=http://ollama:11434 docker compose --profile ollama up -d` and
+`docker compose exec ollama ollama pull llama3.1:8b`; a cloud provider is lighter on a small VPS. A public deployment with a cloud LLM should keep
 `AGENT_DAILY_LIMIT` (500 by default in compose) so nobody can run up the bill.
 
 ## Production notes
