@@ -51,6 +51,8 @@ DERIVED_INTERVALS: dict[str, tuple[str, int]] = {"3h": ("1h", 3)}
 BINANCE_MAX_LIMIT = 1000
 # Largest history one call returns: the REST endpoint allows 1500, Kimi Cooked asks for up to 5000.
 MAX_KLINES = 5000
+# Longest get_range: a bit over 13 months of 1m bars.
+MAX_RANGE_BARS = 570_000
 
 FALLBACK_SYMBOLS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "INJUSDT", "DOGEUSDT", "ADAUSDT",
@@ -155,6 +157,80 @@ class MarketData:
         if len(self._cache) > 256:
             self._cache.pop(next(iter(self._cache)))
         return candles, source
+
+    async def get_range(self, symbol: str, interval: str, start: int, end: int | None = None) -> tuple[pd.DataFrame, str]:
+        """Every bar of a native interval from `start` to `end` (UNIX s; None = now, including the open bar)
+        → (DataFrame with time/open/high/low/close/volume, source). For grid bots, the journal and backtests,
+        which need long stretches of 1m bars: closed bars are cached in SQLite, so only new ones are fetched,
+        and no Candle objects are built (a month of 1m is 43,200 bars)."""
+        if interval not in INTERVAL_SECONDS or interval in DERIVED_INTERVALS:
+            raise MarketDataError(f"Unsupported range interval {interval!r}")
+        step = INTERVAL_SECONDS[interval]
+        now = int(time.time())
+        end = now if end is None else min(end, now)
+        start = start - start % step
+        if end < start:
+            raise MarketDataError("Range ends before it starts")
+        bars = (end - start) // step + 1
+        if bars > MAX_RANGE_BARS:
+            raise MarketDataError(f"Range too long: {bars:,} {interval} bars (at most {MAX_RANGE_BARS:,})")
+        if self.binance_usable():
+            try:
+                return _rows_df(await self._binance_range(symbol, interval, start, end)), "binance"
+            except Exception as exc:
+                if self.settings.data_source == "binance":
+                    raise MarketDataError(f"Binance klines failed: {exc}") from exc
+                log.warning("Binance unavailable for a range (%s); serving synthetic data", exc)
+                self.mark_binance_down()
+        candles = synthetic_klines(symbol, interval, (now - start) // step + 1, end=now)
+        df = candles_to_df(candles)
+        return df[(df["time"] >= start) & (df["time"] <= end)].reset_index(drop=True), "synthetic"
+
+    async def _binance_range(self, symbol: str, interval: str, start: int, end: int) -> list[tuple]:
+        step = INTERVAL_SECONDS[interval]
+        cached: list[tuple] = []
+        if self._store is not None:
+            try:
+                cached = await asyncio.to_thread(self._store.load_range, symbol, interval, start, end)
+            except Exception as exc:
+                log.warning("Range cache read failed (%s); fetching from Binance", exc)
+        # Spans the cache does not cover: before its first bar, holes inside it, and after its last bar.
+        spans: list[tuple[int, int]] = []
+        cursor = start
+        for row in cached:
+            if row[0] > cursor:
+                spans.append((cursor, row[0] - step))
+            cursor = row[0] + step
+        if cursor <= end:
+            spans.append((cursor, end))
+        fetched: list[tuple] = []
+        for lo, hi in spans:
+            fetched += await self._binance_span(symbol, interval, lo, hi)
+        if fetched and self._store is not None:
+            closed = [r for r in fetched if r[0] + step <= time.time()]
+            try:
+                await asyncio.to_thread(self._store.save_range, symbol, interval, closed)
+            except Exception as exc:
+                log.warning("Range cache write failed: %s", exc)
+        rows = {r[0]: r for r in cached}
+        rows.update({r[0]: r for r in fetched})
+        return [rows[t] for t in sorted(rows) if start <= t <= end]
+
+    async def _binance_span(self, symbol: str, interval: str, lo: int, hi: int) -> list[tuple]:
+        """Bars opening in [lo, hi] as tuples, paging forward 1000 at a time."""
+        out: list[tuple] = []
+        start_ms, end_ms = lo * 1000, hi * 1000
+        while start_ms <= end_ms:
+            rows = await self._kline_rows({"symbol": symbol, "interval": interval, "startTime": start_ms,
+                                           "endTime": end_ms, "limit": BINANCE_MAX_LIMIT})
+            if not rows:
+                break
+            out += [(int(r[0]) // 1000, float(r[1]), float(r[2]), float(r[3]), float(r[4]), float(r[5]))
+                    for r in rows]
+            start_ms = int(rows[-1][0]) + 1
+            if len(rows) < BINANCE_MAX_LIMIT:
+                break
+        return out
 
     async def list_symbols(self) -> list[str]:
         if self._symbols and self._symbols[0] > time.monotonic():
@@ -312,6 +388,13 @@ def resample(candles: list[Candle], bucket_seconds: int) -> list[Candle]:
         Candle(time=int(t), open=r.open, high=r.high, low=r.low, close=r.close, volume=r.volume)
         for t, r in agg.iterrows()
     ]
+
+
+def _rows_df(rows: list[tuple]) -> pd.DataFrame:
+    """(time, open, high, low, close, volume) tuples → the same frame as candles_to_df."""
+    arr = np.asarray(rows, dtype=float).reshape(-1, 6)
+    return pd.DataFrame({"time": arr[:, 0].astype(np.int64), "open": arr[:, 1], "high": arr[:, 2],
+                         "low": arr[:, 3], "close": arr[:, 4], "volume": arr[:, 5]})
 
 
 def candles_to_df(candles: list[Candle]) -> pd.DataFrame:

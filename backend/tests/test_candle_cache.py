@@ -174,3 +174,64 @@ def test_klines_since_filter(monkeypatch):
     assert part["candles"] == full["candles"][-5:]
     assert future["candles"] == []
     assert bad.status_code == 422
+
+
+# ------------------------------------------------------------- get_range --
+
+
+class FakeRange:
+    """/api/v3/klines with startTime/endTime paging forward over `rows` (1m bars)."""
+
+    def __init__(self, rows):
+        self.rows = rows
+        self.calls = []
+
+    def __call__(self, req: httpx.Request) -> httpx.Response:
+        q = req.url.params
+        self.calls.append(dict(q))
+        lo, hi, limit = int(q["startTime"]), int(q.get("endTime", 10**18)), int(q["limit"])
+        return httpx.Response(200, json=[r for r in self.rows if lo <= r[0] <= hi][:limit])
+
+
+def _m1(open_s, close):
+    ms = open_s * 1000
+    return [ms, str(close), str(close + 1), str(close - 1), str(close), "5", ms + 59_999, "0", 1, "0", "0", "0"]
+
+
+def test_get_range_pages_and_caches(cache_path):
+    now = int(time.time()) // 60 * 60
+    start = now - 2500 * 60
+    rows = [_m1(start + i * 60, 100 + i % 7) for i in range(2501)]
+    fake = FakeRange(rows)
+    md = _market(fake)
+
+    async def run():
+        df, src = await md.get_range("BTCUSDT", "1m", start)
+        assert src == "binance"
+        assert len(df) == 2501 and df["time"].iloc[0] == start and df["time"].iloc[-1] == now
+        assert (df["time"].diff().dropna() == 60).all()
+        first_calls = len(fake.calls)
+        assert first_calls == 3  # 1000 + 1000 + 501
+        fake.calls.clear()
+        df2, _ = await md.get_range("BTCUSDT", "1m", start + 600)
+        assert len(df2) == 2501 - 10
+        # Only the bars after the last closed cached one are fetched again.
+        assert len(fake.calls) == 1 and int(fake.calls[0]["startTime"]) >= (now - 60) * 1000
+        await md.close()
+
+    asyncio.run(run())
+
+
+def test_get_range_synthetic_when_binance_blocked(monkeypatch, cache_path):
+    monkeypatch.setenv("DATA_SOURCE", "synthetic")
+    config.get_settings.cache_clear()
+    md = MarketData()
+
+    async def run():
+        start = int(time.time()) - 3 * 86400
+        df, src = await md.get_range("SOLUSDT", "1m", start)
+        assert src == "synthetic"
+        assert abs(len(df) - 3 * 1440) <= 2
+        await md.close()
+
+    asyncio.run(run())

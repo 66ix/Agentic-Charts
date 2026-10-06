@@ -21,6 +21,9 @@ from .schemas import Candle
 # Bars kept per (symbol, interval): the largest requests are Kimi Cooked's 5000 bars, and its 1600 bars of 3h
 # (4803 bars of 1h).
 KEEP_BARS = 5000
+# History fetched by time range (grid bots, journal, backtests) lives in its own table and is not trimmed to
+# KEEP_BARS: a grid bot that has run for a month needs every 1m bar since it started. About 13 months of 1m.
+RANGE_KEEP_BARS = 570_000
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS candles (
@@ -33,7 +36,18 @@ CREATE TABLE IF NOT EXISTS candles (
     close    REAL    NOT NULL,
     volume   REAL    NOT NULL,
     PRIMARY KEY (symbol, interval, time)
-) WITHOUT ROWID
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS range_candles (
+    symbol   TEXT    NOT NULL,
+    interval TEXT    NOT NULL,
+    time     INTEGER NOT NULL,
+    open     REAL    NOT NULL,
+    high     REAL    NOT NULL,
+    low      REAL    NOT NULL,
+    close    REAL    NOT NULL,
+    volume   REAL    NOT NULL,
+    PRIMARY KEY (symbol, interval, time)
+) WITHOUT ROWID;
 """
 
 
@@ -49,7 +63,7 @@ class CandleStore:
         try:
             self._db.execute("PRAGMA journal_mode=WAL")
             self._db.execute("PRAGMA synchronous=NORMAL")  # it is a cache: losing the last commit is fine
-            self._db.execute(_SCHEMA)
+            self._db.executescript(_SCHEMA)
             self._db.commit()
         except sqlite3.Error:
             self._db.close()
@@ -82,6 +96,31 @@ class CandleStore:
                 "DELETE FROM candles WHERE symbol = ? AND interval = ? AND time <= (SELECT time FROM candles"
                 " WHERE symbol = ? AND interval = ? ORDER BY time DESC LIMIT 1 OFFSET ?)",
                 (symbol, interval, symbol, interval, self.keep),
+            )
+
+    def load_range(self, symbol: str, interval: str, start: int, end: int) -> list[tuple]:
+        """Stored range bars with start <= time <= end as (time, open, high, low, close, volume), oldest first."""
+        with self._lock:
+            return self._db.execute(
+                "SELECT time, open, high, low, close, volume FROM range_candles"
+                " WHERE symbol = ? AND interval = ? AND time >= ? AND time <= ? ORDER BY time",
+                (symbol, interval, start, end),
+            ).fetchall()
+
+    def save_range(self, symbol: str, interval: str, rows: list[tuple]) -> None:
+        """Insert closed bars given as (time, open, high, low, close, volume); keeps the newest RANGE_KEEP_BARS."""
+        if not rows:
+            return
+        with self._lock, self._db:
+            self._db.executemany(
+                "INSERT OR REPLACE INTO range_candles (symbol, interval, time, open, high, low, close, volume)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [(symbol, interval, *r) for r in rows],
+            )
+            self._db.execute(
+                "DELETE FROM range_candles WHERE symbol = ? AND interval = ? AND time <= (SELECT time FROM"
+                " range_candles WHERE symbol = ? AND interval = ? ORDER BY time DESC LIMIT 1 OFFSET ?)",
+                (symbol, interval, symbol, interval, RANGE_KEEP_BARS),
             )
 
     def latest_time(self, symbol: str, interval: str) -> int | None:
