@@ -33,7 +33,8 @@ log = logging.getLogger(__name__)
 INTENT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["features", "timeframe", "window_timeframes", "max_zones", "answer_hint"],
+    "required": ["features", "timeframe", "window_timeframes", "max_zones", "answer_hint", "custom_levels",
+                 "remove", "keep_existing", "alert_prices", "alert_targets"],
     "properties": {
         "features": {
             "type": "array",

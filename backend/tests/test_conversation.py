@@ -72,3 +72,21 @@ def test_conversation_flow():
 
         cleared = _ask(client, "clear the chart", fresh["overlays"])
         assert cleared["overlays"] == [] and "Removed" in cleared["summary"]
+
+
+def test_intent_schema_is_strict_compatible():
+    """OpenAI strict mode rejects a schema unless every property is required, at every level."""
+    from app.llm import INTENT_SCHEMA
+
+    def check(node):
+        if isinstance(node, dict):
+            if node.get("type") == "object" and "properties" in node:
+                assert node.get("additionalProperties") is False
+                assert sorted(node["required"]) == sorted(node["properties"]), node["properties"].keys()
+            for v in node.values():
+                check(v)
+        elif isinstance(node, list):
+            for v in node:
+                check(v)
+
+    check(INTENT_SCHEMA)
