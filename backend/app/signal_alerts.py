@@ -408,7 +408,8 @@ class SignalAlertService:
         closed = closed_only(candles, interval)
         out["data_source"] = source
         if source == "synthetic":
-            out["note"] = "Demo data: Binance is unreachable, so these candles are synthetic."
+            demo = "Demo data: these candles are synthetic, not the live market."
+            out["note"] = f"{demo} {out['note']}" if out.get("note") else demo
         async with self._preview_sem:
             hits = await asyncio.to_thread(scan_history, signal, candles_to_df(closed), bars, kimi)
         out["hits"] = [{"time": h.time, "price": h.price, "text": h.text} for h in reversed(hits)]

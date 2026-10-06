@@ -1,4 +1,5 @@
 import { API_URL } from "./config";
+import type { AlertPatch } from "./alerts";
 import type {
   AlertChannels,
   AlertSpec,
@@ -130,6 +131,15 @@ export function rearmAlert(id: string) {
 
 export function clearTriggeredAlerts() {
   return apiRequest<{ removed: number }>("/api/alerts/clear-triggered", { method: "POST" });
+}
+
+/** Edit an alert (drag a line, rename, repeat, expiry). Moving the level never fires it. Signal alerts, the
+ *  alert history and the brief have their calls in lib/alerts.ts. */
+export function updateAlert(id: string, patch: AlertPatch) {
+  return apiRequest<{ alert: PriceAlert }>(`/api/alerts/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
 }
 
 /** Sends a test message to every configured channel → which ones delivered it. */
