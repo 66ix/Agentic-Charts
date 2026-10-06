@@ -1287,10 +1287,12 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
         alertDragRef.current = null;
         chart.applyOptions({ handleScroll: true, handleScale: true });
         if (press?.moved) {
+          // Round to what the price axis shows, so the alert reads "7.3000", not "7.299642…".
+          const round = (v: number) => Number(v.toFixed(pricePrecision(v)));
           const patch =
             ad.prim instanceof LabeledRayPrimitive
-              ? { price: ad.prim.line.price }
-              : { price_low: ad.prim.box.price_low, price_high: ad.prim.box.price_high };
+              ? { price: round(ad.prim.line.price) }
+              : { price_low: round(ad.prim.box.price_low), price_high: round(ad.prim.box.price_high) };
           propsRef.current.onAlertMove?.(ad.alertId, patch);
         }
         return;

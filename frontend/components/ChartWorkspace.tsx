@@ -4,7 +4,7 @@ import clsx from "clsx";
 import { Bell, Bot, CandlestickChart, Layers as LayersIcon, List, Loader2, MessageSquare, Pencil, SendHorizontal, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { useAlerts, type FiredAlert } from "@/hooks/useAlerts";
+import { useAlerts, type FiredAlert, type SignalFired } from "@/hooks/useAlerts";
 import { useIsMobile } from "@/hooks/useMediaQuery";
 import { readStored, usePersistentState, writeStored } from "@/hooks/usePersistentState";
 import { useUndo } from "@/hooks/useUndo";
@@ -45,7 +45,7 @@ import { CURRENT_WORKSPACE_KEY, saveWorkspace, WORKSPACES_KEY, type SavedWorkspa
 import AgentPanel, { type AgentMessage, type AgentPanelHandle } from "./AgentPanel";
 import { type AgenticChartHandle, type CompareLine, type FeedInfo, type KimiVisibility } from "./AgenticChart";
 import AlertsPanel from "./AlertsPanel";
-import AlertToasts, { type Toast } from "./AlertToasts";
+import AlertToasts, { signalToast, type Toast } from "./AlertToasts";
 import ChartCell from "./ChartCell";
 import ChartHeader, { COMPARE_COLORS } from "./ChartHeader";
 import Dock, { type DockTab } from "./Dock";
@@ -339,9 +339,9 @@ export default function ChartWorkspace() {
   const onAlertsFired = useCallback((fired: FiredAlert[]) => {
     setToasts((t) => [...t, ...fired.map((f) => ({ id: uid(), alert: f.alert, price: f.price }))].slice(-4));
   }, []);
-  const {
-    alerts, add: addAlerts, remove: removeAlert, rearm, clearTriggered, channels, testChannels, error: alertsError,
-  } = useAlerts(onAlertsFired);
+  const onSignalFired = useCallback((f: SignalFired) => setToasts((t) => [...t, signalToast(uid(), f)].slice(-4)), []);
+  const alertsApi = useAlerts(onAlertsFired, onSignalFired);
+  const { alerts, add: addAlerts, update: updateAlert } = alertsApi;
   const armedAlerts = alerts.filter((a) => a.armed).length;
   const alertOverlaysFor = useCallback((s: string) => alertOverlays(alerts, s), [alerts]);
 
@@ -726,19 +726,7 @@ export default function ChartWorkspace() {
       icon: Bell,
       badge: armedAlerts,
       render: () => (
-        <AlertsPanel
-          open
-          alerts={alerts}
-          symbol={symbol}
-          channels={channels}
-          error={alertsError}
-          onTestChannels={testChannels}
-          onRemove={removeAlert}
-          onRearm={rearm}
-          onClearTriggered={clearTriggered}
-          onPickSymbol={setSymbol}
-          onClose={closeDock}
-        />
+        <AlertsPanel {...dockProps} api={alertsApi} />
       ),
     },
     {
@@ -864,6 +852,7 @@ export default function ChartWorkspace() {
                           onFeed: setFeed,
                           onDataReady,
                           onError: setError,
+                          onAlertMove: (id, patch) => void updateAlert(id, patch),
                         }
                       : null
                   }
