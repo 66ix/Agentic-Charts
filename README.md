@@ -182,6 +182,11 @@ for 30 seconds.
 | `ALERTS_STORE` | `backend/.cache/alerts.json` | Where price alerts are saved; `memory` = not saved |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | empty | Send fired alerts to Telegram (see [Alerts](#alerts)) |
 | `DISCORD_WEBHOOK_URL` | empty | Send fired alerts to a Discord channel |
+| `GRIDBOTS_STORE` | `backend/.cache/gridbots.json` | Saved grid bots; `memory` = not saved |
+| `JOURNAL_STORE` | `backend/.cache/journal.json` | Trade journal; `memory` = not saved |
+| `CALENDAR_URLS` | Forex Factory this week + next week | Economic calendar feeds (JSON, Forex Factory format) |
+| `CALENDAR_COUNTRIES` | `USD` | Currencies kept from the calendar, or `ALL` |
+| `NEWS_FEEDS` | CoinDesk, Cointelegraph RSS | News feeds (RSS or Atom), comma-separated |
 | `NEXT_PUBLIC_API_URL` | `http://localhost:8000` | Frontend → backend |
 | `NEXT_PUBLIC_WS_URL` | derived from API URL | Override for proxies |
 
@@ -244,6 +249,20 @@ they are uploaded once the first time the app connects to a backend that has non
 | POST | `/api/alerts/test` | Send a test message to the configured channels → `{results: {telegram: true}}` |
 | WS | `/ws/klines?symbol=INJUSDT&interval=4h` | `{type:"kline", candle, closed, source}` and `{type:"status"}` messages |
 | WS | `/ws/alerts` | `{type:"snapshot", alerts}` on connect and on every change, `{type:"fired", alert, price}` |
+| POST | `/api/gridbot/simulate` | Grid bot settings (`symbol, lower, upper, grids, grid_type, investment, runtime` or `start_time`, fees, trigger/TP/SL) → PnL, matched trades, APR, orders, fills; nothing saved |
+| GET/POST | `/api/gridbots` | Saved grid bots; POST `{name?, params, binance?}` → `{bot, result}` |
+| PATCH/DELETE | `/api/gridbots/{id}` | Edit or delete a saved bot |
+| GET | `/api/gridbots/{id}/result` | A saved bot's current numbers (recomputed at most once per 1m bar) |
+| GET/POST | `/api/journal` | Logged trades with their evaluation; POST a trade `{symbol, interval, direction, entry, stop, targets, …}` |
+| PATCH/DELETE | `/api/journal/{id}` | Notes, tags, setup, cancel or close a trade; delete it |
+| GET | `/api/journal/stats?symbol=&setup=&direction=` | Win rate, R, expectancy, profit factor, breakdowns, equity curve |
+| POST | `/api/backtest` | `{symbol, interval, setup, bars, target, max_hold_bars, fee_pct}` → trades, stats, equity curve |
+| GET | `/api/futures/funding`, `/open-interest`, `/long-short`, `/liquidation-levels` `?symbol=` | Futures data for the market data tab (`source`: `binance`, `synthetic` or `unavailable`) |
+| GET | `/api/cvd?symbol=&interval=` | Spot taker buy and sell volume per bar and its running sum |
+| GET | `/api/orderbook/walls?symbol=&range_pct=5` | Large resting orders near price |
+| GET | `/api/calendar?days=7&impact=high` | Economic events |
+| GET | `/api/news?symbol=` | Crypto headlines, tagged with the coins they mention |
+| GET | `/api/index/klines?name=TOTAL2&interval=4h` | TOTAL, TOTAL2, TOTAL3 market-cap index candles (top 20 coins) |
 
 Example:
 
@@ -295,6 +314,11 @@ Overlay types: `box`, `horizontal_line`, `trendline`, `marker` (see `backend/app
 - **Kimi Cooked v5.7.4:** Trick's own TradingView indicator, run from its Python port (`backend/app/kimi`) on the last 5,000 closed candles. Turn it on in the Indicators menu or ask the agent ("show my Kimi"). It draws what the script draws: S/R zones and rays with the chance price reaches each level within the forecast window, the auto Fib ladder with its odds and golden pocket, the B+/B-, U/Dn and B+?/B-? labels, and the forecast (confidence band, best-guess line, textured scenario path, end label and the next-candle ▲/▼). The **Kimi Cooked** pill under the legend opens the PATH VERIFY and Signal Stats tables and the latest signals with their outcomes. It reruns when a candle closes, like the script since v5.7.4. Ask "what does Kimi say?" and the agent reads its levels, signals and forecast; with an LLM it can also read it on other coins and timeframes. Chart patterns and harmonics are not in the port yet, so those drawings and the Pat BO and Harmonics rows are missing, and confluence scores run a little lower than on TradingView.
 - **Caching:** candles are kept in the browser (IndexedDB) and on the backend (SQLite), so opening the app draws the chart from cache at once and only the bars since the last visit are downloaded.
 - **Layers:** the layers tab lists what is drawn on the chart by group (agent zones, window levels, structure, trade plan, pinned answers, each part of Kimi Cooked, your drawings, alerts, journal trades, grid bots, …) with an eye toggle each, plus the pinned answers and your drawings. Labels that would overlap move apart.
+- **Grid bots** (`B`): track a Binance Spot Grid bot you already run. Copy its settings from Bot details on Binance: pair, lower and upper price, number of grids, arithmetic or geometric, investment and how long it has been running ("3d 4h 12m", or the start time). The app replays the bot on Binance's 1-minute candles from that moment and shows what the bot card shows: total PnL, grid profit, floating PnL, matched trades (all and last 24h), grid and total APR, plus its open orders, recent fills and matched trades per day. Its grid is drawn on the chart. To check it against Binance, type Binance's matched trades, grid profit and total PnL in the form and the bot shows both side by side. **More settings** covers fees (and the BNB discount), trigger price, take profit, stop loss, sell on stop and Binance's "Qty per order". The numbers can differ a little from Binance's: several fills inside one minute are not all seen, and Binance keeps a small fee reserve (enter its qty per order to remove that difference).
+- **Trade journal** (`J`): **Log trade** on a plan card tracks that plan, sized from your position-sizing settings, and **Add trade** logs your own. Each trade is followed on 1-minute candles: pending until the entry fills, then partial exits at each target (the stop moves to entry after the first), with R, PnL after fees, best and worst excursion. **Stats** shows win rate, average R, expectancy, profit factor, an equity curve and results by setup, coin and direction. Trades show on the chart; close or cancel them by hand when you exit early.
+- **Backtest** (`X`): pick a setup (first touch of fresh demand or supply, support or resistance holds, sweeps, Kimi Cooked signals, …), an exit (1.5R, 2R, 3R or the next level), a max hold and fees, and it replays the setup over the last 100–5,000 candles of the chart, with no look-ahead. It shows win rate, average and total R, profit factor, max drawdown, an equity curve and every trade; click a trade to see it on the chart.
+- **Market data** (`O`): funding (now, next settlement, annualised, history), open interest, the long/short account ratio and top traders' ratio, 24h spot CVD, the biggest order-book walls within 5% of price, and estimated liquidation clusters (from volume and open interest, assuming common leverage, so treat them as estimates), plus real liquidations from Binance's stream. Walls and liquidation clusters can be shown on the chart.
+- **Calendar and news** (`E`): high-impact economic events (Forex Factory, USD by default) and crypto headlines (CoinDesk, Cointelegraph), filtered to the current coin or all. **Show on chart** draws events as dashed lines with their name and headlines as dots at the top of the chart; hover one for the details. The agent knows the calendar too: a trade plan warns when a high-impact event is due within 48 hours, and "any news?" or "what's funding like?" brings in the headlines or the futures data.
 - **Settings** (the gear): log scale, grid lines, timezone of the time axis (yours or UTC), the countdown, crosshair sync, linked coins, automatic levels, position sizing, and **Save a backup** / **Restore from a file**, which moves everything the app keeps in the browser (drawings, alerts, chats, watchlists, layouts, settings) to another browser or computer.
 - **Keyboard:** press `?` for the full list. `/` asks the agent, `S`, `Space` or `Ctrl+K` searches a coin, `1`–`9` and `0` pick the timeframe, `[` `]` or `Alt+↑` `↓` step through the watchlist, `G` cycles one, two and four charts, `Alt+R` fits the chart, `Alt+L` toggles log scale, `K` toggles Kimi Cooked, and `W` `A` `L` `J` `B` `E` `O` open the panel tabs.
 
