@@ -53,6 +53,9 @@ class Settings:
     llm_timeout: float = field(default_factory=lambda: float(_env("LLM_TIMEOUT_SECONDS", "30")))
     ollama_url: str = field(default_factory=lambda: _env("OLLAMA_URL", "http://localhost:11434").rstrip("/"))
     ollama_model: str = field(default_factory=lambda: _env("OLLAMA_MODEL", "llama3.1:8b"))
+    # Ollama gives GPUs under 24 GB a 4k context and silently drops the oldest messages past it; the tool loop's
+    # schemas and results need about 3-6k tokens. 0 = use Ollama's own default.
+    ollama_num_ctx: int = field(default_factory=lambda: int(_env("OLLAMA_NUM_CTX", "8192")))
     openai_api_key: str = field(default_factory=lambda: _env("OPENAI_API_KEY", ""))
     openai_base_url: str = field(default_factory=lambda: _env("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/"))
     openai_model: str = field(default_factory=lambda: _env("OPENAI_MODEL", "gpt-4o-mini"))

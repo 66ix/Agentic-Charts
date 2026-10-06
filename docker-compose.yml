@@ -9,11 +9,14 @@ services:
       - path: ./backend/.env
         required: false
     environment:
-      CORS_ORIGINS: ${PUBLIC_ORIGIN:-http://localhost:3000}
+      CORS_ORIGINS: ${PUBLIC_ORIGIN:-http://localhost:3000,http://127.0.0.1:3000}
       TRUST_PROXY: ${TRUST_PROXY:-1}
       AGENT_RATE_LIMIT: ${AGENT_RATE_LIMIT:-20/minute}
       AGENT_DAILY_LIMIT: ${AGENT_DAILY_LIMIT:-500}
-      OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
+      # Ollama installed on the host machine (uses its GPU). With the ollama profile below, set OLLAMA_URL=http://ollama:11434.
+      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # Docker Desktop has this name already; Linux needs the mapping
     volumes:
       - backend-cache:/app/.cache
     ports:
@@ -31,7 +34,7 @@ services:
       - "${BIND:-127.0.0.1}:3000:3000"
     restart: unless-stopped
 
-  # Optional local model: docker compose --profile ollama up -d, then
+  # Optional model in Docker (CPU only): OLLAMA_URL=http://ollama:11434 docker compose --profile ollama up -d, then
   # docker compose exec ollama ollama pull llama3.1:8b
   ollama:
     image: ollama/ollama:latest
