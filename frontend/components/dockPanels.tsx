@@ -23,9 +23,9 @@ export interface DockPanelDef {
 }
 
 export const EXTRA_PANELS: DockPanelDef[] = [
-  { id: "journal", label: "Trade journal", icon: NotebookPen, hotkey: "j", Component: JournalPanel },
+  { id: "journal", label: "Journal", icon: NotebookPen, hotkey: "j", Component: JournalPanel },
   { id: "backtest", label: "Backtest", icon: FlaskConical, hotkey: "x", Component: BacktestPanel },
   { id: "market", label: "Market data", icon: Gauge, hotkey: "o", Component: MarketDataPanel },
-  { id: "events", label: "Calendar and news", icon: CalendarClock, hotkey: "e", Component: EventsPanel },
+  { id: "events", label: "Calendar", icon: CalendarClock, hotkey: "e", Component: EventsPanel },
   { id: "gridbots", label: "Grid bots", icon: Grid3x3, hotkey: "b", Component: GridBotPanel },
 ];
