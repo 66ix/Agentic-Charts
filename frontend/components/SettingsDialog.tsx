@@ -7,7 +7,7 @@ import { readStored, storedKeys, usePersistentState, writeStored } from "@/hooks
 import { DEFAULT_SIZING, type SizingSettings } from "@/lib/sizing";
 import type { LayoutState } from "@/lib/types";
 
-import Dialog, { ColorInput, NumberInput, Row, Section, Toggle } from "./Dialog";
+import Dialog, { NumberInput, Row, Section, Toggle } from "./Dialog";
 
 /** Timezones offered for the chart's time axis; "local" follows the browser. */
 const ZONES = [
@@ -146,6 +146,3 @@ export default function SettingsDialog(p: Props) {
     </Dialog>
   );
 }
-
-/** The colour picker is re-exported so the indicator dialog and this one look the same. */
-export { ColorInput };

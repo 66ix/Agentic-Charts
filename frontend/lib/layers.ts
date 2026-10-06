@@ -94,3 +94,53 @@ export function panelLayer(key: string): LayerId {
   };
   return map[head] ?? "panels";
 }
+
+/** An agent answer whose drawings stay on its chart when later answers replace the AI levels. */
+export interface PinnedAnswer {
+  label: string;
+  overlays: Overlay[];
+  at: number;
+}
+
+/** Drawings the dock tabs put on charts, by key ("gridbot:<id>", …), each for one symbol. */
+export type PanelOverlays = Record<string, { symbol: string; overlays: Overlay[] }>;
+
+export const pinsKey = (symbol: string, interval: string) => `ac:pins:${symbol}:${interval}`;
+
+/**
+ * Everything drawn on one chart from the agent, pinned answers, dock tabs and alerts, minus hidden layers, plus
+ * how many objects each layer holds (for the Layers tab). An overlay that appears twice (a pinned answer that is
+ * also the latest one) is drawn once.
+ */
+export function composeOverlays(opts: {
+  symbol: string;
+  overlays: Overlay[];
+  pins: Record<string, PinnedAnswer>;
+  panels: PanelOverlays;
+  alerts: Overlay[];
+  visibility: LayerVisibility;
+}): { visible: Overlay[]; counts: Partial<Record<LayerId, number>> } {
+  const visible: Overlay[] = [];
+  const counts: Partial<Record<LayerId, number>> = {};
+  const seen = new Set<string>();
+  const add = (o: Overlay, layer: LayerId, own = layer) => {
+    if (o.id) {
+      if (seen.has(o.id)) return;
+      seen.add(o.id);
+    }
+    counts[layer] = (counts[layer] ?? 0) + 1;
+    if (isVisible(opts.visibility, layer) && isVisible(opts.visibility, own)) visible.push(o);
+  };
+  for (const o of opts.overlays) add(o, overlayLayer(o));
+  for (const p of Object.values(opts.pins)) for (const o of p.overlays) add(o, "pinned", overlayLayer(o));
+  for (const [key, set] of Object.entries(opts.panels)) {
+    if (set.symbol === opts.symbol) for (const o of set.overlays) add(o, panelLayer(key));
+  }
+  for (const o of opts.alerts) add(o, "alerts");
+  return { visible, counts };
+}
+
+/** Drawings shown on this timeframe (a drawing can be limited to some timeframes). */
+export function drawingsFor<T extends { style?: { timeframes?: string[] } }>(drawings: T[], interval: string): T[] {
+  return drawings.filter((d) => !d.style?.timeframes?.length || d.style.timeframes.includes(interval));
+}

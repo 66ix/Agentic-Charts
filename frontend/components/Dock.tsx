@@ -92,7 +92,7 @@ export default function Dock<T extends string>(p: Props<T>) {
         {active && <active.icon className="h-4 w-4 text-accent" />}
         <span className="font-semibold text-ink">{active?.label}</span>
         <div className="flex-1" />
-        <button type="button" onClick={p.onClose} className="btn-ghost h-6 w-6 p-0" aria-label="Close panel" title="Close panel (])">
+        <button type="button" onClick={p.onClose} className="btn-ghost h-6 w-6 p-0" aria-label="Close panel" title="Close panel (D)">
           <X className="h-4 w-4" />
         </button>
       </div>
