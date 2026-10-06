@@ -675,6 +675,25 @@ def _kimi_lines(k: dict) -> list[str]:
     return out
 
 
+def _futures_lines(f: dict) -> list[str]:
+    bits = []
+    if (fu := f.get("funding")) and fu.get("rate_pct") is not None:
+        bits.append(f"funding {fu['rate_pct']}%")
+    if (oi := f.get("open_interest")) and oi.get("change_24h_pct") is not None:
+        bits.append(f"open interest {oi['change_24h_pct']:+}% in 24h")
+    if (ls := f.get("long_short")) and ls.get("ratio") is not None:
+        bits.append(f"long/short {ls['ratio']}")
+    if (cv := f.get("cvd_24h")) and cv.get("direction"):
+        bits.append(f"24h spot flow: {cv['direction']} ({cv['buy_pct']}% taker buys)")
+    out = ["Futures: " + ", ".join(bits) + "."] if bits else []
+    liq = f.get("est_liquidations") or {}
+    near = [f"{side} {_fmt(c['price_low'])}–{_fmt(c['price_high'])}" for side, c in
+            (("above", liq.get("above")), ("below", liq.get("below"))) if c]
+    if near:
+        out.append("Estimated liquidation clusters " + ", ".join(near) + ".")
+    return out
+
+
 def describe(facts: dict, symbol: str) -> str:
     """Plain-English summary of the analysis, used when no LLM is configured."""
     tf = facts["timeframe"]
@@ -727,7 +746,7 @@ def describe(facts: dict, symbol: str) -> str:
     if facts.get("volume_profile"):
         vp = facts["volume_profile"]
         lines.append(f"Volume profile: POC {_fmt(vp['poc'])}, value area {_fmt(vp['val'])}–{_fmt(vp['vah'])}.")
-    if facts.get("derivatives"):
+    if facts.get("derivatives") and not facts.get("futures_context"):
         d = facts["derivatives"]
         bits = []
         if d.get("funding_rate_pct") is not None:
@@ -736,6 +755,16 @@ def describe(facts: dict, symbol: str) -> str:
             bits.append(f"open interest {d['oi_change_24h_pct']:+}% in 24h")
         if bits:
             lines.append("Futures: " + ", ".join(bits) + ".")
+    if facts.get("futures_context"):
+        lines += _futures_lines(facts["futures_context"])
+    if facts.get("upcoming_events"):
+        ev = facts["upcoming_events"]
+        lines.append("Coming up: " + "; ".join(f"{e['country']} {e['title']} in {e['in_hours']:.0f}h" for e in ev[:3])
+                     + ".")
+    elif "upcoming_events" in facts and not facts.get("plan"):
+        lines.append("No high-impact economic events in the next 48 hours.")
+    if facts.get("headlines"):
+        lines.append("Headlines: " + "; ".join(h["title"] for h in facts["headlines"][:3]) + ".")
     if facts.get("plan"):
         p = facts["plan"]
         tgts = ", ".join(f"{_fmt(t['price'])} ({t['rr']}R)" for t in p["targets"])

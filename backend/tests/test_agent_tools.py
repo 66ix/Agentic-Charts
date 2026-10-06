@@ -96,7 +96,7 @@ def test_openai_tool_loop_messages_and_strict_tools():
     res = _run(_llm("openai", handler), "open ETH daily and show key levels")
     assert res.navigate and (res.navigate.symbol, res.navigate.interval) == ("ETHUSDT", "1d")
     assert res.symbol == "ETHUSDT" and res.interval == "1d"
-    assert res.steps == ["Checked funding and open interest for ETHUSDT"]
+    assert res.steps == ["Checked futures data, order flow and upcoming events for ETHUSDT"]
 
 
 def test_ollama_without_tool_call_falls_back_to_single_shot():

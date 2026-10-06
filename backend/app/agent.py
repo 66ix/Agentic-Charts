@@ -15,11 +15,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 import uuid
 
 from .agent_loop import Toolbox, plan_with_tools
 from .config import get_settings
 from .derivatives import DerivativesService
+from .events import EventsService
+from .futures_data import FuturesDataService
 from .kimi_service import KimiService, summarize
 from .llm import ChartContext, LLMClient
 from .market_data import MarketData, candles_to_df
@@ -146,7 +149,8 @@ def _compact(facts: dict) -> dict:
 
 
 def make_toolbox(market: MarketData, derivatives: DerivativesService | None, watchlist: list[str],
-                 kimi: KimiService | None = None) -> Toolbox:
+                 kimi: KimiService | None = None, futures: FuturesDataService | None = None,
+                 events: EventsService | None = None) -> Toolbox:
     async def look(symbol: str, tf: str, features: list[str]) -> dict:
         candles, source = await market.get_klines(symbol, tf, 400)
         frames = await _confluence_frames(market, symbol, tf, features)
@@ -159,12 +163,16 @@ def make_toolbox(market: MarketData, derivatives: DerivativesService | None, wat
         return [r.model_dump(exclude={"interval", "data_source"}) for r in rows[:10]]
 
     async def context(symbol: str) -> dict:
-        tick, deriv = await asyncio.gather(tickers(market, [symbol]),
-                                           derivatives.symbol_snapshot(symbol) if derivatives else _none())
+        tick, deriv, fut, upcoming = await asyncio.gather(
+            tickers(market, [symbol]), derivatives.symbol_snapshot(symbol) if derivatives else _none(),
+            _guarded(futures.futures_context(symbol), "futures context") if futures else _none(),
+            _upcoming(events, 24))
         out: dict = {"symbol": symbol}
         if tick:
             out.update(price=tick[0]["price"], change_24h_pct=tick[0]["change_pct"])
-        out["futures"] = deriv or "unavailable"
+        out["futures"] = fut or deriv or "unavailable"
+        if upcoming is not None:
+            out["upcoming_events"] = upcoming
         return out
 
     async def read_kimi(symbol: str, tf: str) -> dict:
@@ -177,6 +185,60 @@ def make_toolbox(market: MarketData, derivatives: DerivativesService | None, wat
 
 async def _none() -> None:
     return None
+
+
+async def _empty() -> list:
+    return []
+
+
+async def _guarded(coro, what: str, seconds: float = 8.0):
+    """Extra context the answer can go out without: None when it fails or is slow."""
+    try:
+        return await asyncio.wait_for(coro, seconds)
+    except Exception as exc:
+        log.info("Skipped %s: %s", what, exc)
+        return None
+
+
+FUTURES_WORDS = re.compile(r"\b(funding|open interest|oi|long[ /-]?short|l/s|liquidat\w*|order ?book|walls?|cvd|"
+                           r"order ?flow|delta|positioning|crowded|sentiment|squeeze)\b", re.I)
+EVENT_WORDS = re.compile(r"\b(news|events?|calendar|cpi|fomc|fed|nfp|payrolls|macro|data release|"
+                         r"anything coming|coming up)\b", re.I)
+NEWS_WORDS = re.compile(r"\b(news|headlines?|why is .* (up|down|pumping|dumping)|what happened)\b", re.I)
+EVENT_HOURS = 48  # how far ahead a trade plan looks for high-impact events
+
+
+async def _upcoming(events: EventsService | None, hours: int) -> list[dict] | None:
+    """High-impact economic events in the next `hours`, small enough to put in the facts; None when the
+    calendar can't be read (so the answer never says "nothing coming up" when it simply doesn't know)."""
+    if events is None:
+        return None
+    cal = await _guarded(events.calendar(days=(hours + 23) // 24, impact="high"), "economic calendar")
+    if not cal or cal.get("source") == "unavailable":
+        return None
+    now = time.time()
+    return [{"in_hours": round((e["time"] - now) / 3600, 1), "title": e["title"], "country": e["country"],
+             "impact": e["impact"], "forecast": e.get("forecast"), "previous": e.get("previous")}
+            for e in cal["events"] if now <= e["time"] <= now + hours * 3600][:6]
+
+
+async def _headlines(events: EventsService | None, symbol: str) -> list[dict]:
+    if events is None:
+        return []
+    rows = await _guarded(events.headlines(symbol, 24, 6), "news") or []
+    now = time.time()
+    return [{"hours_ago": round((now - h["time"]) / 3600, 1), "title": h["title"], "source": h["source"]}
+            for h in rows]
+
+
+def _event_note(upcoming: list[dict] | None) -> str | None:
+    """A trade-plan warning for the first high-impact event coming up."""
+    if not upcoming:
+        return None
+    e = upcoming[0]
+    when = "within the hour" if e["in_hours"] < 1 else f"in {e['in_hours']:.0f}h"
+    more = f" (+{len(upcoming) - 1} more in {EVENT_HOURS}h)" if len(upcoming) > 1 else ""
+    return f"Heads-up: {e['country']} {e['title']} {when}{more}. High-impact news can run through stops."
 
 
 async def _confluence_frames(market: MarketData, symbol: str, tf: str, features: list[str]) -> dict:
@@ -203,14 +265,16 @@ async def _kimi_facts(kimi: KimiService | None, symbol: str, tf: str) -> dict | 
 
 
 async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
-                       derivatives: DerivativesService | None = None, kimi: KimiService | None = None) -> AnalyzeResponse:
+                       derivatives: DerivativesService | None = None, kimi: KimiService | None = None,
+                       futures: FuturesDataService | None = None,
+                       events: EventsService | None = None) -> AnalyzeResponse:
     settings = get_settings()
     chart = ChartContext(req.symbol, req.interval, req.watchlist)
     steps: list[str] = []
     research: list[dict] = []
     loop = None
     if req.prompt.strip() and llm.available() and settings.agent_mode == "tools":
-        box = make_toolbox(market, derivatives, req.watchlist, kimi)
+        box = make_toolbox(market, derivatives, req.watchlist, kimi, futures, events)
         loop = await plan_with_tools(llm, req.prompt, req.history, req.overlays, req.previous_intent, chart, box,
                                      settings.agent_max_steps)
     if loop:
@@ -260,11 +324,19 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
     want_deriv = derivatives is not None and bool(req.prompt.strip()) and not custom_chart
     # The user's own indicator: read it when they name it or switch it on.
     want_kimi = ("kimi" in intent.indicators_on or bool(KIMI_WORDS.search(req.prompt))) and not custom_chart
-    (candles, source), higher, frames, rows, deriv, kimi_facts = await asyncio.gather(
+    # Futures and order flow when asked about them or building a plan; the calendar for plans and "any news?".
+    want_futures = futures is not None and not custom_chart and (
+        bool(intent.trade_plan) or bool(FUTURES_WORDS.search(req.prompt)))
+    want_events = bool(intent.trade_plan) or bool(EVENT_WORDS.search(req.prompt))
+    want_news = bool(NEWS_WORDS.search(req.prompt)) and not custom_chart
+    (candles, source), higher, frames, rows, deriv, kimi_facts, fut, upcoming, headlines = await asyncio.gather(
         candles_for_chart(), windows(),
         _confluence_frames(market, symbol, tf, [] if custom_chart else features), scan_rows(),
         derivatives.symbol_snapshot(symbol) if want_deriv else _none(),
-        _kimi_facts(kimi, symbol, tf) if want_kimi else _none())
+        _kimi_facts(kimi, symbol, tf) if want_kimi else _none(),
+        _guarded(futures.futures_context(symbol), "futures context") if want_futures else _none(),
+        _upcoming(events, EVENT_HOURS) if want_events else _none(),
+        _headlines(events, symbol) if want_news else _empty())
 
     df = candles_to_df(candles)
     # Detection is CPU-bound (SciPy); keep the event loop free for streams.
@@ -278,6 +350,8 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
     if intent.trade_plan:
         plan = build_plan(intent.trade_plan, result.stats.last_price, result.stats.atr, result.stats.trend,
                           result.levels, result.swing_lows, result.swing_highs, result.bias)
+        if plan and (note := _event_note(upcoming)):
+            plan.notes.append(note)
         facts["plan"] = plan.model_dump() if plan else None
         if plan:
             plan_ovs = plan_overlays(plan, int(df["time"].iloc[-1]))
@@ -294,6 +368,12 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         facts["derivatives"] = deriv
     if kimi_facts:
         facts["kimi"] = kimi_facts
+    if fut:
+        facts["futures_context"] = fut
+    if upcoming is not None:
+        facts["upcoming_events"] = upcoming  # [] says "nothing high-impact coming", which is worth saying too
+    if headlines:
+        facts["headlines"] = headlines
     if intent.scan_watchlist:
         facts["scan"] = [r.model_dump(include={"symbol", "last_price", "change_pct", "trend", "rsi", "signals",
                                                "nearest_kind", "distance_pct"}) for r in rows[:6]]

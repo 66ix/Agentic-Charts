@@ -178,6 +178,10 @@ NARRATE_SYSTEM = (
     "FACTS.kimi is the user's own indicator, Kimi Cooked: name it, and give its levels with odds_pct (the chance "
     "price reaches that level within the forecast window), its latest signals and its forecast when they answer "
     "the question. "
+    "FACTS.futures_context has funding, open interest, the long/short ratio, 24h spot CVD, the nearest order-book "
+    "walls and estimated liquidation clusters (call them estimates); use what the question needs. "
+    "FACTS.upcoming_events lists high-impact economic events by hours from now: with a trade plan, warn about any "
+    "inside it; an empty list means nothing high-impact is scheduled. FACTS.headlines are recent news titles. "
     "No disclaimers, no markdown."
 )
 

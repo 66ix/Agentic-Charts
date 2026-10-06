@@ -171,8 +171,9 @@ async def kimi_cooked(request: Request, symbol: str = Query("INJUSDT"), interval
 @app.post("/api/agent/analyze", response_model=AnalyzeResponse)
 async def agent_analyze(req: AnalyzeRequest, request: Request) -> AnalyzeResponse:
     try:
-        return await run_analysis(req, request.app.state.market, request.app.state.llm, request.app.state.derivatives,
-                                  request.app.state.kimi)
+        st = request.app.state
+        return await run_analysis(req, st.market, st.llm, st.derivatives, st.kimi,
+                                  getattr(st, "futures", None), getattr(st, "events", None))
     except MarketDataError as exc:
         raise HTTPException(502, str(exc)) from exc
     except ValueError as exc:
