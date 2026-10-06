@@ -1,15 +1,19 @@
 """Open interest and liquidation handling, with the network mocked."""
 
 import asyncio
+import json
 import time
 
 import httpx
 
 from app.config import Settings
 from app.derivatives import (
+    SYMBOL_EVENTS_CAP,
     DerivativesService,
+    LiquidationEvent,
     LiquidationTracker,
     parse_force_order,
+    parse_force_order_events,
     sum_open_interest,
     top_perpetuals,
 )
@@ -40,6 +44,72 @@ def test_liquidation_window_and_persistence(tmp_path):
     t.save()
     again = LiquidationTracker(str(store))
     assert again.snapshot(now).usd == 2.5e6 and again.since == t.since
+
+
+def test_force_order_events_keep_symbol_and_price():
+    now = int(time.time() * 1000)
+    [ev] = parse_force_order_events(_force("SOLUSDT", "SELL", "150", "10", now))
+    assert (ev.symbol, ev.price, ev.qty, ev.side, ev.usd, ev.time) == ("SOLUSDT", 150.0, 10.0, "long", 1500.0,
+                                                                       now / 1000)
+    assert parse_force_order_events({"junk": 1}) == []
+
+
+def test_per_symbol_liquidations_and_header_total(tmp_path):
+    store = tmp_path / "liq.json"
+    now = time.time()
+    t = LiquidationTracker(str(store))
+    t.add_events([LiquidationEvent("BTCUSDT", now - 2 * 86400, 60000, 1, "long"),
+                  LiquidationEvent("BTCUSDT", now - 120, 61000, 0.5, "long"),
+                  LiquidationEvent("BTCUSDT", now - 60, 62000, 0.25, "short"),
+                  LiquidationEvent("ETHUSDT", now - 30, 3000, 2, "long")])
+    snap = t.snapshot(now)
+    assert snap.count == 3 and snap.usd == 30500 + 15500 + 6000 and snap.longs_usd == 36500
+    recent = t.recent("BTCUSDT", now=now)
+    assert [r["price"] for r in recent] == [62000, 61000]  # newest first, the 2-day-old one dropped
+    assert recent[0] == {"time": int(now - 60), "price": 62000, "qty": 0.25, "usd": 15500, "side": "short"}
+    assert t.recent("BTCUSDT", limit=1, now=now)[0]["price"] == 62000 and t.recent("XRPUSDT") == []
+
+    t.save()
+    again = LiquidationTracker(str(store))
+    assert again.snapshot(now).usd == snap.usd
+    assert [r["price"] for r in again.recent("BTCUSDT", now=now)] == [62000, 61000]
+    assert again.recent("ETHUSDT", now=now)[0]["usd"] == 6000
+
+
+def test_per_symbol_events_are_capped():
+    t = LiquidationTracker(None)
+    now = time.time()
+    t.add_events([LiquidationEvent("BTCUSDT", now - 1000 + i, 100 + i, 1, "long")
+                  for i in range(SYMBOL_EVENTS_CAP + 50)])
+    recent = t.recent("BTCUSDT", limit=10_000, now=now)
+    assert len(recent) == SYMBOL_EVENTS_CAP and recent[0]["price"] == 100 + SYMBOL_EVENTS_CAP + 49
+    assert t.snapshot(now).count == SYMBOL_EVENTS_CAP + 50  # the header total is not capped
+
+
+def test_old_liquidation_files_still_load(tmp_path):
+    store = tmp_path / "liq.json"
+    now = time.time()
+    store.write_text(json.dumps({"since": now - 3600, "events": [[now - 100, 1e6, "long"], [now - 50, 2e5, "short"]]}))
+    t = LiquidationTracker(str(store))
+    assert t.snapshot(now).usd == 1.2e6 and t.since == now - 3600 and t.recent("BTCUSDT") == []
+    # A corrupt per-symbol section is skipped without losing the totals.
+    store.write_text(json.dumps({"since": now - 3600, "events": [[now - 100, 1e6, "long"]],
+                                 "symbols": {"BTCUSDT": [["bad"]], "ETHUSDT": [[now - 10, 3000, 1, "short"]]}}))
+    t = LiquidationTracker(str(store))
+    assert t.snapshot(now).usd == 1e6 and t.recent("BTCUSDT") == [] and t.recent("ETHUSDT")[0]["price"] == 3000
+
+
+def test_recent_liquidations_service(tmp_path):
+    svc = DerivativesService(Settings(data_source="auto", liquidations_store=str(tmp_path / "l.json")))
+    assert svc.recent_liquidations("BTCUSDT") is None  # no stream and nothing saved: nothing real to show
+    svc.stream_connected = True
+    assert svc.recent_liquidations("BTCUSDT") == []
+    svc.liquidations.add_events([LiquidationEvent("BTCUSDT", time.time() - 5, 60000, 1, "long")])
+    assert svc.recent_liquidations("BTCUSDT")[0]["usd"] == 60000
+    asyncio.run(svc.close())
+    off = DerivativesService(Settings(data_source="synthetic", liquidations_store=str(tmp_path / "l.json")))
+    assert off.recent_liquidations("BTCUSDT") is None
+    asyncio.run(off.close())
 
 
 def test_top_perpetuals_skips_delivery_contracts():

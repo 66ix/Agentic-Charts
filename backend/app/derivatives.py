@@ -6,7 +6,8 @@
 * Liquidations: the `!forceOrder@arr` stream, kept as a rolling 24h window and
   saved to disk so a restart does not reset the total. Binance pushes at most
   one liquidation per symbol per second on this stream, so the total is a
-  floor, not an exact sum; the header says so.
+  floor, not an exact sum; the header says so. The latest events of each
+  symbol are also kept with their price, for the per-coin market data panel.
 
 Both cover Binance only, not every exchange.
 """
@@ -31,6 +32,9 @@ from .config import Settings, get_settings
 log = logging.getLogger(__name__)
 
 DAY = 24 * 3600
+# Latest liquidations kept per symbol (with price) for the market data panel: enough for a "recent" list
+# without letting a busy day grow the saved file without bound.
+SYMBOL_EVENTS_CAP = 200
 
 
 @dataclass
@@ -49,8 +53,21 @@ class Liquidations:
     count: int
 
 
-def parse_force_order(msg: dict | list) -> list[tuple[float, float, str]]:
-    """`!forceOrder@arr` payload → [(time_s, notional_usd, 'long'|'short')]. A SELL order closes a long."""
+@dataclass
+class LiquidationEvent:
+    symbol: str
+    time: float  # UNIX seconds
+    price: float
+    qty: float
+    side: str  # 'long' (a long was closed) | 'short'
+
+    @property
+    def usd(self) -> float:
+        return self.price * self.qty
+
+
+def parse_force_order_events(msg: dict | list) -> list[LiquidationEvent]:
+    """`!forceOrder@arr` payload → liquidation events with symbol and price. A SELL order closes a long."""
     out = []
     for ev in msg if isinstance(msg, list) else [msg]:
         o = ev.get("o") if isinstance(ev, dict) else None
@@ -61,8 +78,14 @@ def parse_force_order(msg: dict | list) -> list[tuple[float, float, str]]:
         if price <= 0 or qty <= 0:
             continue
         side = "long" if o.get("S") == "SELL" else "short"
-        out.append((int(o.get("T") or ev.get("E") or time.time() * 1000) / 1000, price * qty, side))
+        t = int(o.get("T") or ev.get("E") or time.time() * 1000) / 1000
+        out.append(LiquidationEvent(str(o.get("s") or ""), t, price, qty, side))
     return out
+
+
+def parse_force_order(msg: dict | list) -> list[tuple[float, float, str]]:
+    """`!forceOrder@arr` payload → [(time_s, notional_usd, 'long'|'short')], the header's rolling total."""
+    return [(e.time, e.usd, e.side) for e in parse_force_order_events(msg)]
 
 
 def top_perpetuals(tickers: list[dict], n: int) -> list[str]:
@@ -103,10 +126,16 @@ def parse_symbol_snapshot(premium: dict | None, oi_rows: list[dict] | None) -> d
 
 
 class LiquidationTracker:
-    """Rolling 24h window of liquidation notionals, persisted to a small JSON file."""
+    """Rolling 24h window of liquidation notionals, persisted to a small JSON file.
+
+    Next to the all-market totals it keeps the latest SYMBOL_EVENTS_CAP events of each symbol with price and
+    size, saved under a separate "symbols" key so files written before it existed still load (and older code
+    simply ignores the key)."""
 
     def __init__(self, store: str | None = None) -> None:
         self._events: deque[tuple[float, float, str]] = deque()
+        # symbol → (time_s, price, qty, side), oldest first.
+        self._by_symbol: dict[str, deque[tuple[float, float, float, str]]] = {}
         self._store = Path(store) if store else None
         self.since = time.time()
         self._load()
@@ -114,9 +143,30 @@ class LiquidationTracker:
     def add(self, events: list[tuple[float, float, str]]) -> None:
         self._events.extend(events)
 
+    def add_events(self, events: list[LiquidationEvent]) -> None:
+        """Stream events: counted in the 24h total and kept per symbol."""
+        self.add([(e.time, e.usd, e.side) for e in events])
+        for e in events:
+            if e.symbol:
+                q = self._by_symbol.setdefault(e.symbol, deque(maxlen=SYMBOL_EVENTS_CAP))
+                q.append((e.time, e.price, e.qty, e.side))
+
+    def recent(self, symbol: str, limit: int = 50, now: float | None = None) -> list[dict]:
+        """The latest liquidations of one symbol in the last 24h, newest first."""
+        cutoff = (now or time.time()) - DAY
+        rows = [e for e in self._by_symbol.get(symbol, ()) if e[0] >= cutoff]
+        return [{"time": int(t), "price": p, "qty": q, "usd": round(p * q, 2), "side": side}
+                for t, p, q, side in reversed(rows[-limit:])]
+
     def _prune(self, now: float) -> None:
         while self._events and self._events[0][0] < now - DAY:
             self._events.popleft()
+        for sym in list(self._by_symbol):
+            q = self._by_symbol[sym]
+            while q and q[0][0] < now - DAY:
+                q.popleft()
+            if not q:
+                del self._by_symbol[sym]
 
     def snapshot(self, now: float | None = None) -> Liquidations:
         now = now or time.time()
@@ -136,6 +186,17 @@ class LiquidationTracker:
             self._events.extend(tuple(e) for e in data.get("events", []) if e[0] >= cutoff)  # type: ignore[misc]
         except (OSError, ValueError, TypeError, IndexError) as exc:
             log.warning("Could not read %s (%s); starting liquidations from zero", self._store, exc)
+            return
+        symbols = data.get("symbols") if isinstance(data, dict) else None
+        if not isinstance(symbols, dict):  # written before per-symbol events existed
+            return
+        for sym, rows in symbols.items():
+            try:
+                kept = [(float(t), float(p), float(q), str(side)) for t, p, q, side in rows if float(t) >= cutoff]
+            except (TypeError, ValueError):
+                continue
+            if kept:
+                self._by_symbol[str(sym)] = deque(kept[-SYMBOL_EVENTS_CAP:], maxlen=SYMBOL_EVENTS_CAP)
 
     def save(self) -> None:
         if not self._store:
@@ -144,7 +205,8 @@ class LiquidationTracker:
         try:
             self._store.parent.mkdir(parents=True, exist_ok=True)
             tmp = self._store.with_suffix(".tmp")
-            tmp.write_text(json.dumps({"since": self.since, "events": list(self._events)}))
+            tmp.write_text(json.dumps({"since": self.since, "events": list(self._events),
+                                       "symbols": {k: list(v) for k, v in self._by_symbol.items()}}))
             tmp.replace(self._store)
         except OSError as exc:
             log.warning("Could not save liquidations to %s: %s", self._store, exc)
@@ -234,6 +296,15 @@ class DerivativesService:
             return None
         return snap
 
+    def recent_liquidations(self, symbol: str, limit: int = 50) -> list[dict] | None:
+        """Latest liquidations of one symbol (newest first), or None when the stream is off and nothing is saved."""
+        if not self.enabled:
+            return None
+        rows = self.liquidations.recent(symbol, limit)
+        if not rows and not self.stream_connected:
+            return None
+        return rows
+
     async def _run_stream(self) -> None:
         url = f"{self.s.binance_futures_ws_url}/!forceOrder@arr"
         backoff = 2.0
@@ -245,7 +316,7 @@ class DerivativesService:
                     backoff = 2.0
                     log.info("Liquidation stream connected")
                     async for raw in ws:
-                        self.liquidations.add(parse_force_order(json.loads(raw)))
+                        self.liquidations.add_events(parse_force_order_events(json.loads(raw)))
                         if time.monotonic() - last_save > 60:
                             self.liquidations.save()
                             last_save = time.monotonic()

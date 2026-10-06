@@ -99,6 +99,19 @@ class Settings:
     journal_store: str = field(default_factory=lambda: _env(
         "JOURNAL_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "journal.json")))
 
+    # ---- Economic calendar and crypto news (events.py) ----
+    # Forex Factory-format JSON feeds; next week's is often published late in the week, until then it is skipped.
+    calendar_urls: tuple[str, ...] = field(default_factory=lambda: tuple(u.strip() for u in _env(
+        "CALENDAR_URLS", "https://nfs.faireconomy.media/ff_calendar_thisweek.json,"
+                         "https://nfs.faireconomy.media/ff_calendar_nextweek.json").split(",") if u.strip()))
+    # Countries (currency codes) kept from the calendar; ALL keeps every one.
+    calendar_countries: tuple[str, ...] = field(default_factory=lambda: tuple(
+        c.strip().upper() for c in _env("CALENDAR_COUNTRIES", "USD").split(",") if c.strip()))
+    # RSS or Atom feeds for the news list.
+    news_feeds: tuple[str, ...] = field(default_factory=lambda: tuple(u.strip() for u in _env(
+        "NEWS_FEEDS", "https://www.coindesk.com/arc/outboundfeeds/rss/,https://cointelegraph.com/rss").split(",")
+        if u.strip()))
+
 
 @lru_cache
 def get_settings() -> Settings:
