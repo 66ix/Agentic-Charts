@@ -367,3 +367,29 @@ class Metric(BaseModel):
 class MarketMetrics(BaseModel):
     metrics: list[Metric]
     updated_at: datetime
+
+
+# ----------------------------------------------------------------- alerts --
+
+
+class PriceAlert(AlertSpec):
+    """An alert stored and evaluated by the backend (alerts.py). Mirrors PriceAlert in `frontend/lib/types.ts`."""
+
+    id: str
+    symbol: str
+    armed: bool = True
+    created_at: int = Field(..., description="UNIX milliseconds")
+    triggered_at: Optional[int] = Field(None, description="UNIX milliseconds")
+    triggered_price: Optional[float] = None
+    last_side: Optional[Literal["above", "below", "inside"]] = Field(
+        None, description="Where price was last seen relative to the level, so alerts fire on the transition")
+
+
+class CreateAlertsRequest(BaseModel):
+    symbol: str = Field(..., min_length=2, max_length=20)
+    alerts: list[AlertSpec] = Field(..., min_length=1, max_length=50)
+
+    @field_validator("symbol")
+    @classmethod
+    def _norm_symbol(cls, v: str) -> str:
+        return v.replace("/", "").replace("-", "").upper()

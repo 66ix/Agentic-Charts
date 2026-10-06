@@ -1,5 +1,7 @@
 import { API_URL } from "./config";
 import type {
+  AlertChannels,
+  AlertSpec,
   AnalysisIntent,
   AnalyzeResponse,
   Candle,
@@ -7,6 +9,7 @@ import type {
   Interval,
   MarketMetrics,
   Overlay,
+  PriceAlert,
   ScanResult,
   Ticker,
 } from "./types";
@@ -97,4 +100,31 @@ export function fetchTickers(symbols: string[], signal?: AbortSignal) {
 export function fetchWatchlistScan(symbols: string[], interval: Interval, signal?: AbortSignal) {
   const q = new URLSearchParams({ symbols: symbols.join(","), interval });
   return request<ScanResult[]>(`/api/watchlist/scan?${q}`, { signal, timeoutMs: 60_000 });
+}
+
+// ------------------------------------------------------------- alerts --
+
+export function fetchAlerts(signal?: AbortSignal) {
+  return request<{ alerts: PriceAlert[]; channels: AlertChannels }>("/api/alerts", { signal });
+}
+
+export function createAlerts(symbol: string, alerts: AlertSpec[]) {
+  return request<{ alerts: PriceAlert[] }>("/api/alerts", { method: "POST", body: JSON.stringify({ symbol, alerts }) });
+}
+
+export function deleteAlert(id: string) {
+  return request<{ ok: boolean }>(`/api/alerts/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export function rearmAlert(id: string) {
+  return request<{ alert: PriceAlert }>(`/api/alerts/${encodeURIComponent(id)}/rearm`, { method: "POST" });
+}
+
+export function clearTriggeredAlerts() {
+  return request<{ removed: number }>("/api/alerts/clear-triggered", { method: "POST" });
+}
+
+/** Sends a test message to every configured channel → which ones delivered it. */
+export function testAlertChannels() {
+  return request<{ results: Partial<Record<keyof AlertChannels, boolean>> }>("/api/alerts/test", { method: "POST" });
 }

@@ -173,16 +173,22 @@ export interface AlertSpec {
   label: string;
 }
 
-/** A client-side price alert (stored in localStorage, watched over the kline WebSocket). */
+/** A price alert stored and evaluated by the backend. Mirrors PriceAlert in schemas.py. */
 export interface PriceAlert extends AlertSpec {
   id: string;
   symbol: string;
   armed: boolean;
   created_at: number; // ms
-  triggered_at?: number; // ms
-  triggered_price?: number;
-  /** Where price was last seen relative to the level, so we fire on the transition. */
-  last_side?: "above" | "below" | "inside";
+  triggered_at?: number | null; // ms
+  triggered_price?: number | null;
+  /** Where price was last seen relative to the level, so it fires on the transition. */
+  last_side?: "above" | "below" | "inside" | null;
+}
+
+/** Notification channels configured on the backend. */
+export interface AlertChannels {
+  telegram: boolean;
+  discord: boolean;
 }
 
 export interface AnalyzeResponse {

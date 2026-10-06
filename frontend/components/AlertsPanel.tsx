@@ -4,15 +4,21 @@ import clsx from "clsx";
 import { Bell, BellRing, RotateCcw, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 
-import { requestNotificationPermission } from "@/hooks/useAlerts";
+import { requestNotificationPermission, type ChannelTestResult } from "@/hooks/useAlerts";
 import { describeAlert } from "@/lib/alerts";
 import { displaySymbol, formatPrice } from "@/lib/format";
-import type { PriceAlert } from "@/lib/types";
+import type { AlertChannels, PriceAlert } from "@/lib/types";
+
+const CHANNEL_NAMES: Record<keyof AlertChannels, string> = { telegram: "Telegram", discord: "Discord" };
 
 interface Props {
   open: boolean;
   alerts: PriceAlert[];
   symbol: string;
+  /** Notification channels configured on the backend; null until known. */
+  channels: AlertChannels | null;
+  error: string | null;
+  onTestChannels(): Promise<ChannelTestResult | null>;
   onRemove(id: string): void;
   onRearm(id: string): void;
   onClearTriggered(): void;
@@ -22,8 +28,11 @@ interface Props {
 
 export default function AlertsPanel(p: Props) {
   const [permission, setPermission] = useState<NotificationPermission | "unsupported">("unsupported");
+  const [testing, setTesting] = useState(false);
+  const [testNote, setTestNote] = useState<{ ok: boolean; text: string } | null>(null);
   useEffect(() => {
     if (typeof Notification !== "undefined") setPermission(Notification.permission);
+    setTestNote(null);
   }, [p.open]);
 
   if (!p.open) return null;
@@ -32,6 +41,23 @@ export default function AlertsPanel(p: Props) {
       b.created_at - a.created_at,
   );
   const triggered = p.alerts.filter((a) => !a.armed).length;
+  const configured = p.channels
+    ? (Object.keys(CHANNEL_NAMES) as (keyof AlertChannels)[]).filter((c) => p.channels?.[c])
+    : [];
+
+  const sendTest = async () => {
+    setTesting(true);
+    setTestNote(null);
+    const res = await p.onTestChannels();
+    setTesting(false);
+    if (!res) return; // the hook reports the error
+    const sent = configured.filter((c) => res[c]).map((c) => CHANNEL_NAMES[c]);
+    const failed = configured.filter((c) => res[c] === false).map((c) => CHANNEL_NAMES[c]);
+    const parts: string[] = [];
+    if (sent.length) parts.push(`Sent to ${sent.join(" and ")}.`);
+    if (failed.length) parts.push(`${failed.join(" and ")} failed; see the backend log.`);
+    setTestNote({ ok: failed.length === 0, text: parts.join(" ") });
+  };
 
   return (
     <div className="pointer-events-auto absolute right-3 top-3 z-40 flex max-h-[70%] w-80 flex-col overflow-hidden rounded-xl border border-line bg-panel/95 shadow-2xl backdrop-blur">
@@ -48,6 +74,29 @@ export default function AlertsPanel(p: Props) {
           <X className="h-4 w-4" />
         </button>
       </div>
+      {p.channels && (
+        <div className="border-b border-line px-3 py-2 text-[11px]">
+          {configured.length ? (
+            <div className="flex items-center gap-1.5">
+              <span className="text-mute">Notify</span>
+              {configured.map((c) => (
+                <span key={c} className="inline-flex items-center gap-1 rounded border border-line bg-panel2 px-1.5 py-0.5 text-ink">
+                  <span className="h-1.5 w-1.5 rounded-full bg-up" />
+                  {CHANNEL_NAMES[c]}
+                </span>
+              ))}
+              <div className="flex-1" />
+              <button type="button" onClick={sendTest} disabled={testing} className="btn-ghost h-6 px-1.5 text-[11px] disabled:opacity-50">
+                {testing ? "Sending…" : "Send test"}
+              </button>
+            </div>
+          ) : (
+            <span className="text-mute">Only in this browser — set TELEGRAM_* or DISCORD_WEBHOOK_URL on the backend</span>
+          )}
+          {testNote && <div className={clsx("mt-1", testNote.ok ? "text-up" : "text-down")}>{testNote.text}</div>}
+        </div>
+      )}
+      {p.error && <div className="border-b border-line bg-down/10 px-3 py-2 text-[11px] text-down">{p.error}</div>}
       {permission === "default" && (
         <button
           type="button"
@@ -93,7 +142,7 @@ export default function AlertsPanel(p: Props) {
           </div>
         ))}
       </div>
-      <p className="px-3 py-2 text-[10px] text-mute">Alerts are checked while this app is open in a browser tab.</p>
+      <p className="px-3 py-2 text-[10px] text-mute">Alerts are checked on the server, so they fire even with this tab closed.</p>
     </div>
   );
 }

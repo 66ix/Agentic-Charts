@@ -82,7 +82,9 @@ export default function ChartWorkspace() {
   const onAlertsFired = useCallback((fired: FiredAlert[]) => {
     setToasts((t) => [...t, ...fired.map((f) => ({ id: uid(), alert: f.alert, price: f.price }))].slice(-4));
   }, []);
-  const { alerts, add: addAlerts, remove: removeAlert, rearm, clearTriggered } = useAlerts(onAlertsFired);
+  const {
+    alerts, add: addAlerts, remove: removeAlert, rearm, clearTriggered, channels, testChannels, error: alertsError,
+  } = useAlerts(onAlertsFired);
   const armedAlerts = alerts.filter((a) => a.armed).length;
   const chartOverlays = useMemo(() => [...overlays, ...alertOverlays(alerts, symbol)], [overlays, alerts, symbol]);
 
@@ -281,6 +283,9 @@ export default function ChartWorkspace() {
             open={alertsOpen}
             alerts={alerts}
             symbol={symbol}
+            channels={channels}
+            error={alertsError}
+            onTestChannels={testChannels}
             onRemove={removeAlert}
             onRearm={rearm}
             onClearTriggered={clearTriggered}

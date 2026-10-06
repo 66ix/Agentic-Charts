@@ -40,6 +40,7 @@ agentic-charts/
 │   │   ├── stream_hub.py      Shared upstream Binance kline streams, fan-out to browsers
 │   │   ├── market_metrics.py  Header metrics (CoinGecko, Fear & Greed, Binance futures)
 │   │   ├── derivatives.py     Open interest + rolling 24h liquidations from Binance futures
+│   │   ├── alerts.py          Server-side price alerts, Telegram / Discord notifications
 │   │   ├── schemas.py         Pydantic models (overlay contract)
 │   │   └── config.py          Env configuration
 │   ├── tests/                 pytest: detectors, API, conversation, payloads (mocked) + opt-in live checks
@@ -141,6 +142,9 @@ the rule parser for that request, and skips the LLM for 30 seconds.
 | `LLM_PROVIDER` | `ollama` | `ollama`, `openai`, `anthropic`, `none` |
 | `CORS_ORIGINS` | `http://localhost:3000,...` | Comma-separated frontend origins |
 | `METRICS_CACHE_SECONDS` | `60` | Header metrics cache |
+| `ALERTS_STORE` | `backend/.cache/alerts.json` | Where price alerts are saved; `memory` = not saved |
+| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | empty | Send fired alerts to Telegram (see [Alerts](#alerts)) |
+| `DISCORD_WEBHOOK_URL` | empty | Send fired alerts to a Discord channel |
 | `NEXT_PUBLIC_API_URL` | `http://localhost:8000` | Frontend → backend |
 | `NEXT_PUBLIC_WS_URL` | derived from API URL | Override for proxies |
 
@@ -156,6 +160,33 @@ sends at most one liquidation per symbol per second, so that total is a lower bo
 for its source. Binance futures has no US-accessible mirror, so from a US IP those two fall back to
 mocked values (marked with a dot).
 
+## Alerts
+
+Price alerts are stored and checked by the backend, so they fire with every browser tab closed.
+For each symbol with armed alerts the backend watches the live 1m stream and fires an alert once,
+when price crosses its level or enters its zone (or gaps through it). A fired alert shows as a
+toast, a sound and a desktop notification in any open tab, and is sent to Telegram and/or Discord
+when configured. Prices from the synthetic fallback feed never fire alerts (unless
+`DATA_SOURCE=synthetic`), so a Binance outage cannot send a false notification.
+
+**Telegram**
+
+1. In Telegram, message [@BotFather](https://t.me/BotFather), send `/newbot` and follow the prompts. It replies with the bot token (`123456:ABC...`).
+2. Open a chat with your new bot and send it any message (for a group, add the bot to the group and post there).
+3. Open `https://api.telegram.org/bot<TOKEN>/getUpdates` and copy `"chat":{"id": ...}` (group ids are negative).
+4. In `backend/.env`: `TELEGRAM_BOT_TOKEN=...` and `TELEGRAM_CHAT_ID=...`.
+
+**Discord**
+
+1. In your server: **Server Settings > Integrations > Webhooks > New Webhook**, pick the channel, then **Copy Webhook URL**.
+2. In `backend/.env`: `DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...`.
+
+Restart the backend, open the bell panel in the header and press **Send test**, or run
+`curl -X POST localhost:8000/api/alerts/test`. Messages look like
+`INJUSDT: price entered 24.10–24.60 (H4 Demand) at 24.32`. Delivery failures are logged (without
+the token) and never block other alerts. Alerts created before this version lived in the browser;
+they are uploaded once the first time the app connects to a backend that has none.
+
 ## API
 
 | Method | Path | Purpose |
@@ -165,7 +196,14 @@ mocked values (marked with a dot).
 | GET | `/api/symbols` | Tradable USDT spot pairs |
 | GET | `/api/market/metrics` | Header metrics, each tagged `live` or `mock` |
 | POST | `/api/agent/analyze` | `{symbol, interval, prompt, candles?, history?, overlays?, previous_intent?}` → overlays + summary + alerts |
+| GET | `/api/alerts` | `{alerts, channels: {telegram, discord}}` |
+| POST | `/api/alerts` | `{symbol, alerts: [{kind: "cross"\|"zone", price?, price_low?, price_high?, label}]}` → created alerts |
+| DELETE | `/api/alerts/{id}` | Delete an alert |
+| POST | `/api/alerts/{id}/rearm` | Re-arm a fired alert |
+| POST | `/api/alerts/clear-triggered` | Delete all fired alerts |
+| POST | `/api/alerts/test` | Send a test message to the configured channels → `{results: {telegram: true}}` |
 | WS | `/ws/klines?symbol=INJUSDT&interval=4h` | `{type:"kline", candle, closed, source}` and `{type:"status"}` messages |
+| WS | `/ws/alerts` | `{type:"snapshot", alerts}` on connect and on every change, `{type:"fired", alert, price}` |
 
 Example:
 
@@ -201,7 +239,7 @@ Overlay types: `box`, `horizontal_line`, `trendline`, `marker` (see `backend/app
 ## Using the app
 
 - **Agent:** press `/` or click **Agent**, then type a request or tap a suggestion. Mention a timeframe ("H4", "daily") to analyse it regardless of the chart's timeframe. The agent remembers the conversation and what it drew, so you can follow up: "also show swings", "same on daily", "remove the trendlines", "clear the chart", or give your own prices ("line at 25.4", "zone 24 to 25", "entry at 24.2, stop at 23.8, target at 27"). **Clear** removes AI overlays and the trash icon starts a new conversation. AI overlays are saved per symbol and timeframe and the conversation per symbol, so a reload keeps them. With **Auto AI levels** on (layout menu), key levels are drawn when a chart has none saved.
-- **Alerts:** ask the agent ("alert me at 65k", "alert me if price enters the supply zone", "alert me on these levels"), or select a horizontal ray or rectangle and press the bell in the toolbar. Alerts show as amber dotted lines, are listed under the bell in the header, and fire once with a sound, a toast and a desktop notification (if allowed). They are checked against live 1m prices for every alerted symbol while the app is open in a tab.
+- **Alerts:** ask the agent ("alert me at 65k", "alert me if price enters the supply zone", "alert me on these levels"), or select a horizontal ray or rectangle and press the bell in the toolbar. Alerts show as amber dotted lines, are listed under the bell in the header, and fire once with a sound, a toast and a desktop notification (if allowed). The backend checks them against live 1m prices, so they also fire with the app closed; set up [Telegram or Discord](#alerts) to hear about those.
 - **Drawing tools:** Trendline `T`, Horizontal ray `H`, Fibonacci `F`, Rectangle `R`, Text `N`, XABCD pattern `P`, Measure `M`. Click to place points; `Esc` cancels. In crosshair mode, click a drawing to select it, drag to move it, `Delete` to remove it. Magnet snaps to the nearest OHLC price; Lock freezes drawings. Drawings are saved per symbol in the browser.
 - **Indicators:** EMA 20, EMA 50, Parabolic SAR, Volume. **Layout:** log scale, grid, auto levels. The camera button saves a PNG.
 
