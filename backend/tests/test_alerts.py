@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 
 os.environ["DATA_SOURCE"] = "synthetic"
 os.environ["LLM_PROVIDER"] = "none"
@@ -13,7 +14,8 @@ import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app import config  # noqa: E402
-from app.alerts import AlertService, build_channels, describe_fire, evaluate, fmt_price, send_all  # noqa: E402
+from app.alerts import (AlertHistory, AlertPatch, AlertService, apply_patch, build_channels,  # noqa: E402
+                        describe_fire, evaluate, fmt_price, send_all, split_message)
 from app.config import Settings  # noqa: E402
 from app.main import app  # noqa: E402
 from app.schemas import AlertSpec, PriceAlert  # noqa: E402
@@ -319,3 +321,115 @@ def test_api_round_trip(alerts_store):
     assert [a["id"] for a in saved] == [a["id"] for a in remaining]
     with TestClient(app) as client:  # survives a restart
         assert [a["id"] for a in client.get("/api/alerts").json()["alerts"]] == [a["id"] for a in remaining]
+
+
+# ------------------------------------------ repeat, expiry, editing, history --
+
+
+def test_repeat_stays_armed_with_a_cooldown():
+    a = _cross(last_side="below", repeat=True)
+    a, fired = evaluate(a, 10.5, now_ms=1_000_000)
+    assert fired and a.armed and a.fire_count == 1 and a.triggered_at == 1_000_000
+    a, fired = evaluate(a, 9.0, now_ms=1_060_000)  # back below, inside the 5 min cooldown
+    assert not fired and a.last_side == "below" and a.fire_count == 1
+    a, fired = evaluate(a, 10.5, now_ms=1_250_000)  # still inside it
+    assert not fired and a.last_side == "above"
+    a, fired = evaluate(a, 9.0, now_ms=1_700_000)  # cooldown over
+    assert fired and a.armed and a.fire_count == 2 and a.last_side == "below"
+
+
+def test_expiry_disarms_without_firing():
+    a = _cross(last_side="below", expires_at=1_000_000)
+    a, fired = evaluate(a, 10.5, now_ms=1_000_001)
+    assert not fired and not a.armed and a.expired and a.triggered_at is None
+    b = _cross(last_side="below", expires_at=2_000_000)
+    b, fired = evaluate(b, 10.5, now_ms=1_999_000)
+    assert fired and b.expired is False
+
+
+def test_apply_patch_validates_and_resets_the_side():
+    a = _cross(10.0, last_side="below", label="Ten")
+    moved = apply_patch(a, AlertPatch(price=12.0, note="watch this"))
+    assert moved.price == 12.0 and moved.last_side is None and moved.note == "watch this" and moved.label == "Ten"
+    same = apply_patch(a, AlertPatch(label="Renamed"))
+    assert same.last_side == "below" and same.label == "Renamed" and same.price == 10.0
+    z = apply_patch(_zone(10, 12), AlertPatch(price_low=14, price_high=13))
+    assert (z.price_low, z.price_high) == (13, 14) and z.last_side is None
+    with pytest.raises(ValueError):
+        apply_patch(a, AlertPatch(price=0))
+    with pytest.raises(ValueError):
+        apply_patch(a, AlertPatch(price_low=1, price_high=2))  # a cross alert has no zone
+    with pytest.raises(ValueError):
+        apply_patch(a, AlertPatch(expires_at=1))  # already past
+    expired = _cross(last_side="below", armed=False, expired=True, expires_at=1)
+    again = apply_patch(expired, AlertPatch(expires_at=None))
+    assert again.armed and not again.expired and again.expires_at is None
+
+
+def test_split_message_respects_the_limit():
+    text = "A" * 30 + "\n\n" + "B" * 30 + "\n" + "C" * 30
+    parts = split_message(text, 40)
+    assert all(len(p) <= 40 for p in parts)
+    assert "".join(p.replace("\n", "") for p in parts) == text.replace("\n", "")
+    assert split_message("x" * 95, 40) == ["x" * 40, "x" * 40, "x" * 15]
+    assert split_message("short", 40) == ["short"] and split_message("  ", 40) == []
+
+
+def test_history_keeps_the_newest_items(tmp_path):
+    store = tmp_path / "history.json"
+    h = AlertHistory(str(store))
+    for i in range(520):
+        h.add("price", "INJUSDT", "Alert", f"fire {i}", price=float(i))
+    assert len(h.list(1000)) == 500 and h.list(2)[0]["text"] == "fire 519"
+    assert AlertHistory(str(store)).list(1)[0]["text"] == "fire 519"  # survives a restart
+    assert h.clear() == 500 and AlertHistory(str(store)).list(10) == []
+
+
+def test_service_records_history_and_expires(tmp_path):
+    async def go():
+        hub = FakeHub()
+        svc = AlertService(hub, _settings(alert_history_store=str(tmp_path / "h.json")))
+        events = svc.subscribe()
+        now = int(time.time() * 1000)
+        a, = await svc.add("INJUSDT", [AlertSpec(kind="cross", price=10, label="Ten", repeat=True, note="watch")])
+        b, = await svc.add("INJUSDT", [AlertSpec(kind="cross", price=20, expires_at=now + 50)])
+        hub.push("INJUSDT", 9.0)
+        hub.push("INJUSDT", 10.5)
+        item = (await _next(events, "history"))["item"]
+        assert item["kind"] == "price" and item["alert_id"] == a.id and item["price"] == 10.5
+        assert svc.history.list(5)[0]["text"].startswith("INJUSDT: price crossed above 10.00 (Ten) at 10.50 — watch")
+        await _until(lambda: svc._alerts[a.id].armed and svc._alerts[a.id].fire_count == 1)  # repeat stays armed
+        assert list(hub.queues) == ["INJUSDT"]
+
+        expired = svc.expire_due(now + 100)
+        assert [x.id for x in expired] == [b.id] and svc._alerts[b.id].expired
+        patched = await svc.update(a.id, AlertPatch(price=11.0, note="moved"))
+        assert patched.price == 11.0 and patched.last_side is None and patched.note == "moved"
+        assert await svc.update("nope", AlertPatch(note="x")) is None
+        await svc.close()
+
+    asyncio.run(go())
+
+
+def test_api_patch_history_and_expiry(alerts_store):
+    with TestClient(app) as client:
+        now = int(time.time() * 1000)
+        created = client.post("/api/alerts", json={"symbol": "INJUSDT", "alerts": [
+            {"kind": "cross", "price": 5, "label": "Five", "repeat": True, "note": "keep an eye"}]}).json()["alerts"]
+        a = created[0]
+        assert a["repeat"] is True and a["note"] == "keep an eye" and a["fire_count"] == 0 and a["expired"] is False
+
+        r = client.patch(f"/api/alerts/{a['id']}", json={"price": 6, "label": "Six", "expires_at": now + 3_600_000})
+        assert r.status_code == 200 and r.json()["alert"]["price"] == 6 and r.json()["alert"]["label"] == "Six"
+        assert client.patch(f"/api/alerts/{a['id']}", json={"price": 0}).status_code == 422
+        assert client.patch(f"/api/alerts/{a['id']}", json={"expires_at": now - 1}).status_code == 422
+        assert client.patch("/api/alerts/nope", json={"label": "x"}).status_code == 404
+
+        service = client.app.state.alerts
+        client.portal.call(service.on_price, "INJUSDT", 1.0)
+        client.portal.call(service.on_price, "INJUSDT", 9.0)
+        items = client.get("/api/alerts/history").json()["items"]
+        assert items and items[0]["kind"] == "price" and items[0]["alert_id"] == a["id"]
+        assert client.get("/api/alerts/history", params={"limit": 1}).json()["items"] == items[:1]
+        assert client.delete("/api/alerts/history").json() == {"removed": len(items)}
+        assert client.get("/api/alerts/history").json()["items"] == []

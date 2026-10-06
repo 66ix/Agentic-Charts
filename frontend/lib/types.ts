@@ -173,6 +173,11 @@ export interface AlertSpec {
   price_low: number | null;
   price_high: number | null;
   label: string;
+  /** Stay armed after firing; fires again on a new crossing, at most every 5 minutes. Default false. */
+  repeat?: boolean;
+  /** ms; the alert disarms itself (expired) after this. */
+  expires_at?: number | null;
+  note?: string;
 }
 
 /** A price alert stored and evaluated by the backend. Mirrors PriceAlert in schemas.py. */
@@ -185,6 +190,9 @@ export interface PriceAlert extends AlertSpec {
   triggered_price?: number | null;
   /** Where price was last seen relative to the level, so it fires on the transition. */
   last_side?: "above" | "below" | "inside" | null;
+  fire_count?: number;
+  /** Disarmed because expires_at passed. */
+  expired?: boolean;
 }
 
 /** Notification channels configured on the backend. */

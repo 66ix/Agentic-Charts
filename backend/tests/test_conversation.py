@@ -63,7 +63,7 @@ def test_conversation_flow():
 
         third = _ask(client, "alert me if price hits my level", second["overlays"], history, second["intent"])
         assert third["alerts"] == [{"kind": "cross", "price": 7.5, "price_low": None, "price_high": None,
-                                    "label": "Level 7.5"}]
+                                    "label": "Level 7.5", "repeat": False, "expires_at": None, "note": ""}]
         assert len(third["overlays"]) == len(second["overlays"])
 
         fresh = _ask(client, "show 4h support and resistance", third["overlays"])
