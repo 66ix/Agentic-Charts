@@ -30,11 +30,12 @@ class Settings:
         default_factory=lambda: _env("BINANCE_FALLBACK_REST_URL", "https://data-api.binance.vision").rstrip("/"))
     binance_fallback_ws_url: str = field(
         default_factory=lambda: _env("BINANCE_FALLBACK_WS_URL", "wss://data-stream.binance.vision/ws").rstrip("/"))
-    # USD-M futures: open interest and the liquidation stream for the header.
+    # USD-M futures: open interest and the liquidation stream for the header. Market streams moved
+    # under /market/ws when Binance retired the legacy /ws path (2026-04-23).
     binance_futures_rest_url: str = field(
         default_factory=lambda: _env("BINANCE_FUTURES_REST_URL", "https://fapi.binance.com").rstrip("/"))
     binance_futures_ws_url: str = field(
-        default_factory=lambda: _env("BINANCE_FUTURES_WS_URL", "wss://fstream.binance.com/ws").rstrip("/"))
+        default_factory=lambda: _env("BINANCE_FUTURES_WS_URL", "wss://fstream.binance.com/market/ws").rstrip("/"))
     derivatives_enabled: bool = field(
         default_factory=lambda: _env("DERIVATIVES", "on").lower() not in ("off", "0", "false"))
     oi_top_symbols: int = field(default_factory=lambda: int(_env("OI_TOP_SYMBOLS", "40")))

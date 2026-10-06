@@ -100,6 +100,13 @@ def test_binance_liquidation_stream():
                 return json.loads(await asyncio.wait_for(ws.recv(), 120))
         except websockets.exceptions.InvalidHandshake as exc:
             pytest.skip(f"region-blocked: {exc}")
+        except TimeoutError:
+            # A blocked region can get a silent socket; tell that apart from a broken URL.
+            async with httpx.AsyncClient(timeout=10) as client:
+                r = await client.get(f"{Settings().binance_futures_rest_url}/fapi/v1/ping")
+            if r.status_code in (403, 451):
+                pytest.skip(f"region-blocked: {r.status_code} from futures REST, stream sent nothing")
+            raise
 
     msg = asyncio.run(go())
     events = parse_force_order(msg)
