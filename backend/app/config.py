@@ -92,6 +92,10 @@ class Settings:
     telegram_chat_id: str = field(default_factory=lambda: _env("TELEGRAM_CHAT_ID", ""))
     discord_webhook_url: str = field(default_factory=lambda: _env("DISCORD_WEBHOOK_URL", ""), repr=False)
 
+    # Grid bot tracker (gridbot.py): saved Binance Spot Grid bots. GRIDBOTS_STORE=memory keeps them in memory only.
+    gridbots_store: str = field(default_factory=lambda: _env(
+        "GRIDBOTS_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "gridbots.json")))
+
 
 @lru_cache
 def get_settings() -> Settings:

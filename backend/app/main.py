@@ -20,7 +20,7 @@ import contextlib
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
@@ -28,6 +28,7 @@ from .agent import run_analysis
 from .alerts import AlertService
 from .config import get_settings
 from .derivatives import DerivativesService
+from .gridbot import GridBotCreate, GridBotPatch, GridBotService, GridSimulateRequest, error_text
 from .kimi_service import KimiService
 from .llm import LLMClient
 from .market_data import MarketData, MarketDataError
@@ -55,6 +56,7 @@ async def lifespan(app: FastAPI):
     app.state.kimi = KimiService(market)
     app.state.alerts = AlertService(app.state.hub)
     await app.state.alerts.start()
+    app.state.gridbots = GridBotService(market)  # grid bot tracker: saved bots, results cached per 1m bar
     log.info("Data source: %s | LLM provider: %s %s", market.settings.data_source,
              app.state.llm.provider, app.state.llm.model)
     yield
@@ -70,7 +72,7 @@ app = FastAPI(title="Agentic Charts API", version="1.0.0", lifespan=lifespan)
 app.add_middleware(RateLimitMiddleware, agent_rate=settings.agent_rate_limit, api_rate=settings.api_rate_limit,
                    agent_daily=settings.agent_daily_limit, trust_proxy=settings.trust_proxy)
 app.add_middleware(CORSMiddleware, allow_origins=list(settings.cors_origins), allow_credentials=False,
-                   allow_methods=["GET", "POST", "DELETE"], allow_headers=["*"])
+                   allow_methods=["GET", "POST", "PATCH", "DELETE"], allow_headers=["*"])  # PATCH: grid bots
 app.add_middleware(GZipMiddleware, minimum_size=2048)
 
 
@@ -218,6 +220,75 @@ async def rearm_alert(alert_id: str, request: Request) -> dict:
     if alert is None:
         raise HTTPException(404, "Alert not found")
     return {"alert": alert.model_dump()}
+
+
+# --------------------------------------------------------------- grid bots --
+#   POST   /api/gridbot/simulate          GridBotParams (+ binance?) → GridBotResult, nothing saved
+#   GET    /api/gridbots                  {bots: [GridBot]}
+#   POST   /api/gridbots                  {name?, params, binance?} → {bot, result}
+#   PATCH  /api/gridbots/{id}             {name?, params? (partial), binance? (null clears)} → {bot, result}
+#   DELETE /api/gridbots/{id}             {ok}
+#   GET    /api/gridbots/{id}/result      GridBotResult (recomputed at most once per 1m bar)
+# Bodies are validated here rather than by FastAPI so a bad setting comes back as one readable 422 message.
+
+
+def _gridbot_body(model, body: dict):
+    try:
+        return model.model_validate(body)
+    except ValueError as exc:  # pydantic's ValidationError is a ValueError
+        raise HTTPException(422, error_text(exc)) from None
+
+
+async def _gridbot_run(coro):
+    try:
+        return await coro
+    except MarketDataError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, error_text(exc)) from None
+
+
+@app.post("/api/gridbot/simulate")
+async def gridbot_simulate(request: Request, body: dict = Body(...)) -> dict:
+    req: GridSimulateRequest = _gridbot_body(GridSimulateRequest, body)
+    result = await _gridbot_run(request.app.state.gridbots.simulate(req, req.binance))
+    return result.model_dump()
+
+
+@app.get("/api/gridbots")
+async def gridbots_list(request: Request) -> dict:
+    return {"bots": [b.model_dump() for b in request.app.state.gridbots.list()]}
+
+
+@app.post("/api/gridbots")
+async def gridbots_create(request: Request, body: dict = Body(...)) -> dict:
+    req: GridBotCreate = _gridbot_body(GridBotCreate, body)
+    bot, result = await _gridbot_run(request.app.state.gridbots.create(req))
+    return {"bot": bot.model_dump(), "result": result.model_dump()}
+
+
+@app.patch("/api/gridbots/{bot_id}")
+async def gridbots_update(bot_id: str, request: Request, body: dict = Body(...)) -> dict:
+    patch: GridBotPatch = _gridbot_body(GridBotPatch, body)
+    out = await _gridbot_run(request.app.state.gridbots.update(bot_id, patch))
+    if out is None:
+        raise HTTPException(404, "Grid bot not found")
+    return {"bot": out[0].model_dump(), "result": out[1].model_dump()}
+
+
+@app.delete("/api/gridbots/{bot_id}")
+async def gridbots_delete(bot_id: str, request: Request) -> dict:
+    if not request.app.state.gridbots.delete(bot_id):
+        raise HTTPException(404, "Grid bot not found")
+    return {"ok": True}
+
+
+@app.get("/api/gridbots/{bot_id}/result")
+async def gridbots_result(bot_id: str, request: Request) -> dict:
+    result = await _gridbot_run(request.app.state.gridbots.result(bot_id))
+    if result is None:
+        raise HTTPException(404, "Grid bot not found")
+    return result.model_dump()
 
 
 @app.websocket("/ws/alerts")
