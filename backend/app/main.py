@@ -28,9 +28,12 @@ from .agent import run_analysis
 from .alerts import AlertService
 from .config import get_settings
 from .derivatives import DerivativesService
+from .events import EventsService
+from .futures_data import FUTURES_PERIODS, FuturesDataService
 from .kimi_service import KimiService
 from .llm import LLMClient
 from .market_data import MarketData, MarketDataError
+from .market_index import MarketIndexService
 from .market_metrics import MarketMetricsService
 from .ratelimit import RateLimitMiddleware
 from .scanner import WatchlistCache, tickers
@@ -55,9 +58,14 @@ async def lifespan(app: FastAPI):
     app.state.kimi = KimiService(market)
     app.state.alerts = AlertService(app.state.hub)
     await app.state.alerts.start()
+    # Market data panel (futures, order flow, estimated liquidation levels), calendar + news, market-cap indexes.
+    app.state.futures = FuturesDataService(market, app.state.derivatives)
+    app.state.events = EventsService()
+    app.state.indexes = MarketIndexService(market)
     log.info("Data source: %s | LLM provider: %s %s", market.settings.data_source,
              app.state.llm.provider, app.state.llm.model)
     yield
+    await asyncio.gather(app.state.futures.close(), app.state.events.close(), app.state.indexes.close())
     await app.state.alerts.close()
     await app.state.hub.shutdown()
     await asyncio.gather(market.close(), app.state.llm.close(), app.state.metrics.close(),
@@ -283,3 +291,84 @@ async def ws_klines(ws: WebSocket, symbol: str = "INJUSDT", interval: str = "4h"
                 await t
         await hub.unsubscribe(sym, iv, queue)
 
+
+
+# ------------------------------------------- market data panel, calendar + news, market-cap indexes --
+# Every response carries `source`: "binance" (live), "synthetic" (demo data) or "unavailable" (with a `note`);
+# calendar and news use "live", "stale" (last good copy) or "unavailable". See futures_data.py, events.py and
+# market_index.py.
+#   GET /api/futures/funding?symbol=BTCUSDT&limit=100               current rate, annualised, history, 24h average
+#   GET /api/futures/open-interest?symbol=BTCUSDT&period=1h&limit=200
+#   GET /api/futures/long-short?symbol=BTCUSDT&period=1h&limit=200  account ratio + top-trader position ratio
+#   GET /api/futures/liquidation-levels?symbol=BTCUSDT               estimated clusters + recent real liquidations
+#   GET /api/cvd?symbol=BTCUSDT&interval=1h&limit=500                spot taker buy/sell volume and its running sum
+#   GET /api/orderbook/walls?symbol=BTCUSDT&range_pct=5&market=spot  big resting orders near price
+#   GET /api/calendar?days=7&impact=high&past_days=0                 economic events (Forex Factory)
+#   GET /api/news?symbol=BTCUSDT&limit=30                            RSS headlines tagged with coins
+#   GET /api/index/klines?name=TOTAL2&interval=4h&limit=500          market-cap index candles (top-20 approximation)
+
+
+def _futures_period(period: str) -> str:
+    if period not in FUTURES_PERIODS:
+        raise HTTPException(422, f"period must be one of {', '.join(FUTURES_PERIODS)}")
+    return period
+
+
+@app.get("/api/futures/funding")
+async def futures_funding(request: Request, symbol: str = Query("BTCUSDT"),
+                          limit: int = Query(100, ge=1, le=1000)) -> dict:
+    return await request.app.state.futures.funding(_norm_symbol(symbol), limit)
+
+
+@app.get("/api/futures/open-interest")
+async def futures_open_interest(request: Request, symbol: str = Query("BTCUSDT"), period: str = Query("1h"),
+                                limit: int = Query(200, ge=2, le=500)) -> dict:
+    return await request.app.state.futures.open_interest(_norm_symbol(symbol), _futures_period(period), limit)
+
+
+@app.get("/api/futures/long-short")
+async def futures_long_short(request: Request, symbol: str = Query("BTCUSDT"), period: str = Query("1h"),
+                             limit: int = Query(200, ge=2, le=500)) -> dict:
+    return await request.app.state.futures.long_short(_norm_symbol(symbol), _futures_period(period), limit)
+
+
+@app.get("/api/futures/liquidation-levels")
+async def futures_liquidation_levels(request: Request, symbol: str = Query("BTCUSDT")) -> dict:
+    return await request.app.state.futures.liquidation_levels(_norm_symbol(symbol))
+
+
+@app.get("/api/cvd")
+async def cvd(request: Request, symbol: str = Query("BTCUSDT"), interval: str = Query("1h"),
+              limit: int = Query(500, ge=2, le=1500)) -> dict:
+    return await request.app.state.futures.cvd(_norm_symbol(symbol), _check_interval(interval), limit)
+
+
+@app.get("/api/orderbook/walls")
+async def orderbook_walls(request: Request, symbol: str = Query("BTCUSDT"),
+                          range_pct: float = Query(5.0, ge=0.5, le=20.0),
+                          market: str = Query("spot", pattern="^(spot|futures)$")) -> dict:
+    return await request.app.state.futures.walls(_norm_symbol(symbol), range_pct, market)
+
+
+@app.get("/api/calendar")
+async def economic_calendar(request: Request, days: int = Query(7, ge=0, le=14),
+                            impact: str = Query("high", pattern="^(high|medium|all)$"),
+                            past_days: int = Query(0, ge=0, le=7)) -> dict:
+    return await request.app.state.events.calendar(days, impact, past_days)
+
+
+@app.get("/api/news")
+async def crypto_news(request: Request, symbol: str | None = Query(None),
+                      limit: int = Query(30, ge=1, le=200)) -> dict:
+    return await request.app.state.events.news(_norm_symbol(symbol) if symbol else None, limit)
+
+
+@app.get("/api/index/klines")
+async def index_klines(request: Request, name: str = Query("TOTAL", description="TOTAL, TOTAL2 or TOTAL3"),
+                       interval: str = Query("4h"), limit: int = Query(500, ge=10, le=1500)) -> dict:
+    try:
+        return await request.app.state.indexes.klines(name, _check_interval(interval), limit)
+    except MarketDataError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
