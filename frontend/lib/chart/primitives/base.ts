@@ -22,19 +22,86 @@ export function dash(ctx: CanvasRenderingContext2D, style: string | undefined) {
   ctx.setLineDash(style === "dashed" ? [6, 4] : style === "dotted" ? [2, 3] : []);
 }
 
-/** Pill-shaped text label. */
+// ------------------------------------------------------ label collisions
+// Every primitive on a chart draws its labels through one LabelRegistry per chart. The registry is cleared at
+// the start of each paint (LabelResetPrimitive, attached first), and a label that would overlap one already
+// drawn in that paint is nudged up or down to the nearest free spot instead of being drawn on top of it.
+
+interface Rect {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+const GAP = 2;
+const MAX_TRIES = 8;
+
+export class LabelRegistry {
+  private rects: Rect[] = [];
+
+  reset() {
+    this.rects = [];
+  }
+
+  /** Records an area that later labels must avoid (e.g. a multi-line box that cannot move). */
+  block(r: Rect) {
+    this.rects.push(r);
+  }
+
+  /** The y (centre) for a w×h label wanted at (left, y): y itself when free, else the nearest free shift. */
+  place(left: number, y: number, w: number, h: number): number {
+    const free = (cy: number) => {
+      const r = { left, right: left + w, top: cy - h / 2, bottom: cy + h / 2 };
+      return !this.rects.some((o) => r.left < o.right && r.right > o.left && r.top < o.bottom + GAP && r.bottom + GAP > o.top);
+    };
+    let best = y;
+    if (!free(y)) {
+      for (let i = 1; i <= MAX_TRIES; i++) {
+        const up = y - i * (h + GAP);
+        const down = y + i * (h + GAP);
+        if (free(up)) {
+          best = up;
+          break;
+        }
+        if (free(down)) {
+          best = down;
+          break;
+        }
+      }
+    }
+    this.rects.push({ left, right: left + w, top: best - h / 2, bottom: best + h / 2 });
+    return best;
+  }
+}
+
+const registries = new WeakMap<object, LabelRegistry>();
+
+/** The label registry shared by every primitive on `chart`. */
+export function labelsFor(chart: object | null): LabelRegistry | null {
+  if (!chart) return null;
+  let r = registries.get(chart);
+  if (!r) {
+    r = new LabelRegistry();
+    registries.set(chart, r);
+  }
+  return r;
+}
+
+/** Pill-shaped text label. With a registry, it moves out of the way of labels drawn earlier in the same paint. */
 export function drawLabel(
   ctx: CanvasRenderingContext2D,
   text: string,
   x: number,
   y: number,
-  opts: { color: string; bg?: string; align?: "left" | "right"; bold?: boolean },
+  opts: { color: string; bg?: string; align?: "left" | "right"; bold?: boolean; labels?: LabelRegistry | null },
 ) {
   if (!text) return;
   ctx.font = opts.bold ? FONT_BOLD : FONT;
   const w = ctx.measureText(text).width + 8;
   const h = 16;
   const left = opts.align === "right" ? x - w : x;
+  if (opts.labels) y = opts.labels.place(left, y, w, h);
   if (opts.bg) {
     ctx.fillStyle = opts.bg;
     ctx.beginPath();
@@ -100,6 +167,11 @@ export abstract class PrimitiveBase implements ISeriesPrimitive<Time> {
     return this.emptyAxis;
   }
 
+  /** This chart's shared label registry (null before attach). */
+  protected get labels(): LabelRegistry | null {
+    return labelsFor(this.chart);
+  }
+
   protected y(price: number): number | null {
     return this.series?.priceToCoordinate(price) ?? null;
   }
@@ -109,4 +181,16 @@ export abstract class PrimitiveBase implements ISeriesPrimitive<Time> {
   }
 
   abstract paneViews(): readonly ISeriesPrimitivePaneView[];
+}
+
+/** Attached before every other primitive: its bottom-layer renderer runs first in each paint and clears the
+ *  chart's label registry, so labels are laid out afresh every frame. Draws nothing. */
+export class LabelResetPrimitive extends PrimitiveBase {
+  private readonly views: readonly ISeriesPrimitivePaneView[] = [
+    new PaneView(() => new MediaRenderer(() => this.labels?.reset()), "bottom"),
+  ];
+
+  paneViews() {
+    return this.views;
+  }
 }

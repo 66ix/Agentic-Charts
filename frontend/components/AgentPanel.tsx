@@ -1,11 +1,28 @@
 "use client";
 
 import clsx from "clsx";
-import { Bell, Bot, ChevronDown, Eraser, Footprints, Loader2, SendHorizontal, Sparkles, Target, Trash2, User } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import {
+  Bell,
+  Bot,
+  Check,
+  ClipboardCopy,
+  Eraser,
+  Footprints,
+  Loader2,
+  NotebookPen,
+  Pin,
+  PinOff,
+  SendHorizontal,
+  Target,
+  Trash2,
+  User,
+} from "lucide-react";
+import { Fragment, useEffect, useImperativeHandle, useRef, useState, type ReactNode, type Ref } from "react";
 
+import { usePersistentState } from "@/hooks/usePersistentState";
 import { displaySymbol, formatPct, formatPrice } from "@/lib/format";
-import type { Overlay, ScanResult, TradePlan } from "@/lib/types";
+import { DEFAULT_SIZING, orderText, qtyText, sizePlan, type SizingSettings } from "@/lib/sizing";
+import type { Interval, Overlay, ScanResult, TradePlan } from "@/lib/types";
 
 export interface AgentMessage {
   id: string;
@@ -17,21 +34,50 @@ export interface AgentMessage {
   plan?: TradePlan;
   scan?: ScanResult[];
   steps?: string[];
+  /** The chart the answer was drawn on, and the question it answered (for pins and the journal). */
+  symbol?: string;
+  interval?: Interval;
+  prompt?: string;
+  lastPrice?: number;
+}
+
+export interface AgentPanelHandle {
+  focus(): void;
 }
 
 const SUGGESTIONS = [
   "Identify the current H4 supply zone and key resistance high",
   "Which of my coins are near demand?",
   "Give me a long setup",
+  "What does Kimi say?",
   "Find order blocks, FVGs and liquidity sweeps",
   "Open BTC daily and show key levels",
-  "Full analysis: zones, windows, trendlines",
 ];
 
 const FOLLOW_UPS = ["Also show swings", "Same on daily", "Does the daily agree?", "Alert me on these levels", "Add RSI"];
 
-function PlanCard({ plan }: { plan: TradePlan }) {
+/** Prices in an answer in bold: numbers with decimals or thousands separators within ±60% of the last price. */
+function emphasize(text: string, last: number | undefined): ReactNode {
+  if (!last) return text;
+  const re = /\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+\.\d+/g;
+  const out: ReactNode[] = [];
+  let i = 0;
+  for (const m of text.matchAll(re)) {
+    const v = Number(m[0].replace(/,/g, ""));
+    if (!(v > last * 0.4 && v < last * 1.6)) continue;
+    out.push(text.slice(i, m.index), <strong key={m.index} className="font-semibold text-white">{m[0]}</strong>);
+    i = (m.index ?? 0) + m[0].length;
+  }
+  out.push(text.slice(i));
+  return out;
+}
+
+function PlanCard({ plan, symbol, onLog }: { plan: TradePlan; symbol?: string; onLog?(): Promise<boolean> }) {
+  const [sizing] = usePersistentState<SizingSettings>("ac:sizing", DEFAULT_SIZING);
+  const [copied, setCopied] = useState(false);
+  const [logged, setLogged] = useState<"idle" | "busy" | "done" | "error">("idle");
   const long = plan.direction === "long";
+  const sized = sizePlan(plan, sizing);
   return (
     <div className="mt-1.5 rounded-md border border-line bg-base/60 p-2 text-[11px]">
       <div className="mb-1 flex items-center gap-1.5">
@@ -39,24 +85,70 @@ function PlanCard({ plan }: { plan: TradePlan }) {
         <span className={clsx("font-semibold", long ? "text-up" : "text-down")}>{long ? "Long" : "Short"} plan</span>
         <span className="truncate text-mute">from {plan.basis}</span>
       </div>
-      <div className="grid grid-cols-[auto_1fr_auto] gap-x-3 gap-y-0.5 font-mono">
+      <div className="grid grid-cols-[auto_1fr_auto_auto] gap-x-3 gap-y-0.5 font-mono">
         <span className="text-mute">Entry</span>
         <span className="text-accent">{formatPrice(plan.entry)}</span>
+        <span />
         <span />
         <span className="text-mute">Stop</span>
         <span className="text-down">{formatPrice(plan.stop)}</span>
         <span className="text-mute">−{plan.risk_pct}%</span>
-        {plan.targets.map((t) => (
-          <span key={t.label} className="contents">
+        <span className="text-down">{sized ? `−$${sized.riskUsd.toFixed(2)}` : ""}</span>
+        {plan.targets.map((t, i) => (
+          <Fragment key={t.label}>
             <span className="text-mute">{t.label.split(" ")[0]}</span>
             <span className="text-up">{formatPrice(t.price)}</span>
             <span className="text-ink">{t.rr}R</span>
-          </span>
+            <span className="text-up">{sized ? `+$${sized.targets[i].pnlUsd.toFixed(2)}` : ""}</span>
+          </Fragment>
         ))}
       </div>
+      {sized && symbol && (
+        <div className="mt-1.5 border-t border-line pt-1.5 text-mute">
+          Size <span className="font-mono text-ink">{qtyText(sized.qty)}</span> (~${sized.notional.toFixed(0)}) for{" "}
+          {sizing.riskPct}% risk of ${sizing.account.toLocaleString()}
+          {sized.leverage > 1 && <> · needs {sized.leverage.toFixed(1)}x</>} · fees ~${sized.feesUsd.toFixed(2)}
+        </div>
+      )}
+      {sized?.warnings.map((w) => (
+        <p key={w} className="mt-1 text-yellow-300">{w}</p>
+      ))}
       {plan.notes.map((n) => (
         <p key={n} className="mt-1 text-mute">{n}</p>
       ))}
+      {symbol && (
+        <div className="mt-1.5 flex gap-1">
+          <button
+            type="button"
+            className="btn-ghost h-6 border border-line px-1.5 text-[11px]"
+            title="Copy entry, stop, targets and size as one line"
+            onClick={() => {
+              void navigator.clipboard?.writeText(orderText(plan, symbol, sized, sizing)).then(() => {
+                setCopied(true);
+                setTimeout(() => setCopied(false), 1500);
+              });
+            }}
+          >
+            {copied ? <Check className="h-3.5 w-3.5 text-up" /> : <ClipboardCopy className="h-3.5 w-3.5" />}
+            {copied ? "Copied" : "Copy order"}
+          </button>
+          {onLog && (
+            <button
+              type="button"
+              disabled={logged === "busy" || logged === "done"}
+              className="btn-ghost h-6 border border-line px-1.5 text-[11px] disabled:opacity-60"
+              title="Track this plan in the trade journal"
+              onClick={async () => {
+                setLogged("busy");
+                setLogged((await onLog()) ? "done" : "error");
+              }}
+            >
+              {logged === "done" ? <Check className="h-3.5 w-3.5 text-up" /> : <NotebookPen className="h-3.5 w-3.5" />}
+              {logged === "done" ? "In journal" : logged === "error" ? "Not saved, retry" : "Log trade"}
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -64,7 +156,7 @@ function PlanCard({ plan }: { plan: TradePlan }) {
 function ScanTable({ rows, onPick }: { rows: ScanResult[]; onPick(symbol: string): void }) {
   return (
     <div className="mt-1.5 overflow-hidden rounded-md border border-line">
-      {rows.slice(0, 8).map((r) => (
+      {rows.slice(0, 10).map((r) => (
         <button
           key={r.symbol}
           type="button"
@@ -89,29 +181,32 @@ function swatch(o: Overlay) {
 }
 
 interface Props {
-  open: boolean;
   busy: boolean;
   messages: AgentMessage[];
   overlayCount: number;
+  /** Ids of answers whose drawings are pinned to their chart. */
+  pinned: Set<string>;
   onSubmit(prompt: string): void;
   onClearOverlays(): void;
   onClearChat(): void;
   onPickSymbol(symbol: string): void;
-  onClose(): void;
+  onTogglePin(message: AgentMessage): void;
+  /** Adds an answer's plan to the trade journal → saved. */
+  onLogTrade?(message: AgentMessage): Promise<boolean>;
+  handleRef?: Ref<AgentPanelHandle>;
 }
 
+/** The chart agent as a dock tab: the conversation fills the height, the prompt sits at the bottom. */
 export default function AgentPanel(p: Props) {
   const [value, setValue] = useState("");
   const listRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  useImperativeHandle(p.handleRef, () => ({ focus: () => inputRef.current?.focus() }));
 
   useEffect(() => {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: "smooth" });
-  }, [p.messages.length, p.busy, p.open]);
-
-  useEffect(() => {
-    if (p.open) inputRef.current?.focus();
-  }, [p.open]);
+  }, [p.messages.length, p.busy]);
 
   const submit = (text: string) => {
     const t = text.trim();
@@ -121,36 +216,34 @@ export default function AgentPanel(p: Props) {
   };
 
   return (
-    <div
-      className={clsx(
-        "pointer-events-auto absolute bottom-10 left-1/2 z-30 flex w-[min(640px,calc(100%-24px))] -translate-x-1/2 flex-col overflow-hidden rounded-xl border border-line bg-panel/95 shadow-2xl backdrop-blur transition-all",
-        !p.open && "hidden",
-      )}
-    >
-      <div className="flex items-center gap-2 border-b border-line px-3 py-2 text-xs">
-        <Sparkles className="h-4 w-4 text-accent" />
-        <span className="font-semibold text-ink">Chart Agent</span>
-        <span className="truncate text-mute">draws levels, switches charts, scans your watchlist</span>
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex shrink-0 items-center gap-1 border-b border-line px-3 py-1.5 text-[11px] text-mute">
+        <span className="truncate">Draws levels, plans trades, switches charts, scans your watchlist</span>
         <div className="flex-1" />
         {p.overlayCount > 0 && (
-          <button type="button" onClick={p.onClearOverlays} className="btn-ghost h-6 gap-1 px-1.5 text-[11px]" title="Remove AI overlays">
+          <button type="button" onClick={p.onClearOverlays} className="btn-ghost h-6 shrink-0 gap-1 px-1.5 text-[11px]" title="Remove the agent's drawings from this chart (Ctrl+Z brings them back)">
             <Eraser className="h-3.5 w-3.5" /> Clear {p.overlayCount}
           </button>
         )}
         {p.messages.length > 0 && (
-          <button type="button" onClick={p.onClearChat} className="btn-ghost h-6 w-6 p-0" title="Start a new conversation" aria-label="Clear conversation">
+          <button type="button" onClick={p.onClearChat} className="btn-ghost h-6 w-6 shrink-0 p-0" title="Start a new conversation" aria-label="Clear conversation">
             <Trash2 className="h-3.5 w-3.5" />
           </button>
         )}
-        <button type="button" onClick={p.onClose} className="btn-ghost h-6 w-6 p-0" aria-label="Minimize agent">
-          <ChevronDown className="h-4 w-4" />
-        </button>
       </div>
 
-      {(p.messages.length > 0 || p.busy) && (
-        <div ref={listRef} className="max-h-72 space-y-3 overflow-y-auto px-3 py-3 text-[13px] leading-relaxed">
-          {p.messages.map((m) => (
-            <div key={m.id} className="flex gap-2">
+      <div ref={listRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3 text-[13px] leading-relaxed">
+        {p.messages.length === 0 && !p.busy && (
+          <p className="text-[12px] text-mute">
+            Ask in plain English. The agent finds zones, swings and liquidity, builds trade plans, sets alerts, reads
+            Kimi Cooked and your watchlist. Every price it draws comes from the detectors, never from the model.
+          </p>
+        )}
+        {p.messages.map((m) => {
+          const isPinned = p.pinned.has(m.id);
+          const drawable = m.role === "agent" && !!m.overlays?.length && !!m.symbol;
+          return (
+            <div key={m.id} className="group flex gap-2">
               <div
                 className={clsx(
                   "mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded-full",
@@ -169,8 +262,12 @@ export default function AgentPanel(p: Props) {
                     ))}
                   </ul>
                 )}
-                <p className={clsx(m.role === "user" ? "text-mute" : m.role === "error" ? "text-down" : "text-ink")}>{m.text}</p>
-                {m.plan && <PlanCard plan={m.plan} />}
+                <p className={clsx(m.role === "user" ? "text-mute" : m.role === "error" ? "text-down" : "text-ink")}>
+                  {m.role === "agent" ? emphasize(m.text, m.lastPrice) : m.text}
+                </p>
+                {m.plan && (
+                  <PlanCard plan={m.plan} symbol={m.symbol} onLog={p.onLogTrade ? () => p.onLogTrade!(m) : undefined} />
+                )}
                 {m.scan && <ScanTable rows={m.scan} onPick={p.onPickSymbol} />}
                 {m.overlays && m.overlays.length > 0 && (
                   <div className="mt-1.5 flex flex-wrap gap-1">
@@ -189,20 +286,36 @@ export default function AgentPanel(p: Props) {
                     <Bell className="h-3 w-3" /> {m.alerts} alert{m.alerts === 1 ? "" : "s"} armed
                   </p>
                 ) : null}
-                {m.meta && <p className="mt-1 text-[10px] text-mute">{m.meta}</p>}
+                <div className="mt-1 flex items-center gap-2">
+                  {m.meta && <p className="text-[10px] text-mute">{m.meta}</p>}
+                  {drawable && (
+                    <button
+                      type="button"
+                      onClick={() => p.onTogglePin(m)}
+                      className={clsx(
+                        "ml-auto inline-flex shrink-0 items-center gap-1 rounded px-1 py-0.5 text-[10px]",
+                        isPinned ? "bg-accent/15 text-accent" : "text-mute opacity-70 hover:bg-panel2 hover:text-ink group-hover:opacity-100",
+                      )}
+                      title={isPinned ? "Unpin: these drawings go when the next answer replaces them" : `Keep these drawings on ${displaySymbol(m.symbol!)} when you ask something else`}
+                    >
+                      {isPinned ? <PinOff className="h-3 w-3" /> : <Pin className="h-3 w-3" />}
+                      {isPinned ? "Pinned" : "Pin"}
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
-          ))}
-          {p.busy && (
-            <div className="flex items-center gap-2 text-mute">
-              <Loader2 className="h-4 w-4 animate-spin" /> Analysing market structure…
-            </div>
-          )}
-        </div>
-      )}
+          );
+        })}
+        {p.busy && (
+          <div className="flex items-center gap-2 text-mute">
+            <Loader2 className="h-4 w-4 animate-spin" /> Analysing market structure…
+          </div>
+        )}
+      </div>
 
-      {!p.busy && (p.messages.length === 0 || p.overlayCount > 0) && (
-        <div className="flex flex-wrap gap-1.5 px-3 pt-3">
+      {!p.busy && (
+        <div className="flex shrink-0 flex-wrap gap-1.5 px-3 pt-2">
           {(p.messages.length === 0 ? SUGGESTIONS : FOLLOW_UPS).map((s) => (
             <button
               key={s}
@@ -217,24 +330,31 @@ export default function AgentPanel(p: Props) {
       )}
 
       <form
-        className="flex items-center gap-2 p-3"
+        className="flex shrink-0 items-end gap-2 p-3"
         onSubmit={(e) => {
           e.preventDefault();
           submit(value);
         }}
       >
-        <input
+        <textarea
           ref={inputRef}
+          rows={2}
           value={value}
           onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              submit(value);
+            }
+          }}
           placeholder={p.messages.length ? 'Follow up, e.g. "same on ETH", "line at 25.4" or "alert me at the entry"' : 'Ask the agent, e.g. "Which of my coins are near demand?"'}
-          className="h-9 flex-1 rounded-lg border border-line bg-base px-3 text-sm text-ink outline-none placeholder:text-mute focus:border-accent/60"
+          className="min-h-9 flex-1 resize-none rounded-lg border border-line bg-base px-3 py-2 text-sm text-ink outline-none placeholder:text-mute focus:border-accent/60"
           aria-label="Agent prompt"
         />
         <button
           type="submit"
           disabled={p.busy || !value.trim()}
-          className="grid h-9 w-9 place-items-center rounded-lg bg-accent text-white transition-opacity disabled:opacity-40"
+          className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-accent text-white transition-opacity disabled:opacity-40"
           aria-label="Send"
         >
           {p.busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <SendHorizontal className="h-4 w-4" />}

@@ -3,7 +3,7 @@ import type { ISeriesPrimitivePaneView } from "lightweight-charts";
 import { formatPrice } from "../../format";
 import { INTERVAL_SECONDS, type KimiForecast, type KimiResult } from "../../types";
 import type { TimeMapper } from "../timeMapper";
-import { dash, FONT, MediaRenderer, PaneView, PrimitiveBase } from "./base";
+import { dash, FONT, MediaRenderer, PaneView, PrimitiveBase, type LabelRegistry } from "./base";
 
 // The script's colours (Kimi Cooked v5.7.4 inputs and drawing code).
 const SUPPORT = [0, 208, 132] as const; // #00d084
@@ -23,12 +23,20 @@ const LABEL_GAP = 13; // px between right-hand labels before one is dropped
  * and the forecast (confidence band, best-guess line, textured scenario path, end label and next-candle call).
  * Its B+/B-/U/Dn/B+?/B-? labels are series markers, set by the chart.
  */
+/** Which parts of Kimi's picture to draw (the Layers tab toggles them). */
+export interface KimiParts {
+  sr: boolean;
+  fib: boolean;
+  forecast: boolean;
+}
+
 export class KimiPrimitive extends PrimitiveBase {
   private readonly views: readonly ISeriesPrimitivePaneView[];
 
   constructor(
     mapper: TimeMapper,
     public data: KimiResult,
+    private readonly parts: KimiParts = { sr: true, fib: true, forecast: true },
   ) {
     super(mapper);
     this.views = [
@@ -52,7 +60,7 @@ export class KimiPrimitive extends PrimitiveBase {
 
   // ------------------------------------------------ zones, pocket, band
   private drawBack(ctx: CanvasRenderingContext2D, width: number) {
-    for (const lv of this.data.levels) {
+    for (const lv of this.parts.sr ? this.data.levels : []) {
       const top = this.y(lv.zone_high);
       const bottom = this.y(lv.zone_low);
       if (top === null || bottom === null) continue;
@@ -69,7 +77,7 @@ export class KimiPrimitive extends PrimitiveBase {
       ctx.strokeRect(left + 0.5, top + 0.5, right - left - 1, h - 1);
     }
 
-    const fib = this.data.fib;
+    const fib = this.parts.fib ? this.data.fib : null;
     if (fib) {
       const top = this.y(fib.pocket_high);
       const bottom = this.y(fib.pocket_low);
@@ -87,7 +95,7 @@ export class KimiPrimitive extends PrimitiveBase {
       }
     }
 
-    const f = this.data.forecast;
+    const f = this.parts.forecast ? this.data.forecast : null;
     if (f) this.drawBand(ctx, f);
   }
 
@@ -131,8 +139,9 @@ export class KimiPrimitive extends PrimitiveBase {
       used.push(y);
       return true;
     };
+    const labels = this.labels;
 
-    const fib = this.data.fib;
+    const fib = this.parts.fib ? this.data.fib : null;
     if (fib) {
       const left = this.clampX(this.x(fib.time_start), width, 0);
       const right = this.clampX(this.x(fib.time_end), width, width);
@@ -154,12 +163,12 @@ export class KimiPrimitive extends PrimitiveBase {
         if (labelX !== null && place(y)) {
           const tag = edge ? (lv.ratio === 0 ? " · swing start" : " · swing now") : key ? " · golden pocket" : "";
           const color = edge ? "#d7dade" : key || ext ? rgba(GOLD, 1) : "#4da3ff";
-          text(ctx, `Fib ${+lv.ratio.toFixed(3)}  ${formatPrice(lv.price)}${tag} · ${lv.odds}%`, labelX, y, color);
+          text(ctx, `Fib ${+lv.ratio.toFixed(3)}  ${formatPrice(lv.price)}${tag} · ${lv.odds}%`, labelX, y, color, labels);
         }
       }
     }
 
-    for (const lv of this.data.levels) {
+    for (const lv of this.parts.sr ? this.data.levels : []) {
       const y = this.y(lv.price);
       if (y === null) continue;
       const left = this.clampX(this.x(lv.time_start), width, 0);
@@ -175,15 +184,15 @@ export class KimiPrimitive extends PrimitiveBase {
       ctx.stroke();
       // Odds tags on every level still standing; a Fib label at the same height wins, as on the script.
       if (!broken && labelX !== null && lv.odds !== null && place(y)) {
-        text(ctx, `${lv.side === "support" ? "S" : "R"}  ${formatPrice(lv.price)} · ${lv.odds}%`, labelX, y, rgba(rgb, 1));
+        text(ctx, `${lv.side === "support" ? "S" : "R"}  ${formatPrice(lv.price)} · ${lv.odds}%`, labelX, y, rgba(rgb, 1), labels);
       }
     }
 
-    const f = this.data.forecast;
-    if (f) this.drawForecast(ctx, f, width);
+    const f = this.parts.forecast ? this.data.forecast : null;
+    if (f) this.drawForecast(ctx, f, width, labels);
   }
 
-  private drawForecast(ctx: CanvasRenderingContext2D, f: KimiForecast, width: number) {
+  private drawForecast(ctx: CanvasRenderingContext2D, f: KimiForecast, width: number, labels: LabelRegistry | null) {
     const path = this.points(f, f.path);
     const tex = this.points(f, f.texture);
     if (!path || !tex) return;
@@ -242,12 +251,13 @@ export class KimiPrimitive extends PrimitiveBase {
       lines.push(`Next candle: ${nc.direction === "up" ? "▲" : "▼"} (stretched move) · ${record}`);
     }
     const bg = f.final > f.path[0] ? "rgba(76, 175, 80, 0.8)" : f.final < f.path[0] ? "rgba(242, 54, 69, 0.8)" : "rgba(120, 123, 134, 0.8)";
-    box(ctx, lines, end.x + 8, end.y, bg, width);
+    box(ctx, lines, end.x + 8, end.y, bg, width, labels);
   }
 }
 
-function text(ctx: CanvasRenderingContext2D, s: string, x: number, y: number, color: string) {
+function text(ctx: CanvasRenderingContext2D, s: string, x: number, y: number, color: string, labels: LabelRegistry | null) {
   ctx.font = FONT;
+  if (labels) y = labels.place(x, y, ctx.measureText(s).width, 13);
   ctx.textBaseline = "middle";
   ctx.textAlign = "left";
   ctx.lineWidth = 3;
@@ -259,7 +269,15 @@ function text(ctx: CanvasRenderingContext2D, s: string, x: number, y: number, co
 
 /** Multi-line label right of (x, y), pointing at it like label.style_label_left; moved inside the pane when the
  *  chart is scrolled so far right that it would be cut off. */
-function box(ctx: CanvasRenderingContext2D, lines: string[], x: number, y: number, bg: string, width: number) {
+function box(
+  ctx: CanvasRenderingContext2D,
+  lines: string[],
+  x: number,
+  y: number,
+  bg: string,
+  width: number,
+  labels: LabelRegistry | null,
+) {
   ctx.font = FONT;
   const lh = 14;
   const w = Math.max(...lines.map((l) => ctx.measureText(l).width)) + 12;
@@ -279,6 +297,7 @@ function box(ctx: CanvasRenderingContext2D, lines: string[], x: number, y: numbe
   ctx.beginPath();
   ctx.roundRect(x, top, w, h, 3);
   ctx.fill();
+  labels?.block({ left: x, top, right: x + w, bottom: top + h });
   ctx.fillStyle = "#ffffff";
   ctx.textBaseline = "middle";
   ctx.textAlign = "left";

@@ -63,6 +63,11 @@ export class LabeledRayPrimitive extends PrimitiveBase {
       ctx.arc(left, yy, 2.5, 0, Math.PI * 2);
       ctx.fill();
     }
-    drawLabel(ctx, this.line.label, size.width - 8, yy - 10, { color: this.line.color, align: "right", bold: true });
+    drawLabel(ctx, this.line.label, size.width - 8, yy - 10, {
+      color: this.line.color,
+      align: "right",
+      bold: true,
+      labels: this.labels,
+    });
   }
 }

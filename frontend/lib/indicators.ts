@@ -146,3 +146,113 @@ export function vwap(candles: Candle[], intervalSeconds: number): Point[] {
   }
   return out;
 }
+
+export interface BandsResult {
+  upper: Point[];
+  mid: Point[];
+  lower: Point[];
+}
+
+/** Bollinger Bands: SMA(length) of closes ± mult × population standard deviation. */
+export function bollinger(candles: Candle[], length = 20, mult = 2): BandsResult {
+  const out: BandsResult = { upper: [], mid: [], lower: [] };
+  let sum = 0;
+  let sumSq = 0;
+  for (let i = 0; i < candles.length; i++) {
+    const c = candles[i].close;
+    sum += c;
+    sumSq += c * c;
+    if (i >= length) {
+      const old = candles[i - length].close;
+      sum -= old;
+      sumSq -= old * old;
+    }
+    if (i >= length - 1) {
+      const mean = sum / length;
+      const sd = Math.sqrt(Math.max(0, sumSq / length - mean * mean));
+      const time = candles[i].time;
+      out.mid.push({ time, value: mean });
+      out.upper.push({ time, value: mean + mult * sd });
+      out.lower.push({ time, value: mean - mult * sd });
+    }
+  }
+  return out;
+}
+
+/** Wilder's Average True Range (RMA of true range, seeded with an SMA). */
+export function atr(candles: Candle[], length = 14): Point[] {
+  const n = candles.length;
+  if (n <= length) return [];
+  const tr = (i: number) => {
+    const c = candles[i];
+    if (i === 0) return c.high - c.low;
+    const pc = candles[i - 1].close;
+    return Math.max(c.high - c.low, Math.abs(c.high - pc), Math.abs(c.low - pc));
+  };
+  let v = 0;
+  for (let i = 1; i <= length; i++) v += tr(i);
+  v /= length;
+  const out: Point[] = [{ time: candles[length].time, value: v }];
+  for (let i = length + 1; i < n; i++) {
+    v = (v * (length - 1) + tr(i)) / length;
+    out.push({ time: candles[i].time, value: v });
+  }
+  return out;
+}
+
+function sma(points: Point[], length: number): Point[] {
+  const out: Point[] = [];
+  let sum = 0;
+  for (let i = 0; i < points.length; i++) {
+    sum += points[i].value;
+    if (i >= length) sum -= points[i - length].value;
+    if (i >= length - 1) out.push({ time: points[i].time, value: sum / length });
+  }
+  return out;
+}
+
+/** Stochastic RSI like TradingView's: %K = SMA(k) of the stochastic of RSI over `stochLength`, %D = SMA(d) of %K. */
+export function stochRsi(candles: Candle[], rsiLength = 14, stochLength = 14, k = 3, d = 3): { k: Point[]; d: Point[] } {
+  const r = rsi(candles, rsiLength);
+  const raw: Point[] = [];
+  for (let i = stochLength - 1; i < r.length; i++) {
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (let j = i - stochLength + 1; j <= i; j++) {
+      lo = Math.min(lo, r[j].value);
+      hi = Math.max(hi, r[j].value);
+    }
+    raw.push({ time: r[i].time, value: hi === lo ? 0 : ((r[i].value - lo) / (hi - lo)) * 100 });
+  }
+  const kLine = sma(raw, k);
+  return { k: kLine, d: sma(kLine, d) };
+}
+
+export interface ProfileBin {
+  low: number;
+  high: number;
+  volume: number;
+}
+
+/** Volume profile of `candles`: each bar's volume spread evenly over the bins its range covers. */
+export function volumeProfile(candles: Candle[], bins = 32): { bins: ProfileBin[]; poc: number } | null {
+  if (candles.length < 5) return null;
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const c of candles) {
+    lo = Math.min(lo, c.low);
+    hi = Math.max(hi, c.high);
+  }
+  if (!(hi > lo)) return null;
+  const step = (hi - lo) / bins;
+  const vols = new Array<number>(bins).fill(0);
+  for (const c of candles) {
+    const a = Math.max(0, Math.min(bins - 1, Math.floor((c.low - lo) / step)));
+    const b = Math.max(0, Math.min(bins - 1, Math.floor((c.high - lo) / step)));
+    const share = c.volume / (b - a + 1);
+    for (let i = a; i <= b; i++) vols[i] += share;
+  }
+  const out = vols.map((v, i) => ({ low: lo + i * step, high: lo + (i + 1) * step, volume: v }));
+  const best = out.reduce((m, b) => (b.volume > m.volume ? b : m), out[0]);
+  return { bins: out, poc: (best.low + best.high) / 2 };
+}
