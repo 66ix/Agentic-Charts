@@ -1,0 +1,44 @@
+# One-command deploy on any VPS:  PUBLIC_HOST=charts.example.com docker compose up -d --build
+# Put a TLS reverse proxy (Caddy, nginx, Cloudflare Tunnel) in front of ports 3000 and 8000, or see
+# README "Deploy" for a Caddy example that serves both on one domain.
+services:
+  backend:
+    build: ./backend
+    env_file:
+      - path: ./backend/.env
+        required: false
+    environment:
+      CORS_ORIGINS: ${PUBLIC_ORIGIN:-http://localhost:3000}
+      TRUST_PROXY: "1"
+      AGENT_RATE_LIMIT: ${AGENT_RATE_LIMIT:-20/minute}
+      AGENT_DAILY_LIMIT: ${AGENT_DAILY_LIMIT:-500}
+      OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
+    volumes:
+      - backend-cache:/app/.cache
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:8000}
+    depends_on:
+      - backend
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+  # Optional local model: docker compose --profile ollama up -d, then
+  # docker compose exec ollama ollama pull llama3.1:8b
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["ollama"]
+    volumes:
+      - ollama:/root/.ollama
+    restart: unless-stopped
+
+volumes:
+  backend-cache:
+  ollama:

@@ -51,6 +51,15 @@ class Settings:
     openai_model: str = field(default_factory=lambda: _env("OPENAI_MODEL", "gpt-4o-mini"))
     anthropic_api_key: str = field(default_factory=lambda: _env("ANTHROPIC_API_KEY", ""))
     anthropic_model: str = field(default_factory=lambda: _env("ANTHROPIC_MODEL", "claude-sonnet-5-5"))
+    # "tools": the model may look at other timeframes/coins before planning (agent_loop.py);
+    # "plan": one structured call, faster and better suited to small local models.
+    agent_mode: str = field(default_factory=lambda: _env("AGENT_MODE", "tools").lower())
+    agent_max_steps: int = field(default_factory=lambda: int(_env("AGENT_MAX_STEPS", "4")))
+    # Rate limits per client ("N/second|minute|hour|day", or 0 to disable) and a global daily agent cap.
+    agent_rate_limit: str = field(default_factory=lambda: _env("AGENT_RATE_LIMIT", "20/minute"))
+    api_rate_limit: str = field(default_factory=lambda: _env("API_RATE_LIMIT", "300/minute"))
+    agent_daily_limit: int = field(default_factory=lambda: int(_env("AGENT_DAILY_LIMIT", "0")))
+    trust_proxy: bool = field(default_factory=lambda: _env("TRUST_PROXY", "0").lower() in ("1", "true", "on"))
 
     cors_origins: tuple[str, ...] = field(
         default_factory=lambda: tuple(

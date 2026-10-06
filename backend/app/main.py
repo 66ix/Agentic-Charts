@@ -5,6 +5,8 @@ REST
   GET  /api/symbols              tradable USDT spot pairs
   GET  /api/klines               historical OHLCV
   GET  /api/market/metrics       global market header metrics
+  GET  /api/tickers              last price + 24h change for a list of symbols
+  GET  /api/watchlist/scan       nearest zone and signals per watchlist symbol
   POST /api/agent/analyze        prompt → structured chart overlays
 WebSocket
   /ws/klines?symbol=INJUSDT&interval=4h   live candle updates
@@ -27,7 +29,9 @@ from .derivatives import DerivativesService
 from .llm import LLMClient
 from .market_data import MarketData, MarketDataError
 from .market_metrics import MarketMetricsService
-from .schemas import INTERVALS, AnalyzeRequest, AnalyzeResponse, MarketMetrics
+from .ratelimit import RateLimitMiddleware
+from .scanner import WatchlistCache, tickers
+from .schemas import INTERVALS, AnalyzeRequest, AnalyzeResponse, MarketMetrics, ScanResult
 from .stream_hub import StreamHub
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -43,6 +47,7 @@ async def lifespan(app: FastAPI):
     app.state.derivatives.start()
     app.state.metrics = MarketMetricsService(app.state.derivatives)
     app.state.hub = StreamHub(market)
+    app.state.watchlist = WatchlistCache(market)
     log.info("Data source: %s | LLM provider: %s %s", market.settings.data_source,
              app.state.llm.provider, app.state.llm.model)
     yield
@@ -56,6 +61,8 @@ app = FastAPI(title="Agentic Charts API", version="1.0.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=list(settings.cors_origins), allow_credentials=False,
                    allow_methods=["GET", "POST"], allow_headers=["*"])
 app.add_middleware(GZipMiddleware, minimum_size=2048)
+app.add_middleware(RateLimitMiddleware, agent_rate=settings.agent_rate_limit, api_rate=settings.api_rate_limit,
+                   agent_daily=settings.agent_daily_limit, trust_proxy=settings.trust_proxy)
 
 
 def _norm_symbol(symbol: str) -> str:
@@ -109,10 +116,27 @@ async def market_metrics(request: Request) -> MarketMetrics:
     return await request.app.state.metrics.get()
 
 
+def _symbol_list(symbols: str) -> list[str]:
+    out = [_norm_symbol(s) for s in symbols.split(",") if s.strip()]
+    if not out or len(out) > 40:
+        raise HTTPException(422, "Give 1 to 40 comma-separated symbols")
+    return list(dict.fromkeys(out))
+
+
+@app.get("/api/tickers")
+async def get_tickers(request: Request, symbols: str = Query(..., description="Comma-separated")) -> dict:
+    return {"tickers": await tickers(request.app.state.market, _symbol_list(symbols))}
+
+
+@app.get("/api/watchlist/scan", response_model=list[ScanResult])
+async def watchlist_scan(request: Request, symbols: str = Query(...), interval: str = Query("4h")) -> list[ScanResult]:
+    return await request.app.state.watchlist.get(_symbol_list(symbols), _check_interval(interval))
+
+
 @app.post("/api/agent/analyze", response_model=AnalyzeResponse)
 async def agent_analyze(req: AnalyzeRequest, request: Request) -> AnalyzeResponse:
     try:
-        return await run_analysis(req, request.app.state.market, request.app.state.llm)
+        return await run_analysis(req, request.app.state.market, request.app.state.llm, request.app.state.derivatives)
     except MarketDataError as exc:
         raise HTTPException(502, str(exc)) from exc
     except ValueError as exc:
