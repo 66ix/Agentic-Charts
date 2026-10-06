@@ -22,12 +22,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
 from .agent import run_analysis
+from .alerts import AlertService
 from .config import get_settings
 from .derivatives import DerivativesService
 from .llm import LLMClient
 from .market_data import MarketData, MarketDataError
 from .market_metrics import MarketMetricsService
-from .schemas import INTERVALS, AnalyzeRequest, AnalyzeResponse, MarketMetrics
+from .schemas import INTERVALS, AnalyzeRequest, AnalyzeResponse, CreateAlertsRequest, MarketMetrics
 from .stream_hub import StreamHub
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -43,9 +44,12 @@ async def lifespan(app: FastAPI):
     app.state.derivatives.start()
     app.state.metrics = MarketMetricsService(app.state.derivatives)
     app.state.hub = StreamHub(market)
+    app.state.alerts = AlertService(app.state.hub)
+    await app.state.alerts.start()
     log.info("Data source: %s | LLM provider: %s %s", market.settings.data_source,
              app.state.llm.provider, app.state.llm.model)
     yield
+    await app.state.alerts.close()
     await app.state.hub.shutdown()
     await asyncio.gather(market.close(), app.state.llm.close(), app.state.metrics.close(),
                          app.state.derivatives.close())
@@ -54,7 +58,7 @@ async def lifespan(app: FastAPI):
 settings = get_settings()
 app = FastAPI(title="Agentic Charts API", version="1.0.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=list(settings.cors_origins), allow_credentials=False,
-                   allow_methods=["GET", "POST"], allow_headers=["*"])
+                   allow_methods=["GET", "POST", "DELETE"], allow_headers=["*"])
 app.add_middleware(GZipMiddleware, minimum_size=2048)
 
 
@@ -117,6 +121,89 @@ async def agent_analyze(req: AnalyzeRequest, request: Request) -> AnalyzeRespons
         raise HTTPException(502, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+# ------------------------------------------------------------ price alerts --
+#   GET    /api/alerts                    alerts + which notification channels are configured
+#   POST   /api/alerts                    {symbol, alerts: [AlertSpec]} → created alerts
+#   DELETE /api/alerts/{id}
+#   POST   /api/alerts/{id}/rearm
+#   POST   /api/alerts/clear-triggered
+#   POST   /api/alerts/test               test message to Telegram / Discord
+#   WS     /ws/alerts                     {type:"snapshot", alerts} on connect and change, {type:"fired", alert, price}
+
+
+@app.get("/api/alerts")
+async def list_alerts(request: Request) -> dict:
+    service: AlertService = request.app.state.alerts
+    return {"alerts": [a.model_dump() for a in service.list()], "channels": service.channel_status}
+
+
+@app.post("/api/alerts")
+async def create_alerts(req: CreateAlertsRequest, request: Request) -> dict:
+    try:
+        created = await request.app.state.alerts.add(_norm_symbol(req.symbol), req.alerts)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"alerts": [a.model_dump() for a in created]}
+
+
+@app.delete("/api/alerts/{alert_id}")
+async def delete_alert(alert_id: str, request: Request) -> dict:
+    if not await request.app.state.alerts.remove(alert_id):
+        raise HTTPException(404, "Alert not found")
+    return {"ok": True}
+
+
+@app.post("/api/alerts/clear-triggered")
+async def clear_triggered_alerts(request: Request) -> dict:
+    return {"removed": await request.app.state.alerts.clear_triggered()}
+
+
+@app.post("/api/alerts/test")
+async def test_alert_channels(request: Request) -> dict:
+    service: AlertService = request.app.state.alerts
+    if not service.channels:
+        raise HTTPException(400, "No notification channels configured; set TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID "
+                                 "or DISCORD_WEBHOOK_URL on the backend")
+    return {"results": await service.send_test()}
+
+
+@app.post("/api/alerts/{alert_id}/rearm")
+async def rearm_alert(alert_id: str, request: Request) -> dict:
+    alert = await request.app.state.alerts.rearm(alert_id)
+    if alert is None:
+        raise HTTPException(404, "Alert not found")
+    return {"alert": alert.model_dump()}
+
+
+@app.websocket("/ws/alerts")
+async def ws_alerts(ws: WebSocket) -> None:
+    await ws.accept()
+    service: AlertService = ws.app.state.alerts
+    queue = service.subscribe()
+
+    async def pump() -> None:
+        while True:
+            await ws.send_json(await queue.get())
+
+    async def drain() -> None:
+        while True:
+            msg = await ws.receive_json()
+            if isinstance(msg, dict) and msg.get("type") == "ping":
+                await ws.send_json({"type": "pong"})
+
+    sender, receiver = asyncio.create_task(pump()), asyncio.create_task(drain())
+    try:
+        await asyncio.wait({sender, receiver}, return_when=asyncio.FIRST_COMPLETED)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        for t in (sender, receiver):
+            t.cancel()
+            with contextlib.suppress(asyncio.CancelledError, WebSocketDisconnect, Exception):
+                await t
+        service.unsubscribe(queue)
 
 
 @app.websocket("/ws/klines")

@@ -1,5 +1,16 @@
 import { API_URL } from "./config";
-import type { AnalysisIntent, AnalyzeResponse, Candle, ChatTurn, Interval, MarketMetrics, Overlay } from "./types";
+import type {
+  AlertChannels,
+  AlertSpec,
+  AnalysisIntent,
+  AnalyzeResponse,
+  Candle,
+  ChatTurn,
+  Interval,
+  MarketMetrics,
+  Overlay,
+  PriceAlert,
+} from "./types";
 
 export class ApiError extends Error {
   constructor(message: string, readonly status: number) {
@@ -74,4 +85,31 @@ export function analyze(
     signal,
     timeoutMs: 90_000, // local LLMs can be slow on first load
   });
+}
+
+// ------------------------------------------------------------- alerts --
+
+export function fetchAlerts(signal?: AbortSignal) {
+  return request<{ alerts: PriceAlert[]; channels: AlertChannels }>("/api/alerts", { signal });
+}
+
+export function createAlerts(symbol: string, alerts: AlertSpec[]) {
+  return request<{ alerts: PriceAlert[] }>("/api/alerts", { method: "POST", body: JSON.stringify({ symbol, alerts }) });
+}
+
+export function deleteAlert(id: string) {
+  return request<{ ok: boolean }>(`/api/alerts/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export function rearmAlert(id: string) {
+  return request<{ alert: PriceAlert }>(`/api/alerts/${encodeURIComponent(id)}/rearm`, { method: "POST" });
+}
+
+export function clearTriggeredAlerts() {
+  return request<{ removed: number }>("/api/alerts/clear-triggered", { method: "POST" });
+}
+
+/** Sends a test message to every configured channel → which ones delivered it. */
+export function testAlertChannels() {
+  return request<{ results: Partial<Record<keyof AlertChannels, boolean>> }>("/api/alerts/test", { method: "POST" });
 }
