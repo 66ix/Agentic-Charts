@@ -26,9 +26,11 @@ from fastapi.middleware.gzip import GZipMiddleware
 
 from .agent import run_analysis
 from .alerts import AlertService
+from .backtest import BacktestRequest, run_backtest
 from .config import get_settings
 from .derivatives import DerivativesService
 from .gridbot import GridBotCreate, GridBotPatch, GridBotService, GridSimulateRequest, error_text
+from .journal import JournalPatch, JournalService, NewJournalEntry, entry_json
 from .kimi_service import KimiService
 from .llm import LLMClient
 from .market_data import MarketData, MarketDataError
@@ -57,6 +59,7 @@ async def lifespan(app: FastAPI):
     app.state.alerts = AlertService(app.state.hub)
     await app.state.alerts.start()
     app.state.gridbots = GridBotService(market)  # grid bot tracker: saved bots, results cached per 1m bar
+    app.state.journal = JournalService(market)  # trade journal: entries tracked on 1m candles
     log.info("Data source: %s | LLM provider: %s %s", market.settings.data_source,
              app.state.llm.provider, app.state.llm.model)
     yield
@@ -72,7 +75,7 @@ app = FastAPI(title="Agentic Charts API", version="1.0.0", lifespan=lifespan)
 app.add_middleware(RateLimitMiddleware, agent_rate=settings.agent_rate_limit, api_rate=settings.api_rate_limit,
                    agent_daily=settings.agent_daily_limit, trust_proxy=settings.trust_proxy)
 app.add_middleware(CORSMiddleware, allow_origins=list(settings.cors_origins), allow_credentials=False,
-                   allow_methods=["GET", "POST", "PATCH", "DELETE"], allow_headers=["*"])  # PATCH: grid bots
+                   allow_methods=["GET", "POST", "PATCH", "DELETE"], allow_headers=["*"])
 app.add_middleware(GZipMiddleware, minimum_size=2048)
 
 
@@ -354,3 +357,61 @@ async def ws_klines(ws: WebSocket, symbol: str = "INJUSDT", interval: str = "4h"
                 await t
         await hub.unsubscribe(sym, iv, queue)
 
+
+# ------------------------------------------------------ trade journal + backtests --
+#   GET    /api/journal                   entries, each with its evaluation (status, fills, exits, R, PnL)
+#   GET    /api/journal/stats             ?symbol=&setup=&direction= → win rate, R, breakdowns, equity curve
+#   POST   /api/journal                   NewJournalEntry → {entry}
+#   PATCH  /api/journal/{id}              {notes?, tags?, setup?, cancel?, close?: {price?, time?}} → {entry}
+#   DELETE /api/journal/{id}
+#   POST   /api/backtest                  BacktestRequest → trades, stats, equity, notes
+
+
+@app.get("/api/journal")
+async def list_journal(request: Request) -> dict:
+    service: JournalService = request.app.state.journal
+    return {"entries": [entry_json(e, ev) for e, ev in await service.rows()]}
+
+
+@app.get("/api/journal/stats")
+async def journal_stats(request: Request, symbol: str | None = Query(None), setup: str | None = Query(None),
+                        direction: str | None = Query(None, pattern="^(long|short)$")) -> dict:
+    service: JournalService = request.app.state.journal
+    return await service.stats(_norm_symbol(symbol) if symbol else None, setup or None, direction)
+
+
+@app.post("/api/journal")
+async def create_journal_entry(req: NewJournalEntry, request: Request) -> dict:
+    try:
+        entry, ev = await request.app.state.journal.add(req)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"entry": entry_json(entry, ev)}
+
+
+@app.patch("/api/journal/{entry_id}")
+async def update_journal_entry(entry_id: str, patch: JournalPatch, request: Request) -> dict:
+    try:
+        res = await request.app.state.journal.update(entry_id, patch)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if res is None:
+        raise HTTPException(404, "Trade not found")
+    return {"entry": entry_json(*res)}
+
+
+@app.delete("/api/journal/{entry_id}")
+async def delete_journal_entry(entry_id: str, request: Request) -> dict:
+    if not await request.app.state.journal.remove(entry_id):
+        raise HTTPException(404, "Trade not found")
+    return {"ok": True}
+
+
+@app.post("/api/backtest")
+async def backtest(req: BacktestRequest, request: Request) -> dict:
+    try:
+        return (await run_backtest(request.app.state.market, request.app.state.kimi, req)).model_dump()
+    except MarketDataError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc

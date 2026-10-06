@@ -95,6 +95,9 @@ class Settings:
     # Grid bot tracker (gridbot.py): saved Binance Spot Grid bots. GRIDBOTS_STORE=memory keeps them in memory only.
     gridbots_store: str = field(default_factory=lambda: _env(
         "GRIDBOTS_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "gridbots.json")))
+    # Trade journal (journal.py): logged trades. JOURNAL_STORE=memory keeps them in memory only (lost on restart).
+    journal_store: str = field(default_factory=lambda: _env(
+        "JOURNAL_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "journal.json")))
 
 
 @lru_cache
