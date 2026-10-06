@@ -182,6 +182,7 @@ for 30 seconds.
 | `ALERTS_STORE` | `backend/.cache/alerts.json` | Where price alerts are saved; `memory` = not saved |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | empty | Send fired alerts to Telegram (see [Alerts](#alerts)) |
 | `DISCORD_WEBHOOK_URL` | empty | Send fired alerts to a Discord channel |
+| `ALERT_HISTORY_STORE` / `SIGNAL_ALERTS_STORE` / `BRIEF_STORE` | `backend/.cache/*.json` | Alert history, signal alerts and brief settings; `memory` = not saved |
 | `GRIDBOTS_STORE` | `backend/.cache/gridbots.json` | Saved grid bots; `memory` = not saved |
 | `JOURNAL_STORE` | `backend/.cache/journal.json` | Trade journal; `memory` = not saved |
 | `CALENDAR_URLS` | Forex Factory this week + next week | Economic calendar feeds (JSON, Forex Factory format) |
@@ -210,6 +211,17 @@ when price crosses its level or enters its zone (or gaps through it). A fired al
 toast, a sound and a desktop notification in any open tab, and is sent to Telegram and/or Discord
 when configured. Prices from the synthetic fallback feed never fire alerts (unless
 `DATA_SOURCE=synthetic`), so a Binance outage cannot send a false notification.
+
+Each price alert can **repeat** (fire on every new cross instead of once), **expire** after a time you
+pick, and carry a **note** that goes into the message. Edit one with the pencil in the Alerts tab, or drag
+its amber line or zone on the chart to a new price. **Signal alerts** watch for setups instead of prices
+on any coins and timeframe: Kimi Cooked B+/B- labels, RSI divergence, a sweep of a swing high or low, a new
+demand or supply zone, a break of structure and more. They are checked on the server when each candle
+closes, and **Preview** shows where the signal fired on the last few hundred candles. **History** lists
+everything that fired. The **Brief** sends a market summary to Telegram or Discord at the times you pick
+(price and change since the last brief per coin, trend, RSI, the nearest zone, Kimi's latest signal and
+forecast, funding and open interest, key levels and the day's high-impact economic events); **Preview**
+shows it in the app without sending.
 
 **Telegram**
 
@@ -247,8 +259,16 @@ they are uploaded once the first time the app connects to a backend that has non
 | POST | `/api/alerts/{id}/rearm` | Re-arm a fired alert |
 | POST | `/api/alerts/clear-triggered` | Delete all fired alerts |
 | POST | `/api/alerts/test` | Send a test message to the configured channels → `{results: {telegram: true}}` |
+| PATCH | `/api/alerts/{id}` | Edit `price`, `price_low`/`price_high`, `label`, `note`, `repeat` or `expires_at` |
+| GET/DELETE | `/api/alerts/history` | What fired (price alerts, signals, briefs), newest first; DELETE clears it |
+| GET/POST | `/api/signal-alerts` | Signal alerts and the list of signals; POST `{symbols, interval, signal, repeat, note}` |
+| PATCH/DELETE | `/api/signal-alerts/{id}` | Arm or disarm, repeat, note; delete |
+| GET | `/api/signal-alerts/preview?symbol=&interval=&signal=` | Where the signal fired on past candles |
+| GET/PUT | `/api/brief/settings` | Brief schedule, time zone, coins, timeframe and sections |
+| GET | `/api/brief/preview` | The brief as it would be sent now |
+| POST | `/api/brief/send` | Send the brief now |
 | WS | `/ws/klines?symbol=INJUSDT&interval=4h` | `{type:"kline", candle, closed, source}` and `{type:"status"}` messages |
-| WS | `/ws/alerts` | `{type:"snapshot", alerts}` on connect and on every change, `{type:"fired", alert, price}` |
+| WS | `/ws/alerts` | `{type:"snapshot", alerts}` on connect and on every change, `{type:"fired", alert, price}`, `{type:"signal_snapshot"}`, `{type:"signal_fired", alert, text, price, time}`, `{type:"history", item}` |
 | POST | `/api/gridbot/simulate` | Grid bot settings (`symbol, lower, upper, grids, grid_type, investment, runtime` or `start_time`, fees, trigger/TP/SL) → PnL, matched trades, APR, orders, fills; nothing saved |
 | GET/POST | `/api/gridbots` | Saved grid bots; POST `{name?, params, binance?}` → `{bot, result}` |
 | PATCH/DELETE | `/api/gridbots/{id}` | Edit or delete a saved bot |
@@ -306,7 +326,7 @@ Overlay types: `box`, `horizontal_line`, `trendline`, `marker` (see `backend/app
 
 - **Side panel:** the icons on the right open the chart agent, watchlist, alerts, layers and the other tools in one resizable panel (drag its left edge). Click the open icon again, or press `D`, to close it; the agent then shrinks to a prompt bar at the bottom of the chart, and its latest answer shows above the bar. On a phone the panel covers the chart and the tabs move to the bottom (Chart, Draw, Agent, Watchlist, Alerts, Layers, …).
 - **Agent:** press `/` or open the agent tab, then type a request or tap a suggestion. Mention a timeframe ("H4", "daily") to draw its zones on the current chart; say "switch to the daily" or "open ETH on the 1h" to move the chart. Naming another coin ("what about SOL?", "$NEAR supply zones") always opens it. "Which of my coins are near support?" or "scan my watchlist" scans every watchlist coin and lists them; click a row to open it. "Give me a long setup" (or short, or just "setup") draws an entry, stop and targets from detected levels, with a card showing risk and R multiples. "Show RSI" or "hide the MACD" toggles indicators. The agent remembers the conversation and what it drew, so you can follow up: "also show swings", "same on daily", "remove the trendlines", "clear the chart", or give your own prices ("line at 25.4", "zone 24 to 25", "entry at 24.2, stop at 23.8, target at 27"). **Clear** removes AI overlays and the trash icon starts a new conversation. AI overlays are saved per symbol and timeframe and the conversation per symbol, so a reload keeps them. With **Find levels automatically** on (Settings), key levels are drawn when a chart has none saved. A question that doesn't ask for new drawings ("what does Kimi say?", "alert me on these levels") keeps what's on the chart; a new analysis replaces the earlier AI levels unless you pin the answer (the pin under it), which keeps its drawings on that chart until you unpin it. Prices in answers are rounded like the exchange shows them and the key levels are in bold. Trade plans show the position size, risk in dollars, fees and leverage for your account (Settings → Position sizing), and **Copy order** puts the order on the clipboard.
-- **Alerts:** ask the agent ("alert me at 65k", "alert me if price enters the supply zone", "alert me on these levels", "long setup and alert me at the entry"), or select a horizontal ray or rectangle and press the bell in the toolbar. Alerts show as amber dotted lines, are listed under the bell in the header, and fire once with a sound, a toast and a desktop notification (if allowed). The backend checks them against live 1m prices, so they also fire with the app closed; set up [Telegram or Discord](#alerts) to hear about those.
+- **Alerts** (`A`): ask the agent ("alert me at 65k", "alert me if price enters the supply zone", "alert me on these levels", "long setup and alert me at the entry"), add one in the Alerts tab, or select a horizontal ray or rectangle and press the bell in the toolbar. Alerts show as amber dotted lines you can drag to a new price, and fire with a sound, a toast and a desktop notification (if allowed). Each can repeat, expire or carry a note. The tab also holds signal alerts, the history of everything that fired, and the scheduled brief (see [Alerts](#alerts)). The backend checks them against live 1m prices, so they also fire with the app closed; set up [Telegram or Discord](#alerts) to hear about those.
 - **Drawing tools:** Trendline `T`, Horizontal ray `H`, Fibonacci `F`, Rectangle `R`, Text `N`, XABCD pattern `P`, Measure `M`. Click to place points; `Esc` cancels. In crosshair mode, click a drawing to select it, drag to move it, `Delete` to remove it. Magnet snaps to the nearest OHLC price; Lock freezes drawings. Selecting a drawing shows a style bar: colour, width, solid/dashed/dotted, extend left/right, text size, and which timeframes it shows on ("this timeframe only"); `Ctrl+D` duplicates it. `Ctrl+Z` / `Ctrl+Y` undo and redo drawings and AI levels (also the arrows in the toolbar). Drawings are saved per symbol in the browser.
 - **Watchlist:** each coin shows its price, 24h change, a 48-hour sparkline and the nearest zone on the active timeframe ("In demand", "Supply 0.8%"). Keep several named lists (the list name opens a menu to switch, rename, add or delete), drag coins to reorder them, or sort by change, nearest zone or name. Right-click a coin to open it in chart 2, 3 or 4, copy it to another list, or remove it. **+** adds a coin; the scan button asks the agent to rank them.
 - **Multiple charts:** the layout buttons in the chart header show 1, 2 or 4 charts. Click a chart to make it active (blue header); the timeframe buttons, toolbar and agent act on the active chart. Each chart keeps its own coin, timeframe and overlays. Hovering one chart shows the same time on the others, and **Every chart follows the same coin** (Settings) keeps one coin across charts with different timeframes. **Layouts** saves the open charts, timeframes, indicators, panels and layer toggles under a name (`Ctrl+S` saves the current one).
