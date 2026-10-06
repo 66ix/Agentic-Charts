@@ -127,3 +127,25 @@ def test_llm_bad_json_falls_back_to_rules():
     llm = _llm(lambda r: httpx.Response(200, json={"message": {"content": "not json"}}))
     intent, engine = asyncio.run(llm.parse_intent("show daily support"))
     assert engine == "rules" and "support_resistance" in intent.features and intent.timeframe == "1d"
+
+
+def test_region_block_switches_to_fallback_host(monkeypatch):
+    monkeypatch.setenv("DATA_SOURCE", "auto")
+    from app import config
+
+    config.get_settings.cache_clear()
+    hosts = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        hosts.append(req.url.host)
+        if req.url.host == "api.binance.com":
+            return httpx.Response(451, text="restricted location")
+        return httpx.Response(200, json=[_kline(1_700_000_000_000 + i * H, 1, 2, 0.5, 1.5) for i in range(50)])
+
+    md = MarketData()
+    md._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    candles, source = asyncio.run(md.get_klines("BTCUSDT", "1h", 50))
+    config.get_settings.cache_clear()
+    assert source == "binance" and len(candles) == 50
+    assert hosts == ["api.binance.com", "data-api.binance.vision"]
+    assert md.ws_url == "wss://data-stream.binance.vision/ws"

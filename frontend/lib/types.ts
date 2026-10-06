@@ -85,12 +85,51 @@ export interface TrendlineOverlay extends OverlayBase {
 
 export type Overlay = HorizontalLineOverlay | BoxOverlay | MarkerOverlay | TrendlineOverlay;
 
+export interface CustomLevel {
+  kind: "line" | "zone";
+  price: number | null;
+  price_low: number | null;
+  price_high: number | null;
+  label: string;
+}
+
 export interface AnalysisIntent {
   features: string[];
   timeframe: Interval | null;
   window_timeframes: Interval[];
   max_zones: number;
   answer_hint: string;
+  custom_levels: CustomLevel[];
+  remove: string[];
+  keep_existing: boolean;
+  alert_prices: number[];
+  alert_targets: string[];
+}
+
+export interface ChatTurn {
+  role: "user" | "agent";
+  text: string;
+}
+
+/** An alert the agent asks the client to arm. Mirrors AlertSpec in schemas.py. */
+export interface AlertSpec {
+  kind: "cross" | "zone";
+  price: number | null;
+  price_low: number | null;
+  price_high: number | null;
+  label: string;
+}
+
+/** A client-side price alert (stored in localStorage, watched over the kline WebSocket). */
+export interface PriceAlert extends AlertSpec {
+  id: string;
+  symbol: string;
+  armed: boolean;
+  created_at: number; // ms
+  triggered_at?: number; // ms
+  triggered_price?: number;
+  /** Where price was last seen relative to the level, so we fire on the transition. */
+  last_side?: "above" | "below" | "inside";
 }
 
 export interface AnalyzeResponse {
@@ -111,6 +150,7 @@ export interface AnalyzeResponse {
   };
   engine: Record<string, string>;
   data_source: string;
+  alerts: AlertSpec[];
   generated_at: string;
 }
 
@@ -121,6 +161,7 @@ export interface Metric {
   display: string;
   change_pct: number | null;
   source: "live" | "mock";
+  note?: string | null;
 }
 
 export interface MarketMetrics {

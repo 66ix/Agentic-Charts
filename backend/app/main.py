@@ -23,6 +23,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 
 from .agent import run_analysis
 from .config import get_settings
+from .derivatives import DerivativesService
 from .llm import LLMClient
 from .market_data import MarketData, MarketDataError
 from .market_metrics import MarketMetricsService
@@ -38,13 +39,16 @@ async def lifespan(app: FastAPI):
     market = MarketData()
     app.state.market = market
     app.state.llm = LLMClient()
-    app.state.metrics = MarketMetricsService()
+    app.state.derivatives = DerivativesService()
+    app.state.derivatives.start()
+    app.state.metrics = MarketMetricsService(app.state.derivatives)
     app.state.hub = StreamHub(market)
     log.info("Data source: %s | LLM provider: %s %s", market.settings.data_source,
              app.state.llm.provider, app.state.llm.model)
     yield
     await app.state.hub.shutdown()
-    await asyncio.gather(market.close(), app.state.llm.close(), app.state.metrics.close())
+    await asyncio.gather(market.close(), app.state.llm.close(), app.state.metrics.close(),
+                         app.state.derivatives.close())
 
 
 settings = get_settings()
@@ -76,6 +80,7 @@ async def health(request: Request) -> dict:
         "binance_reachable": st.market.binance_usable(),
         "llm": {"provider": st.llm.provider, "model": st.llm.model},
         "streams": st.hub.stats(),
+        "liquidation_stream": st.derivatives.stream_connected,
     }
 
 

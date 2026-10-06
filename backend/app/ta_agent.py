@@ -491,6 +491,7 @@ def describe(facts: dict, symbol: str) -> str:
         lines.append(f"{wl} window: high {_fmt(hi)}, low {_fmt(lo)}.")
     if facts.get("structure"):
         lines.append("Recent structure: " + " → ".join(facts["structure"]) + ".")
+    lines += facts.get("actions", [])
     if len(lines) == 1:
         lines.append("No qualifying levels found for this request.")
     return " ".join(lines)

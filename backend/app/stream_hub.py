@@ -130,13 +130,13 @@ class StreamHub:
 
     async def _run_binance(self, stream: _Stream) -> None:
         base, factor = DERIVED_INTERVALS.get(stream.interval, (stream.interval, 1))
-        url = f"{self.market.settings.binance_ws_url}/{stream.symbol.lower()}@kline_{base}"
         bucket_s = INTERVAL_SECONDS[stream.interval]
-        parts: dict[int, Candle] = {}
-        if factor > 1:  # seed the in-progress bucket with the base bars already closed
-            seed, _ = await self.market.get_klines(stream.symbol, base, factor)
-            parts = {c.time: c for c in seed}
+        # A REST call first: it seeds derived buckets and, if the primary host is region-blocked,
+        # switches market.ws_url to the fallback before we connect.
+        seed, _ = await self.market.get_klines(stream.symbol, base, factor)
+        parts: dict[int, Candle] = {c.time: c for c in seed} if factor > 1 else {}
 
+        url = f"{self.market.ws_url}/{stream.symbol.lower()}@kline_{base}"
         async with websockets.connect(url, open_timeout=8, ping_interval=20, ping_timeout=20,
                                       max_size=2**20) as ws:
             self._set_source(stream, "binance")

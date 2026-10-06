@@ -38,10 +38,11 @@ agentic-charts/
 │   │   ├── llm.py             Ollama / OpenAI-compatible / Anthropic structured outputs + rule fallback
 │   │   ├── market_data.py     Binance klines (paginated, 3h resampled), synthetic fallback
 │   │   ├── stream_hub.py      Shared upstream Binance kline streams, fan-out to browsers
-│   │   ├── market_metrics.py  Header metrics (live where free, mocked otherwise)
+│   │   ├── market_metrics.py  Header metrics (CoinGecko, Fear & Greed, Binance futures)
+│   │   ├── derivatives.py     Open interest + rolling 24h liquidations from Binance futures
 │   │   ├── schemas.py         Pydantic models (overlay contract)
 │   │   └── config.py          Env configuration
-│   ├── tests/                 pytest: detectors, API, Binance/LLM payloads (network mocked)
+│   ├── tests/                 pytest: detectors, API, conversation, payloads (mocked) + opt-in live checks
 │   ├── requirements.txt
 │   └── .env.example
 ├── frontend/
@@ -131,8 +132,11 @@ the rule parser for that request, and skips the LLM for 30 seconds.
 | Variable | Default | Notes |
 |---|---|---|
 | `DATA_SOURCE` | `auto` | `auto` = Binance with synthetic fallback, `binance`, or `synthetic` (offline demo) |
-| `BINANCE_REST_URL` | `https://api.binance.com` | US users: `https://api.binance.us` or `https://data-api.binance.vision` |
-| `BINANCE_WS_URL` | `wss://stream.binance.com:9443/ws` | Pair with the REST host (`wss://stream.binance.us:9443/ws` or `wss://data-stream.binance.vision/ws`) |
+| `BINANCE_REST_URL` | `https://api.binance.com` | Primary spot host |
+| `BINANCE_WS_URL` | `wss://stream.binance.com:9443/ws` | Primary spot stream host |
+| `BINANCE_FALLBACK_REST_URL` / `_WS_URL` | `binance.vision` hosts | Used automatically when the primary answers 451/403 (US IPs) |
+| `DERIVATIVES` | `on` | Live open interest and liquidations from Binance futures (`off` to mock them) |
+| `OI_TOP_SYMBOLS` | `40` | Open interest sums this many top USDT perpetuals by volume |
 | `LLM_PROVIDER` | `ollama` | `ollama`, `openai`, `anthropic`, `none` |
 | `CORS_ORIGINS` | `http://localhost:3000,...` | Comma-separated frontend origins |
 | `METRICS_CACHE_SECONDS` | `60` | Header metrics cache |
@@ -140,8 +144,16 @@ the rule parser for that request, and skips the LLM for 30 seconds.
 | `NEXT_PUBLIC_WS_URL` | derived from API URL | Override for proxies |
 
 When Binance is unreachable the header shows a yellow **DEMO DATA** badge and the chart runs on a
-deterministic synthetic feed, so the UI is never blank. Binance returns HTTP 451 to US IPs; use the
-`binance.us` or `binance.vision` hosts above.
+deterministic synthetic feed, so the UI is never blank. Binance returns HTTP 451 to US IPs; the
+backend then switches to the `binance.vision` market-data hosts by itself.
+
+Header metrics are all live from free, keyless sources: CoinGecko (market cap, volume, BTC
+dominance), alternative.me (Fear & Greed) and Binance USD-M futures (open interest across the top
+perpetuals, with the change versus 24h ago, and liquidations from the `!forceOrder@arr` stream as a
+rolling 24h total saved to `backend/.cache/`). Both futures figures cover Binance only, and Binance
+sends at most one liquidation per symbol per second, so that total is a lower bound; hover a metric
+for its source. Binance futures has no US-accessible mirror, so from a US IP those two fall back to
+mocked values (marked with a dot).
 
 ## API
 
@@ -151,7 +163,7 @@ deterministic synthetic feed, so the UI is never blank. Binance returns HTTP 451
 | GET | `/api/klines?symbol=INJUSDT&interval=4h&limit=500` | Historical candles (`3h` is resampled from `1h`) |
 | GET | `/api/symbols` | Tradable USDT spot pairs |
 | GET | `/api/market/metrics` | Header metrics, each tagged `live` or `mock` |
-| POST | `/api/agent/analyze` | `{symbol, interval, prompt, candles?}` → overlays + summary |
+| POST | `/api/agent/analyze` | `{symbol, interval, prompt, candles?, history?, overlays?, previous_intent?}` → overlays + summary + alerts |
 | WS | `/ws/klines?symbol=INJUSDT&interval=4h` | `{type:"kline", candle, closed, source}` and `{type:"status"}` messages |
 
 Example:
@@ -187,7 +199,8 @@ Overlay types: `box`, `horizontal_line`, `trendline`, `marker` (see `backend/app
 
 ## Using the app
 
-- **Agent:** press `/` or click **Agent**, then type a request or tap a suggestion. Mention a timeframe ("H4", "daily") to analyse it regardless of the chart's timeframe. **Clear** removes AI overlays. With **Auto AI levels** on (layout menu), key levels are drawn whenever the symbol or timeframe changes.
+- **Agent:** press `/` or click **Agent**, then type a request or tap a suggestion. Mention a timeframe ("H4", "daily") to analyse it regardless of the chart's timeframe. The agent remembers the conversation and what it drew, so you can follow up: "also show swings", "same on daily", "remove the trendlines", "clear the chart", or give your own prices ("line at 25.4", "zone 24 to 25", "entry at 24.2, stop at 23.8, target at 27"). **Clear** removes AI overlays and the trash icon starts a new conversation. AI overlays are saved per symbol and timeframe and the conversation per symbol, so a reload keeps them. With **Auto AI levels** on (layout menu), key levels are drawn when a chart has none saved.
+- **Alerts:** ask the agent ("alert me at 65k", "alert me if price enters the supply zone", "alert me on these levels"), or select a horizontal ray or rectangle and press the bell in the toolbar. Alerts show as amber dotted lines, are listed under the bell in the header, and fire once with a sound, a toast and a desktop notification (if allowed). They are checked against live 1m prices for every alerted symbol while the app is open in a tab.
 - **Drawing tools:** Trendline `T`, Horizontal ray `H`, Fibonacci `F`, Rectangle `R`, Text `N`, XABCD pattern `P`, Measure `M`. Click to place points; `Esc` cancels. In crosshair mode, click a drawing to select it, drag to move it, `Delete` to remove it. Magnet snaps to the nearest OHLC price; Lock freezes drawings. Drawings are saved per symbol in the browser.
 - **Indicators:** EMA 20, EMA 50, Parabolic SAR, Volume. **Layout:** log scale, grid, auto levels. The camera button saves a PNG.
 
@@ -196,11 +209,18 @@ Overlay types: `box`, `horizontal_line`, `trendline`, `marker` (see `backend/app
 ```bash
 cd backend && pip install -r requirements-dev.txt && pytest -q
 cd frontend && npm run typecheck && npm run lint && npm run build
+
+# Against the real APIs (CoinGecko, Fear & Greed, Binance spot + futures):
+cd backend && LIVE_TESTS=1 pytest tests/test_live.py -v -rs
 ```
+
+GitHub Actions runs the unit tests, lint, typecheck and build on every push and PR
+(`.github/workflows/ci.yml`), and the live checks weekly and on demand
+(`live-smoke.yml`). Binance futures blocks GitHub's US runners, so those checks skip there.
 
 ## Production notes
 
 - Run the API with several workers behind a reverse proxy that supports WebSockets, e.g. `uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2` (each worker keeps its own Binance upstreams).
 - Set `CORS_ORIGINS` and `NEXT_PUBLIC_API_URL` / `NEXT_PUBLIC_WS_URL` to your real domains (`wss://` behind TLS).
-- Liquidations and open interest are mocked because free keyless aggregate sources don't exist; plug a CoinGlass (or similar) key into `market_metrics.py` to make them live.
+- Open interest and liquidations cover Binance only. For cross-exchange totals, plug a CoinGlass (or similar) key into `market_metrics.py`.
 - Nothing here is financial advice; detections are heuristics.

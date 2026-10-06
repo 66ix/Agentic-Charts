@@ -1,12 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { useAlerts, type FiredAlert } from "@/hooks/useAlerts";
 import { usePersistentState } from "@/hooks/usePersistentState";
+import { alertFromDrawing, alertOverlays } from "@/lib/alerts";
 import { analyze } from "@/lib/api";
 import { DEFAULT_INTERVAL, DEFAULT_SYMBOL } from "@/lib/config";
 import { TIMEFRAMES } from "@/lib/types";
 import type {
+  AnalysisIntent,
   AnalyzeResponse,
   Candle,
   DataSource,
@@ -20,12 +23,15 @@ import type {
 
 import AgentPanel, { type AgentMessage } from "./AgentPanel";
 import AgenticChart, { type AgenticChartHandle, type FeedInfo } from "./AgenticChart";
+import AlertsPanel from "./AlertsPanel";
+import AlertToasts, { type Toast } from "./AlertToasts";
 import ChartHeader from "./ChartHeader";
 import DrawingToolbar, { TOOL_HOTKEYS } from "./DrawingToolbar";
 import SymbolSearch from "./SymbolSearch";
 
 const VALID_INTERVALS = new Set<string>(TIMEFRAMES.map((t) => t.value));
 const uid = () => Math.random().toString(36).slice(2, 10);
+const MAX_MESSAGES = 40;
 
 function engineNote(r: AnalyzeResponse): string {
   const tf = TIMEFRAMES.find((t) => t.value === r.analysis_interval)?.label ?? r.analysis_interval;
@@ -56,19 +62,37 @@ export default function ChartWorkspace() {
   const [magnet, setMagnet] = useState(false);
   const [locked, setLocked] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [overlays, setOverlays] = useState<Overlay[]>([]);
-  const [messages, setMessages] = useState<AgentMessage[]>([]);
+  // AI overlays are kept per symbol and timeframe; the conversation per symbol.
+  const [overlays, setOverlays, overlaysLoaded] = usePersistentState<Overlay[]>(`ac:overlays:${symbol}:${interval}`, []);
+  const [messages, setStoredMessages] = usePersistentState<AgentMessage[]>(`ac:chat:${symbol}`, []);
+  const [lastIntent, setLastIntent] = usePersistentState<AnalysisIntent | null>(`ac:intent:${symbol}`, null);
+  const setMessages = useCallback(
+    (fn: (m: AgentMessage[]) => AgentMessage[]) => setStoredMessages((m) => fn(m).slice(-MAX_MESSAGES)),
+    [setStoredMessages],
+  );
   const [busy, setBusy] = useState(false);
   const [agentOpen, setAgentOpen] = useState(true);
+  const [alertsOpen, setAlertsOpen] = useState(false);
+  const [toasts, setToasts] = useState<Toast[]>([]);
   const [searchOpen, setSearchOpen] = useState(false);
   const [feed, setFeed] = useState<FeedInfo>({ price: NaN, open24: null, source: "connecting" });
   const [error, setError] = useState<string | null>(null);
   const analysisCtrl = useRef<AbortController | null>(null);
 
-  // Reset AI state when the market changes.
+  const onAlertsFired = useCallback((fired: FiredAlert[]) => {
+    setToasts((t) => [...t, ...fired.map((f) => ({ id: uid(), alert: f.alert, price: f.price }))].slice(-4));
+  }, []);
+  const { alerts, add: addAlerts, remove: removeAlert, rearm, clearTriggered } = useAlerts(onAlertsFired);
+  const armedAlerts = alerts.filter((a) => a.armed).length;
+  const chartOverlays = useMemo(() => [...overlays, ...alertOverlays(alerts, symbol)], [overlays, alerts, symbol]);
+
+  // Latest conversation state for the request, without re-creating runAnalysis on every message.
+  const convoRef = useRef({ messages, overlays, lastIntent });
+  convoRef.current = { messages, overlays, lastIntent };
+
+  // Cancel in-flight analysis when the market changes.
   useEffect(() => {
     analysisCtrl.current?.abort();
-    setOverlays([]);
     setSelectedId(null);
     setBusy(false);
   }, [symbol, interval]);
@@ -78,16 +102,32 @@ export default function ChartWorkspace() {
       analysisCtrl.current?.abort();
       const ctrl = new AbortController();
       analysisCtrl.current = ctrl;
+      const convo = convoRef.current;
       if (!opts.silent) setMessages((m) => [...m, { id: uid(), role: "user", text: prompt }]);
       setBusy(true);
       try {
         const candles: Candle[] = chartRef.current?.getCandles() ?? [];
+        const history = convo.messages
+          .filter((m) => m.role !== "error")
+          .slice(-10)
+          .map((m) => ({ role: m.role as "user" | "agent", text: m.text }));
         const res = await analyze(
-          { symbol, interval, prompt, candles: candles.length >= 100 ? candles.slice(-500) : undefined },
+          {
+            symbol,
+            interval,
+            prompt,
+            candles: candles.length >= 100 ? candles.slice(-500) : undefined,
+            history: opts.silent ? [] : history,
+            overlays: opts.silent ? [] : convo.overlays,
+            previous_intent: opts.silent ? null : convo.lastIntent,
+          },
           ctrl.signal,
         );
         if (ctrl.signal.aborted) return;
         setOverlays(res.overlays);
+        if (prompt) setLastIntent(res.intent);
+        addAlerts(res.alerts ?? [], symbol);
+        if (res.alerts?.length) setAlertsOpen(true);
         setMessages((m) => [
           ...m,
           {
@@ -96,6 +136,7 @@ export default function ChartWorkspace() {
             text: opts.silent ? `Auto-detected levels. ${res.summary}` : res.summary,
             overlays: res.overlays,
             meta: engineNote(res),
+            alerts: res.alerts?.length || undefined,
           },
         ]);
       } catch (err) {
@@ -105,12 +146,16 @@ export default function ChartWorkspace() {
         if (analysisCtrl.current === ctrl) setBusy(false);
       }
     },
-    [symbol, interval],
+    [symbol, interval, setMessages, setOverlays, setLastIntent, addAlerts],
   );
 
+  // Auto-detect levels on load, unless this chart already has saved AI overlays.
   const onDataReady = useCallback(() => {
-    if (layout.autoLevels) runAnalysis("", { silent: true });
-  }, [layout.autoLevels, runAnalysis]);
+    if (layout.autoLevels && overlaysLoaded && convoRef.current.overlays.length === 0) runAnalysis("", { silent: true });
+  }, [layout.autoLevels, overlaysLoaded, runAnalysis]);
+
+  const selectedDrawing = drawings.find((d) => d.id === selectedId);
+  const selectedAlert = selectedDrawing ? alertFromDrawing(selectedDrawing) : null;
 
   const deleteSelected = useCallback(() => {
     if (locked) return;
@@ -172,6 +217,9 @@ export default function ChartWorkspace() {
         indicators={indicators}
         layout={layout}
         agentOpen={agentOpen}
+        alertsOpen={alertsOpen}
+        armedAlerts={armedAlerts}
+        onToggleAlerts={() => setAlertsOpen((v) => !v)}
         onInterval={setInterval}
         onSearch={() => setSearchOpen(true)}
         onIndicators={setIndicators}
@@ -186,6 +234,12 @@ export default function ChartWorkspace() {
           magnet={magnet}
           locked={locked}
           hasSelection={!!selectedId}
+          canAlert={!!selectedAlert}
+          onAlert={() => {
+            if (!selectedAlert) return;
+            addAlerts([selectedAlert], symbol);
+            setAlertsOpen(true);
+          }}
           drawingCount={drawings.length}
           onTool={setTool}
           onMagnet={setMagnet}
@@ -208,7 +262,7 @@ export default function ChartWorkspace() {
             locked={locked}
             indicators={indicators}
             layout={layout}
-            overlays={overlays}
+            overlays={chartOverlays}
             drawings={drawings}
             selectedId={selectedId}
             onDrawingsChange={setDrawings}
@@ -223,6 +277,16 @@ export default function ChartWorkspace() {
               {error} Retrying…
             </div>
           )}
+          <AlertsPanel
+            open={alertsOpen}
+            alerts={alerts}
+            symbol={symbol}
+            onRemove={removeAlert}
+            onRearm={rearm}
+            onClearTriggered={clearTriggered}
+            onPickSymbol={setSymbol}
+            onClose={() => setAlertsOpen(false)}
+          />
           <AgentPanel
             open={agentOpen}
             busy={busy}
@@ -230,11 +294,16 @@ export default function ChartWorkspace() {
             overlayCount={overlays.length}
             onSubmit={(p) => runAnalysis(p)}
             onClearOverlays={() => setOverlays([])}
+            onClearChat={() => {
+              setMessages(() => []);
+              setLastIntent(null);
+            }}
             onClose={() => setAgentOpen(false)}
           />
         </main>
       </div>
       <SymbolSearch open={searchOpen} onClose={() => setSearchOpen(false)} onPick={setSymbol} />
+      <AlertToasts toasts={toasts} onDismiss={(id) => setToasts((t) => t.filter((x) => x.id !== id))} />
     </div>
   );
 }

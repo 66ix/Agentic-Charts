@@ -1,11 +1,12 @@
 """Global market header metrics.
 
-Live where a free, keyless API exists:
+Every metric comes from a free, keyless API:
   * CoinGecko /global    → market cap (+24h %), 24h volume, BTC dominance
   * alternative.me /fng  → Fear & Greed index (+ change vs yesterday)
-Mocked (with gentle jitter so the header feels alive) where data needs a paid
-key, e.g. aggregate liquidations and open interest (CoinGlass). Each metric is
-tagged `source: live | mock` and the UI marks mocked values.
+  * Binance USD-M futures → open interest and 24h liquidations (see derivatives.py)
+When a source is unreachable the metric falls back to a mocked value (with
+gentle jitter so the header feels alive). Each metric is tagged
+`source: live | mock` and the UI marks mocked values.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from datetime import datetime, timezone
 import httpx
 
 from .config import get_settings
+from .derivatives import DerivativesService, Liquidations, OpenInterest, since_label
 from .schemas import MarketMetrics, Metric
 
 log = logging.getLogger(__name__)
@@ -57,7 +59,8 @@ def fng_label(v: float) -> str:
 
 
 class MarketMetricsService:
-    def __init__(self) -> None:
+    def __init__(self, derivatives: DerivativesService | None = None) -> None:
+        self.derivatives = derivatives
         self.ttl = get_settings().metrics_cache_seconds
         self._cache: tuple[float, MarketMetrics] | None = None
         self._client = httpx.AsyncClient(timeout=httpx.Timeout(6.0, connect=4.0),
@@ -71,9 +74,15 @@ class MarketMetricsService:
         async with self._lock:
             if self._cache and self._cache[0] > time.monotonic():
                 return self._cache[1]
-            gecko, fng = await asyncio.gather(self._coingecko(), self._fear_greed(), return_exceptions=True)
+            gecko, fng, oi = await asyncio.gather(self._coingecko(), self._fear_greed(), self._open_interest(),
+                                                   return_exceptions=True)
+            for name, res in (("CoinGecko", gecko), ("Fear & Greed", fng), ("Open interest", oi)):
+                if isinstance(res, BaseException):
+                    log.warning("%s unavailable: %s", name, res)
+            liq = self.derivatives.liquidation_snapshot() if self.derivatives else None
             metrics = self._build(gecko if isinstance(gecko, dict) else None,
-                                  fng if isinstance(fng, list) else None)
+                                  fng if isinstance(fng, list) else None,
+                                  oi if isinstance(oi, OpenInterest) else None, liq)
             self._cache = (time.monotonic() + self.ttl, metrics)
             return metrics
 
@@ -82,19 +91,24 @@ class MarketMetricsService:
         r.raise_for_status()
         return r.json()["data"]
 
+    async def _open_interest(self) -> OpenInterest | None:
+        return await self.derivatives.open_interest() if self.derivatives else None
+
     async def _fear_greed(self) -> list:
         r = await self._client.get(FEAR_GREED)
         r.raise_for_status()
         return r.json()["data"]
 
     @staticmethod
-    def _mock(key: str, label: str, display_fn, jitter: float = 0.004) -> Metric:
+    def _mock(key: str, label: str, display_fn, jitter: float = 0.004, note: str | None = None) -> Metric:
         base, chg = MOCK_BASE[key]
         v = base * (1 + random.uniform(-jitter, jitter))
         c = None if chg is None else round(chg + random.uniform(-0.05, 0.05) * abs(chg), 2)
-        return Metric(key=key, label=label, value=v, display=display_fn(v), change_pct=c, source="mock")
+        return Metric(key=key, label=label, value=v, display=display_fn(v), change_pct=c, source="mock",
+                      note=note or "Mocked: live source unreachable")
 
-    def _build(self, gecko: dict | None, fng: list | None) -> MarketMetrics:
+    def _build(self, gecko: dict | None, fng: list | None, oi: OpenInterest | None = None,
+               liq: Liquidations | None = None) -> MarketMetrics:
         out: list[Metric] = []
         if gecko:
             mc = float(gecko["total_market_cap"]["usd"])
@@ -107,8 +121,23 @@ class MarketMetricsService:
             out.append(self._mock("market_cap", "Market Cap", fmt_usd))
             out.append(self._mock("volume_24h", "24h Vol", fmt_usd))
 
-        out.append(self._mock("liquidations", "Liquidations", fmt_usd, jitter=0.03))
-        out.append(self._mock("open_interest", "Open Interest", fmt_usd))
+        if liq:
+            out.append(Metric(
+                key="liquidations", label="Liquidations", value=liq.usd, display=fmt_usd(liq.usd), source="live",
+                note=(f"Binance futures since {since_label(liq.since)}. Longs {fmt_usd(liq.longs_usd)}, "
+                      f"shorts {fmt_usd(liq.shorts_usd)}. Binance sends at most one liquidation per symbol per "
+                      "second, so this is a lower bound."),
+            ))
+        else:
+            out.append(self._mock("liquidations", "Liquidations", fmt_usd, jitter=0.03,
+                                  note="Mocked: Binance futures liquidation stream unreachable"))
+        if oi:
+            out.append(Metric(key="open_interest", label="Open Interest", value=oi.usd, display=fmt_usd(oi.usd),
+                              change_pct=oi.change_pct, source="live",
+                              note=f"Binance futures, top {oi.symbols} USDT perpetuals; change vs 24h ago"))
+        else:
+            out.append(self._mock("open_interest", "Open Interest", fmt_usd,
+                                  note="Mocked: Binance futures API unreachable"))
 
         if fng:
             now_v = float(fng[0]["value"])
