@@ -584,7 +584,7 @@ def analyze(
 
     if "patterns" in feats:
         found: list[str] = []
-        rng = detect_range(df, atr_v)
+        rng = detect_range(df, atr_v, min_bars=30)
         if rng:
             overlays.append(BoxOverlay(label=f"{tfl} Range ({rng['bars']} bars)", kind="pattern_range",
                                        price_low=rng["price_low"], price_high=rng["price_high"],

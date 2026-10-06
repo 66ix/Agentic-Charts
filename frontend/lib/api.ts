@@ -1,5 +1,15 @@
 import { API_URL } from "./config";
-import type { AnalysisIntent, AnalyzeResponse, Candle, ChatTurn, Interval, MarketMetrics, Overlay } from "./types";
+import type {
+  AnalysisIntent,
+  AnalyzeResponse,
+  Candle,
+  ChatTurn,
+  Interval,
+  MarketMetrics,
+  Overlay,
+  ScanResult,
+  Ticker,
+} from "./types";
 
 export class ApiError extends Error {
   constructor(message: string, readonly status: number) {
@@ -65,6 +75,7 @@ export function analyze(
     history?: ChatTurn[];
     overlays?: Overlay[];
     previous_intent?: AnalysisIntent | null;
+    watchlist?: string[];
   },
   signal?: AbortSignal,
 ) {
@@ -74,4 +85,14 @@ export function analyze(
     signal,
     timeoutMs: 90_000, // local LLMs can be slow on first load
   });
+}
+
+export function fetchTickers(symbols: string[], signal?: AbortSignal) {
+  const q = new URLSearchParams({ symbols: symbols.join(",") });
+  return request<{ tickers: Ticker[] }>(`/api/tickers?${q}`, { signal });
+}
+
+export function fetchWatchlistScan(symbols: string[], interval: Interval, signal?: AbortSignal) {
+  const q = new URLSearchParams({ symbols: symbols.join(","), interval });
+  return request<ScanResult[]>(`/api/watchlist/scan?${q}`, { signal, timeoutMs: 60_000 });
 }
