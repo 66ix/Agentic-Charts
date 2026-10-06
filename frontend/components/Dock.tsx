@@ -68,8 +68,8 @@ export default function Dock<T extends string>(p: Props<T>) {
     <section
       aria-label={active?.label}
       className={clsx(
-        "relative flex min-h-0 flex-col bg-panel",
-        p.mobile ? "absolute inset-0 z-40" : "shrink-0 border-l border-line",
+        "flex min-h-0 flex-col bg-panel",
+        p.mobile ? "absolute inset-0 z-40" : "relative shrink-0 border-l border-line",
         !p.open && "hidden",
       )}
       style={p.mobile ? undefined : { width: p.width }}
