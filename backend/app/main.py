@@ -95,12 +95,15 @@ async def klines(
     symbol: str = Query("INJUSDT"),
     interval: str = Query("4h"),
     limit: int = Query(500, ge=10, le=1500),
+    since: int | None = Query(None, ge=0, description="Only return candles with time >= since (UNIX seconds)"),
 ) -> dict:
     sym, iv = _norm_symbol(symbol), _check_interval(interval)
     try:
         candles, source = await request.app.state.market.get_klines(sym, iv, limit)
     except MarketDataError as exc:
         raise HTTPException(502, str(exc)) from exc
+    if since is not None:  # the client already has older bars; the candle cache keeps the fetch above cheap
+        candles = [c for c in candles if c.time >= since]
     return {"symbol": sym, "interval": iv, "source": source, "candles": [c.model_dump() for c in candles]}
 
 
