@@ -535,6 +535,11 @@ export default function ChartWorkspace() {
   }, []);
 
   // ------------------------------------------------------------------ keyboard shortcuts
+  const stepWatchlist = (dir: 1 | -1) => {
+    if (!watchlist.length) return;
+    const i = watchlist.indexOf(symbol);
+    setSymbol(watchlist[dir === 1 ? (i + 1) % watchlist.length : (i <= 0 ? watchlist.length : i) - 1]);
+  };
   const keyHandler = useRef<(e: KeyboardEvent) => void>(() => undefined);
   keyHandler.current = (e: KeyboardEvent) => {
     const el = e.target as HTMLElement;
@@ -571,6 +576,12 @@ export default function ChartWorkspace() {
       } else if (e.code === "KeyS") {
         e.preventDefault();
         screenshot();
+      } else if (e.code === "KeyL") {
+        e.preventDefault();
+        setLayout((l) => ({ ...l, logScale: !l.logScale }));
+      } else if ((e.key === "ArrowUp" || e.key === "ArrowDown") && watchlist.length) {
+        e.preventDefault();
+        stepWatchlist(e.key === "ArrowDown" ? 1 : -1);
       }
       return;
     }
@@ -600,10 +611,12 @@ export default function ChartWorkspace() {
       return;
     }
     if (e.key === "[" || e.key === "]") {
-      if (!watchlist.length) return;
-      const i = watchlist.indexOf(symbol);
-      const next = e.key === "]" ? (i + 1) % watchlist.length : (i <= 0 ? watchlist.length : i) - 1;
-      setSymbol(watchlist[next]);
+      stepWatchlist(e.key === "]" ? 1 : -1);
+      return;
+    }
+    if (e.key === " ") {
+      e.preventDefault();
+      setSearchMode("chart");
       return;
     }
     const panelKeys: Record<string, string> = { w: "watchlist", a: "alerts", l: "layers" };

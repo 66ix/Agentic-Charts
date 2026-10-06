@@ -70,6 +70,15 @@ export default function SettingsDialog(p: Props) {
 
   return (
     <Dialog open={p.open} title="Settings" onClose={p.onClose}>
+      <Section title="Chart">
+        <Row label="Log scale" hint="Alt+L">
+          <Toggle checked={p.layout.logScale} onChange={(v) => p.onLayout({ ...p.layout, logScale: v })} />
+        </Row>
+        <Row label="Grid lines">
+          <Toggle checked={p.layout.grid} onChange={(v) => p.onLayout({ ...p.layout, grid: v })} />
+        </Row>
+      </Section>
+
       <Section title="Time">
         <Row label="Timezone" hint="Used for the time axis and the countdown">
           <select

@@ -7,7 +7,7 @@ export const SHORTCUTS: Array<{ group: string; keys: Array<[string, string]> }> 
     group: "Anywhere",
     keys: [
       ["/", "Ask the chart agent"],
-      ["S or Ctrl+K", "Search a coin"],
+      ["S, Space or Ctrl+K", "Search a coin"],
       ["Ctrl+Z", "Undo a drawing or AI change"],
       ["Ctrl+Y or Ctrl+Shift+Z", "Redo"],
       ["Ctrl+S", "Save the layout"],
@@ -19,10 +19,11 @@ export const SHORTCUTS: Array<{ group: string; keys: Array<[string, string]> }> 
     group: "Chart",
     keys: [
       ["1 – 9, 0", "Timeframe 1m, 5m, 15m, 30m, 1h, 3h, 4h, D, W, M"],
-      ["[  ]", "Previous / next coin in the watchlist"],
+      ["[  ] or Alt+↑ ↓", "Previous / next coin in the watchlist"],
       ["G", "One, two or four charts"],
       ["Alt+R", "Fit the chart"],
       ["Alt+S", "Save a screenshot"],
+      ["Alt+L", "Log scale on / off"],
       ["K", "Kimi Cooked on / off"],
       ["I", "Indicator settings"],
     ],

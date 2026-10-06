@@ -123,11 +123,14 @@ export function composeOverlays(opts: {
   const visible: Overlay[] = [];
   const counts: Partial<Record<LayerId, number>> = {};
   const seen = new Set<string>();
+  // The same zone from two answers (a pinned one and the latest) is drawn once.
+  const shape = (o: Overlay) =>
+    o.type === "box" ? `box:${o.kind}:${o.price_low}:${o.price_high}` : o.type === "horizontal_line" ? `line:${o.kind}:${o.price}` : null;
   const add = (o: Overlay, layer: LayerId, own = layer) => {
-    if (o.id) {
-      if (seen.has(o.id)) return;
-      seen.add(o.id);
+    for (const k of [o.id, shape(o)]) {
+      if (k && seen.has(k)) return;
     }
+    for (const k of [o.id, shape(o)]) if (k) seen.add(k);
     counts[layer] = (counts[layer] ?? 0) + 1;
     if (isVisible(opts.visibility, layer) && isVisible(opts.visibility, own)) visible.push(o);
   };
