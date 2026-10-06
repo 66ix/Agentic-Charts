@@ -15,6 +15,7 @@ import {
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 
 import { fetchKlines } from "@/lib/api";
+import { mergeCandles, readCandles, writeCandles } from "@/lib/candleCache";
 import { BoxZonePrimitive } from "@/lib/chart/primitives/BoxZonePrimitive";
 import { DrawingLayerPrimitive } from "@/lib/chart/primitives/DrawingLayerPrimitive";
 import { LabeledRayPrimitive } from "@/lib/chart/primitives/LabeledRayPrimitive";
@@ -304,47 +305,82 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
       };
     };
 
-    const load = () =>
-      fetchKlines(symbol, interval, HISTORY_BARS, abort.signal)
-        .then((res) => {
-          if (disposed) return;
-          const data = res.candles;
-          candlesRef.current = data;
-          const lastBar = data[data.length - 1];
-          setLegend(lastBar ? { c: lastBar, change: ((lastBar.close - lastBar.open) / lastBar.open) * 100 } : null);
-          mapperRef.current.setData(data.map((d) => d.time), INTERVAL_SECONDS[interval]);
-          const precision = pricePrecision(data[data.length - 1]?.close ?? 1);
-          candleRef.current?.applyOptions({
-            priceFormat: { type: "price", precision, minMove: 1 / 10 ** precision },
-          });
-          candleRef.current?.setData(
-            data.map((c) => ({ time: toTime(c.time), open: c.open, high: c.high, low: c.low, close: c.close })),
-          );
-          volumeRef.current?.setData(
-            data.map((c) => ({
-              time: toTime(c.time),
-              value: c.volume,
-              color: c.close >= c.open ? "rgba(34,197,94,0.35)" : "rgba(239,68,68,0.35)",
-            })),
-          );
-          refreshIndicators(true);
-          chartRef.current
-            ?.timeScale()
-            .setVisibleLogicalRange({ from: Math.max(0, data.length - 160), to: data.length + 10 });
-          source = res.source as DataSource;
-          emitFeed(source, true);
-          setLoading(false);
-          propsRef.current.onError?.(null);
-          propsRef.current.onDataReady?.(data);
-          connect();
-        })
-        .catch((err: Error) => {
-          if (disposed || err.name === "AbortError") return;
-          setLoading(false);
-          propsRef.current.onFeed({ price: NaN, open24: null, source: "offline" });
-          propsRef.current.onError?.(err.message);
-          retryTimer = setTimeout(load, 5000); // keep retrying until the API is up
+    const load = async () => {
+      // Puts a full dataset on the chart: the cached bars at once, then the network's.
+      const render = (data: Candle[], src: DataSource) => {
+        candlesRef.current = data;
+        const lastBar = data[data.length - 1];
+        setLegend(lastBar ? { c: lastBar, change: ((lastBar.close - lastBar.open) / lastBar.open) * 100 } : null);
+        mapperRef.current.setData(data.map((d) => d.time), INTERVAL_SECONDS[interval]);
+        const precision = pricePrecision(data[data.length - 1]?.close ?? 1);
+        candleRef.current?.applyOptions({
+          priceFormat: { type: "price", precision, minMove: 1 / 10 ** precision },
         });
+        candleRef.current?.setData(
+          data.map((c) => ({ time: toTime(c.time), open: c.open, high: c.high, low: c.low, close: c.close })),
+        );
+        volumeRef.current?.setData(
+          data.map((c) => ({
+            time: toTime(c.time),
+            value: c.volume,
+            color: c.close >= c.open ? "rgba(34,197,94,0.35)" : "rgba(239,68,68,0.35)",
+          })),
+        );
+        refreshIndicators(true);
+        chartRef.current
+          ?.timeScale()
+          .setVisibleLogicalRange({ from: Math.max(0, data.length - 160), to: data.length + 10 });
+        source = src;
+        emitFeed(source, true);
+        setLoading(false);
+      };
+
+      try {
+        // A retry keeps what an earlier attempt drew from the cache rather than re-reading it.
+        let cached: Candle[] | null = candlesRef.current.length ? candlesRef.current : null;
+        if (!cached) {
+          const hit = await readCandles(symbol, interval);
+          if (disposed) return;
+          const last = hit?.candles[hit.candles.length - 1];
+          const gap = last ? Date.now() / 1000 - last.time : Infinity;
+          // Only real Binance bars, and only when the missing ones fit in one request.
+          if (hit?.source === "binance" && gap < HISTORY_BARS * INTERVAL_SECONDS[interval]) {
+            cached = hit.candles;
+            render(cached, "connecting");
+          }
+        }
+
+        let data: Candle[] | null = null;
+        let src = "";
+        if (cached) {
+          // Ask only for the bars from the newest cached one on (it may have been open) and merge them in.
+          const since = cached[cached.length - 1].time;
+          const delta = await fetchKlines(symbol, interval, HISTORY_BARS, abort.signal, since);
+          const first = delta.candles[0]?.time;
+          if (delta.source === "binance" && first !== undefined && first <= since) {
+            data = mergeCandles(cached, delta.candles);
+            src = delta.source;
+          }
+        }
+        if (!data) {
+          const res = await fetchKlines(symbol, interval, HISTORY_BARS, abort.signal);
+          data = res.candles;
+          src = res.source;
+        }
+        if (disposed) return;
+        render(data, src as DataSource);
+        propsRef.current.onError?.(null);
+        propsRef.current.onDataReady?.(data);
+        connect();
+        if (src === "binance") void writeCandles(symbol, interval, data, src);
+      } catch (err) {
+        if (disposed || (err as Error).name === "AbortError") return;
+        setLoading(false);
+        propsRef.current.onFeed({ price: NaN, open24: null, source: "offline" });
+        propsRef.current.onError?.((err as Error).message);
+        retryTimer = setTimeout(load, 5000); // keep retrying until the API is up
+      }
+    };
     load();
 
     return () => {

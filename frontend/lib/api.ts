@@ -51,8 +51,10 @@ async function request<T>(path: string, init?: RequestInit & { timeoutMs?: numbe
   }
 }
 
-export function fetchKlines(symbol: string, interval: Interval, limit: number, signal?: AbortSignal) {
+/** `since` (UNIX seconds) returns only the bars opening at or after it, for topping up a cached series. */
+export function fetchKlines(symbol: string, interval: Interval, limit: number, signal?: AbortSignal, since?: number) {
   const q = new URLSearchParams({ symbol, interval, limit: String(limit) });
+  if (since !== undefined) q.set("since", String(since));
   return request<{ symbol: string; interval: Interval; source: string; candles: Candle[] }>(`/api/klines?${q}`, {
     signal,
   });

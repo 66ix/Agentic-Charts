@@ -67,6 +67,11 @@ class Settings:
         )
     )
     metrics_cache_seconds: float = field(default_factory=lambda: float(_env("METRICS_CACHE_SECONDS", "60")))
+    # Closed Binance candles kept in SQLite, so restarts only fetch the bars that are new.
+    candle_cache: bool = field(
+        default_factory=lambda: _env("CANDLE_CACHE", "on").lower() not in ("off", "0", "false"))
+    candle_cache_path: str = field(default_factory=lambda: _env(
+        "CANDLE_CACHE_PATH", str(Path(__file__).resolve().parent.parent / ".cache" / "candles.sqlite3")))
 
 
 @lru_cache

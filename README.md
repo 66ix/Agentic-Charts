@@ -135,6 +135,7 @@ the rule parser for that request, and skips the LLM for 30 seconds.
 | `BINANCE_REST_URL` | `https://api.binance.com` | Primary spot host |
 | `BINANCE_WS_URL` | `wss://stream.binance.com:9443/ws` | Primary spot stream host |
 | `BINANCE_FALLBACK_REST_URL` / `_WS_URL` | `binance.vision` hosts | Used automatically when the primary answers 451/403 (US IPs) |
+| `CANDLE_CACHE` / `CANDLE_CACHE_PATH` | `on`, `backend/.cache/candles.sqlite3` | Closed Binance candles kept in SQLite, so restarts only fetch new bars |
 | `DERIVATIVES` | `on` | Live open interest and liquidations from Binance futures (`off` to mock them) |
 | `OI_TOP_SYMBOLS` | `40` | Open interest sums this many top USDT perpetuals by volume |
 | `LLM_PROVIDER` | `ollama` | `ollama`, `openai`, `anthropic`, `none` |
@@ -160,7 +161,7 @@ mocked values (marked with a dot).
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/api/health` | Status, data source, LLM provider, active streams |
-| GET | `/api/klines?symbol=INJUSDT&interval=4h&limit=500` | Historical candles (`3h` is resampled from `1h`) |
+| GET | `/api/klines?symbol=INJUSDT&interval=4h&limit=500` | Historical candles (`3h` is resampled from `1h`); `&since=<unix s>` returns only bars from that time on |
 | GET | `/api/symbols` | Tradable USDT spot pairs |
 | GET | `/api/market/metrics` | Header metrics, each tagged `live` or `mock` |
 | POST | `/api/agent/analyze` | `{symbol, interval, prompt, candles?, history?, overlays?, previous_intent?}` → overlays + summary + alerts |
