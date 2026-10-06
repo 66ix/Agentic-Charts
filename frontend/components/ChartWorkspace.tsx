@@ -12,6 +12,8 @@ import { alertFromDrawing, alertOverlays } from "@/lib/alerts";
 import { analyze } from "@/lib/api";
 import { DEFAULT_INTERVAL, DEFAULT_SYMBOL } from "@/lib/config";
 import { isCustom } from "@/lib/customSymbols";
+import { createJournalEntry, planToJournalEntry } from "@/lib/journal";
+import { DEFAULT_SIZING, sizePlan, type SizingSettings } from "@/lib/sizing";
 import type { DockPanelProps } from "@/lib/dock";
 import {
   composeOverlays,
@@ -648,6 +650,18 @@ export default function ChartWorkspace() {
   const price = Number.isFinite(feed.price) ? feed.price : null;
 
   // ------------------------------------------------------------------ side-panel tabs
+  /** "Log trade" on a plan card: track it in the journal, sized with the user's position-sizing settings. */
+  const logTrade = useCallback(async (m: AgentMessage) => {
+    if (!m.plan || !m.symbol || !m.interval) return false;
+    const sized = sizePlan(m.plan, { ...DEFAULT_SIZING, ...readStored<Partial<SizingSettings>>("ac:sizing", {}) });
+    try {
+      await createJournalEntry(planToJournalEntry(m.plan, m.symbol, m.interval, sized ? { size_qty: sized.qty, risk_usd: sized.riskUsd } : {}));
+      return true;
+    } catch {
+      return false;
+    }
+  }, []);
+
   const dockProps: DockPanelProps = { symbol, interval, price, watchlist, onPickSymbol: pickSymbol, onChartOverlays };
   const tabs: DockTab[] = [
     {
@@ -669,6 +683,7 @@ export default function ChartWorkspace() {
           }}
           onPickSymbol={setSymbol}
           onTogglePin={togglePin}
+          onLogTrade={logTrade}
         />
       ),
     },
