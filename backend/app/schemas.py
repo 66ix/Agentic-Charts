@@ -228,8 +228,9 @@ class AnalysisIntent(BaseModel):
 
     @model_validator(mode="after")
     def _default_features(self) -> "AnalysisIntent":
-        # A request with nothing to draw, remove or alert on is a plain "analyse this".
-        if not self.features and not self.has_actions:
+        # A request with nothing to draw, remove or alert on is a plain "analyse this", unless it keeps the chart
+        # as it is (a question answered from facts, like "what does Kimi say?").
+        if not self.features and not self.has_actions and not self.keep_existing:
             self.features = ["support_resistance"]
         return self
 

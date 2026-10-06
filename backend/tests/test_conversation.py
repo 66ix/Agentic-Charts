@@ -70,6 +70,10 @@ def test_conversation_flow():
         assert any(o["kind"] == "custom_level" for o in fresh["overlays"])  # user levels survive a new analysis
         assert not any(o["kind"] == "trendline" for o in fresh["overlays"])
 
+        # Questions that draw nothing new keep what's on the chart.
+        asked = _ask(client, "what does kimi say?", fresh["overlays"])
+        assert {o["id"] for o in asked["overlays"]} == {o["id"] for o in fresh["overlays"]}
+
         cleared = _ask(client, "clear the chart", fresh["overlays"])
         assert cleared["overlays"] == [] and "Removed" in cleared["summary"]
 

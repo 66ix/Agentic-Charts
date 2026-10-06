@@ -26,6 +26,7 @@ import httpx
 from pydantic import ValidationError
 
 from .config import Settings, get_settings
+from .pricefmt import round_facts
 from .schemas import (
     ALL_FEATURES,
     FULL_FEATURES,
@@ -159,14 +160,17 @@ INTENT_SYSTEM = (
     "'triangle', 'wedge', 'range' or 'double top' means patterns. If the request only draws given prices, removes "
     "overlays, sets alerts, switches the chart, toggles indicators or scans the watchlist, features may be empty. "
     "'Kimi' or 'Kimi Cooked' is the user's own indicator: 'show Kimi' → indicators_on kimi; a question about what "
-    "Kimi says needs no detectors (its facts are read separately). "
+    "Kimi says needs no detectors (its facts are read separately) and keeps the chart as it is (keep_existing true). "
+    "Keep what is on the chart (keep_existing true) whenever the request doesn't ask for a new analysis. "
     "Respond with JSON only."
 )
 
 NARRATE_SYSTEM = (
     "You are a concise crypto market-structure analyst inside a charting app. Answer the user's request "
     "in at most 4 short sentences using ONLY the numbers in the FACTS JSON; never invent prices or "
-    "indicators. Refer to zones by their price range. The levels are already drawn on the chart. "
+    "indicators. Quote prices exactly as FACTS gives them (they are rounded to the coin's price step) and give ATR "
+    "with its percent of price (atr_pct). Refer to zones by their price range. The levels are already drawn on the "
+    "chart. "
     "If FACTS lists actions (levels you drew, overlays removed, alerts set, chart switched), confirm them briefly. "
     "Lead with what matters for a decision: where price sits relative to the nearest zones (distance in ATR), "
     "higher-timeframe confluence, structure breaks, divergences, sweeps, and funding/open interest when given. "
@@ -415,6 +419,8 @@ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases
     acting = bool(custom or remove or alert_prices or alert_targets or indicators_on or indicators_off
                   or scan_watchlist or trade_plan)
     navigating = symbol is not None or switch_chart
+    # "What does Kimi say?" is read from Kimi's own facts: no detectors, and the chart stays as it is.
+    asks_kimi = not feats and bool(re.search(r"\bkimi\b", p))
     follow_up = previous is not None and not feats and not acting and (
         timeframe is not None or symbol is not None
         or re.search(r"\b(same|again|that|it|this|now|instead|redo|refresh)\b", p))
@@ -423,10 +429,10 @@ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases
         windows = [tf for tf in tfs if tf in ("1h", "4h", "1d", "1w")] or list(previous.window_timeframes)
         max_zones = previous.max_zones
         trade_plan = previous.trade_plan if re.search(r"\b(same|again|redo)\b", p) else None
-    elif not feats and not acting and not navigating:
+    elif not feats and not acting and not navigating and not asks_kimi:
         feats = ["support_resistance", "window_levels"]
 
-    keep = acting or bool(re.search(r"\b(also|add|plus|too|as well|keep|on top)\b", p))
+    keep = acting or asks_kimi or bool(re.search(r"\b(also|add|plus|too|as well|keep|on top)\b", p))
     if trade_plan and not remove:
         keep = keep and bool(re.search(r"\b(also|add|plus|too|as well|keep|on top)\b", p))
     return AnalysisIntent(features=feats, timeframe=timeframe, window_timeframes=windows, max_zones=max_zones,
@@ -616,7 +622,7 @@ class LLMClient:
             return fallback, "template"
         convo = "\n".join(f"{t.role}: {t.text[:400]}" for t in (history or [])[-4:])
         user = (f"CONVERSATION SO FAR:\n{convo}\n\n" if convo else "") + \
-            f"REQUEST: {prompt}\n\nFACTS: {json.dumps(facts, default=float)}"
+            f"REQUEST: {prompt}\n\nFACTS: {json.dumps(round_facts(facts), default=float)}"
         try:
             text = (await self._text(NARRATE_SYSTEM, user)).strip()
             if text:

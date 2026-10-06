@@ -70,21 +70,25 @@ def custom_overlays(intent: AnalysisIntent) -> list:
     for c in intent.custom_levels:
         if c.kind == "zone":
             out.append(BoxOverlay(
-                id=_new_id(), kind="custom_zone", label=c.label or f"Zone {_fmt(c.price_low)}–{_fmt(c.price_high)}",
+                id=_new_id(), kind="custom_zone", label=c.label or f"Zone {_fmt(c.price_low, strip=True)}–{_fmt(c.price_high, strip=True)}",
                 price_low=c.price_low, price_high=c.price_high, color=rgba(CUSTOM_COLOR, 0.16),
                 border_color=rgba(CUSTOM_COLOR, 0.75),
             ))
         else:
             out.append(HorizontalLineOverlay(
-                id=_new_id(), kind="custom_level", label=c.label or f"Level {_fmt(c.price)}", price=c.price,
+                id=_new_id(), kind="custom_level", label=c.label or f"Level {_fmt(c.price, strip=True)}", price=c.price,
                 color=CUSTOM_COLOR, line_style="dashed", line_width=2,
             ))
     return out
 
 
 def merge_overlays(existing: list, new: list, intent: AnalysisIntent) -> tuple[list, int]:
-    """What stays on the chart: (overlays, number removed)."""
-    if intent.keep_existing:
+    """What stays on the chart: (overlays, number removed).
+
+    An answer that draws nothing new (a question about Kimi, a scan, alerts, an indicator toggle) keeps everything
+    on the chart; only a fresh analysis replaces the earlier detector output.
+    """
+    if intent.keep_existing or not intent.features:
         kept = list(existing)
     else:  # a fresh analysis replaces detector output but keeps levels the user asked for by price
         kept = [o for o in existing if (o.kind or "") in TARGET_KINDS["custom"]]
@@ -101,7 +105,7 @@ NO_ALERT_KINDS = {"plan_risk", "plan_reward", "pattern_point", "swing_high", "sw
 
 
 def build_alerts(intent: AnalysisIntent, overlays: list, new: list) -> list[AlertSpec]:
-    alerts = [AlertSpec(kind="cross", price=p, label=f"Price {_fmt(p)}") for p in intent.alert_prices]
+    alerts = [AlertSpec(kind="cross", price=p, label=f"Price {_fmt(p, strip=True)}") for p in intent.alert_prices]
     if intent.alert_targets:
         pool = new if intent.alert_targets == ["new"] else overlays
         kinds = None if "new" in intent.alert_targets else _kinds(intent.alert_targets)
@@ -120,10 +124,10 @@ def _action_lines(intent: AnalysisIntent, custom: list, removed: int, alerts: li
     for o in custom:
         if o.type == "box":
             lines.append(f"Drew {o.label}." if o.label.startswith("Zone")
-                         else f"Drew {o.label} at {_fmt(o.price_low)}–{_fmt(o.price_high)}.")
+                         else f"Drew {o.label} at {_fmt(o.price_low, strip=True)}–{_fmt(o.price_high, strip=True)}.")
         else:
-            lines.append(f"Drew a level at {_fmt(o.price)}." if o.label.startswith("Level")
-                         else f"Drew {o.label} at {_fmt(o.price)}.")
+            lines.append(f"Drew a level at {_fmt(o.price, strip=True)}." if o.label.startswith("Level")
+                         else f"Drew {o.label} at {_fmt(o.price, strip=True)}.")
     if intent.remove:
         lines.append(f"Removed {removed} overlay{'s' if removed != 1 else ''}." if removed
                      else "Nothing matching was on the chart to remove.")

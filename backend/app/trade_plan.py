@@ -7,6 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from .pricefmt import _fmt
 from .schemas import BoxOverlay, HorizontalLineOverlay, PlanTarget, TradePlan
 
 SUPPORT_KINDS = {"support", "demand", "window_low", "ob_bullish", "fvg_bullish", "val", "poc", "custom_level",
@@ -30,12 +31,6 @@ class Level:
     @property
     def mid(self) -> float:
         return (self.low + self.high) / 2
-
-
-def _fmt(p: float) -> str:
-    if p >= 1000:
-        return f"{p:,.2f}"
-    return f"{p:.4f}".rstrip("0").rstrip(".") if p >= 1 else f"{p:.6f}".rstrip("0").rstrip(".")
 
 
 def pick_direction(trend: str, bias: str | None, levels: list[Level], last: float) -> Literal["long", "short"]:

@@ -35,6 +35,7 @@ import pandas as pd
 from scipy.cluster.hierarchy import fcluster, linkage
 from scipy.signal import find_peaks
 
+from .pricefmt import _fmt, price_decimals  # noqa: F401 (re-exported for agent.py)
 from .indicators import rsi, rsi_divergence, structure_breaks, volume_profile, volume_stats
 from .patterns import detect_double, detect_range, detect_triangle, fair_value_gaps, liquidity_sweeps, order_blocks
 from .schemas import (
@@ -394,14 +395,6 @@ class AnalysisResult:
     bias: str | None = None  # direction of the latest structure break
 
 
-def _fmt(p: float) -> str:
-    if p >= 1000:
-        return f"{p:,.2f}"
-    if p >= 1:
-        return f"{p:.4f}".rstrip("0").rstrip(".")
-    return f"{p:.6f}".rstrip("0").rstrip(".")
-
-
 def _zone_fact(z: Zone, last: float, atr_v: float, count_key: str, count: int) -> dict:
     inside = z.price_low <= last <= z.price_high
     edge = z.price_low if z.price_low > last else z.price_high
@@ -449,7 +442,8 @@ def analyze(
         trend = "range"
 
     overlays: list = []
-    facts: dict = {"timeframe": tfl, "last_price": last, "trend": trend, "atr": atr_v}
+    facts: dict = {"timeframe": tfl, "last_price": last, "trend": trend, "atr": atr_v,
+                   "atr_pct": round(atr_v / last * 100, 2) if last else None}
     levels: list[Level] = []
     feats = set(intent.features)
     sr_zones: list[Zone] = []
@@ -684,8 +678,9 @@ def _kimi_lines(k: dict) -> list[str]:
 def describe(facts: dict, symbol: str) -> str:
     """Plain-English summary of the analysis, used when no LLM is configured."""
     tf = facts["timeframe"]
-    lines = [f"{symbol} on {tf}: last {_fmt(facts['last_price'])}, trend {facts['trend']} "
-             f"(ATR {_fmt(facts['atr'])})."]
+    last = facts["last_price"]
+    lines = [f"{symbol} on {tf}: last {_fmt(last)}, trend {facts['trend']} "
+             f"(ATR {_fmt(facts['atr'], last)}, {facts['atr'] / last * 100:.2f}% of price)."]
     lines += facts.get("navigation", [])
     if facts.get("resistance"):
         z = facts["resistance"][0]
