@@ -22,7 +22,10 @@ import { Fragment, useEffect, useImperativeHandle, useRef, useState, type ReactN
 import { usePersistentState } from "@/hooks/usePersistentState";
 import { displaySymbol, formatPct, formatPrice } from "@/lib/format";
 import { DEFAULT_SIZING, orderText, qtyText, sizePlan, type SizingSettings } from "@/lib/sizing";
-import type { Interval, Overlay, ScanResult, TradePlan } from "@/lib/types";
+import type { Interval, MarketSetup, Overlay, ScanResult, TradePlan } from "@/lib/types";
+
+import { SetupList } from "./ScannerPanel";
+import TrackRecordLine from "./TrackRecordLine";
 
 export interface AgentMessage {
   id: string;
@@ -33,6 +36,8 @@ export interface AgentMessage {
   alerts?: number;
   plan?: TradePlan;
   scan?: ScanResult[];
+  /** Market-wide scanner setups ("best 5m setups right now"). */
+  setups?: MarketSetup[];
   steps?: string[];
   /** The chart the answer was drawn on, and the question it answered (for pins and the journal). */
   symbol?: string;
@@ -49,6 +54,7 @@ const SUGGESTIONS = [
   "Identify the current H4 supply zone and key resistance high",
   "Which of my coins are near demand?",
   "Give me a long setup",
+  "Best 4h setups across the market",
   "What does Kimi say?",
   "Find order blocks, FVGs and liquidity sweeps",
   "Open BTC daily and show key levels",
@@ -116,6 +122,7 @@ function PlanCard({ plan, symbol, onLog }: { plan: TradePlan; symbol?: string; o
       {plan.notes.map((n) => (
         <p key={n} className="mt-1 text-mute">{n}</p>
       ))}
+      {plan.track_record && <TrackRecordLine tr={plan.track_record} />}
       {symbol && (
         <div className="mt-1.5 flex gap-1">
           <button
@@ -190,6 +197,8 @@ interface Props {
   onClearOverlays(): void;
   onClearChat(): void;
   onPickSymbol(symbol: string): void;
+  /** A setup from a market scan: open its chart with the plan drawn. */
+  onOpenSetup?(setup: MarketSetup): void;
   onTogglePin(message: AgentMessage): void;
   /** Adds an answer's plan to the trade journal → saved. */
   onLogTrade?(message: AgentMessage): Promise<boolean>;
@@ -269,6 +278,11 @@ export default function AgentPanel(p: Props) {
                   <PlanCard plan={m.plan} symbol={m.symbol} onLog={p.onLogTrade ? () => p.onLogTrade!(m) : undefined} />
                 )}
                 {m.scan && <ScanTable rows={m.scan} onPick={p.onPickSymbol} />}
+                {m.setups && (
+                  <div className="mt-1.5">
+                    <SetupList rows={m.setups} onPick={(s) => (p.onOpenSetup ? p.onOpenSetup(s) : p.onPickSymbol(s.symbol))} />
+                  </div>
+                )}
                 {m.overlays && m.overlays.length > 0 && (
                   <div className="mt-1.5 flex flex-wrap gap-1">
                     {m.overlays

@@ -232,7 +232,9 @@ class MarketScanner:
         """The last result for `interval` plus what the panel shows around it."""
         now_ms = int(time.time() * 1000)
         last = {tf: r.generated_at for tf, r in self._results.items()}
-        nxt = {tf: last.get(tf, now_ms) + int(m * 60000) for tf, m in self.schedule.items()}
+        # A scheduled timeframe that never ran is scanned at the timer's next check.
+        nxt = {tf: last[tf] + int(m * 60000) if tf in last else now_ms + int(self.check_seconds * 1000)
+               for tf, m in self.schedule.items()}
         result = self._results.get(interval)
         return {"interval": interval, "result": result.model_dump(mode="json") if result else None,
                 "running": sorted(self._running), "schedule": self.schedule, "next_run": nxt,

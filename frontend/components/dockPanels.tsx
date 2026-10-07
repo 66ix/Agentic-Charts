@@ -1,6 +1,6 @@
 "use client";
 
-import { CalendarClock, FlaskConical, Gauge, Grid3x3, NotebookPen, type LucideIcon } from "lucide-react";
+import { CalendarClock, FlaskConical, Gauge, Grid3x3, NotebookPen, Radar, type LucideIcon } from "lucide-react";
 import type { ComponentType } from "react";
 
 import type { DockPanelProps } from "@/lib/dock";
@@ -10,6 +10,7 @@ import EventsPanel from "./EventsPanel";
 import GridBotPanel from "./GridBotPanel";
 import JournalPanel from "./JournalPanel";
 import MarketDataPanel from "./MarketDataPanel";
+import ScannerPanel from "./ScannerPanel";
 
 /** A side-panel tab that only needs the shared dock props (the workspace builds the agent, watchlist,
  *  layers and alerts tabs itself, since they need more). */
@@ -28,4 +29,5 @@ export const EXTRA_PANELS: DockPanelDef[] = [
   { id: "market", label: "Market data", icon: Gauge, hotkey: "o", Component: MarketDataPanel },
   { id: "events", label: "Calendar", icon: CalendarClock, hotkey: "e", Component: EventsPanel },
   { id: "gridbots", label: "Grid bots", icon: Grid3x3, hotkey: "b", Component: GridBotPanel },
+  { id: "scanner", label: "Scanner", icon: Radar, hotkey: "u", Component: ScannerPanel },
 ];

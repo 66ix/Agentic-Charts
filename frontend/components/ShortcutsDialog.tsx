@@ -49,6 +49,7 @@ export const SHORTCUTS: Array<{ group: string; keys: Array<[string, string]> }> 
       ["B", "Grid bots"],
       ["E", "Calendar and news"],
       ["O", "Market data"],
+      ["U", "Market scanner"],
     ],
   },
 ];

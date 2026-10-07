@@ -14,7 +14,7 @@ import { DEFAULT_INTERVAL, DEFAULT_SYMBOL } from "@/lib/config";
 import { isCustom } from "@/lib/customSymbols";
 import { createJournalEntry, planToJournalEntry } from "@/lib/journal";
 import { DEFAULT_SIZING, sizePlan, type SizingSettings } from "@/lib/sizing";
-import type { DockPanelProps } from "@/lib/dock";
+import { OPEN_PANEL_EVENT, type DockPanelProps } from "@/lib/dock";
 import {
   composeOverlays,
   drawingsFor,
@@ -37,6 +37,7 @@ import type {
   IndicatorState,
   Interval,
   LayoutState,
+  MarketSetup,
   Overlay,
   ToolId,
 } from "@/lib/types";
@@ -432,6 +433,7 @@ export default function ChartWorkspace() {
           alerts: res.alerts?.length || undefined,
           plan: res.plan ?? undefined,
           scan: res.scan?.length ? res.scan : undefined,
+          setups: res.setups?.length ? res.setups : undefined,
           steps: res.steps?.length ? res.steps : undefined,
           symbol: target.symbol,
           interval: target.interval,
@@ -509,6 +511,12 @@ export default function ChartWorkspace() {
     },
     [mobile, setDock],
   );
+  // Other tabs and cards open a tab with openDockPanel (lib/dock.ts), e.g. "Open in Backtest" on a plan card.
+  useEffect(() => {
+    const onOpen = (e: Event) => openTab((e as CustomEvent<string>).detail);
+    window.addEventListener(OPEN_PANEL_EVENT, onOpen);
+    return () => window.removeEventListener(OPEN_PANEL_EVENT, onOpen);
+  }, [openTab]);
   const closeDock = useCallback(() => (mobile ? setMobileTab(null) : setDock((d) => ({ ...d, open: false }))), [mobile, setDock]);
   const focusAgent = useCallback(() => {
     openTab("agent");
@@ -662,6 +670,16 @@ export default function ChartWorkspace() {
     }
   }, []);
 
+  /** A market-scanner setup in an agent answer: its chart with the plan drawn (the Scanner tab's overlay set). */
+  const openSetup = useCallback(
+    (s: MarketSetup) => {
+      pickSymbol(s.symbol, s.interval);
+      onChartOverlays("scanner", s.symbol, s.overlays);
+      if (mobile) setMobileTab(null);
+    },
+    [pickSymbol, onChartOverlays, mobile],
+  );
+
   const dockProps: DockPanelProps = { symbol, interval, price, watchlist, onPickSymbol: pickSymbol, onChartOverlays };
   const tabs: DockTab[] = [
     {
@@ -682,6 +700,7 @@ export default function ChartWorkspace() {
             setLastIntent(null);
           }}
           onPickSymbol={setSymbol}
+          onOpenSetup={openSetup}
           onTogglePin={togglePin}
           onLogTrade={logTrade}
         />

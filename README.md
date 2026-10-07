@@ -52,6 +52,8 @@ agentic-charts/
 │   │   ├── llm.py             Ollama / OpenAI-compatible / Anthropic structured outputs + rule fallback
 │   │   ├── symbols.py         "eth", "solana", "$NEAR" → Binance pairs
 │   │   ├── scanner.py         Watchlist scan and tickers
+│   │   ├── market_scanner.py  Best long / short setups across the top coins by volume, on demand or on a timer
+│   │   ├── track_record.py    How a plan's setup type did in the backtest on that coin and timeframe (cached)
 │   │   ├── market_data.py     Binance klines (paginated, 3h resampled), synthetic fallback
 │   │   ├── candle_store.py    SQLite candle cache (only new bars are downloaded)
 │   │   ├── ratelimit.py       Per-client rate limits and a daily agent cap
@@ -193,6 +195,11 @@ for 30 seconds.
 | `CALENDAR_URLS` | Forex Factory this week + next week | Economic calendar feeds (JSON, Forex Factory format) |
 | `CALENDAR_COUNTRIES` | `USD` | Currencies kept from the calendar, or `ALL` |
 | `NEWS_FEEDS` | CoinDesk, Cointelegraph RSS | News feeds (RSS or Atom), comma-separated |
+| `MARKET_SCAN_TOP` | `100` | Market scanner: the top N USDT pairs by 24h quote volume (5–300) |
+| `MARKET_SCAN_CONCURRENCY` | `4` | Coins whose candles load at once during a scan |
+| `MARKET_SCAN_SCHEDULE` | empty | Timed scans as `timeframe=minutes`, e.g. `15m=10,4h=60` (at least 5 minutes; empty = on demand only) |
+| `MARKET_SCAN_NOTIFY_TOP` | `0` | Send this many of the best setups to Telegram / Discord after each timed scan (`0` = off) |
+| `MARKET_SCAN_STORE` | `backend/.cache/market_scan.json` | The last scan per timeframe; `memory` = not saved |
 | `NEXT_PUBLIC_API_URL` | `http://localhost:8000` | Frontend → backend |
 | `NEXT_PUBLIC_WS_URL` | derived from API URL | Override for proxies |
 
@@ -257,7 +264,7 @@ they are uploaded once the first time the app connects to a backend that has non
 | GET | `/api/tickers?symbols=BTCUSDT,ETHUSDT` | Last price and 24h change per symbol |
 | GET | `/api/watchlist/scan?symbols=BTCUSDT,ETHUSDT&interval=4h` | Per symbol: trend, RSI, nearest zone and its distance, signals (cached 60s) |
 | GET | `/api/indicators/kimi?symbol=INJUSDT&interval=4h` | Kimi Cooked v5.7.4 on the closed candles: S/R levels with odds, Fib ladder, signals with outcomes, forecast path and band, and its PATH VERIFY and Signal Stats tables |
-| POST | `/api/agent/analyze` | `{symbol, interval, prompt, candles?, history?, overlays?, previous_intent?, watchlist?}` → overlays, summary, alerts, and when relevant `navigate` (chart to switch to), `plan`, `scan`, `indicators`, `steps` |
+| POST | `/api/agent/analyze` | `{symbol, interval, prompt, candles?, history?, overlays?, previous_intent?, watchlist?}` → overlays, summary, alerts, and when relevant `navigate` (chart to switch to), `plan` (with its `track_record`), `scan`, `setups` (market scan), `indicators`, `steps` |
 | GET | `/api/alerts` | `{alerts, channels: {telegram, discord}}` |
 | POST | `/api/alerts` | `{symbol, alerts: [{kind: "cross"\|"zone", price?, price_low?, price_high?, label}]}` → created alerts |
 | DELETE | `/api/alerts/{id}` | Delete an alert |
@@ -282,6 +289,8 @@ they are uploaded once the first time the app connects to a backend that has non
 | PATCH/DELETE | `/api/journal/{id}` | Notes, tags, setup, cancel or close a trade; delete it |
 | GET | `/api/journal/stats?symbol=&setup=&direction=` | Win rate, R, expectancy, profit factor, breakdowns, equity curve |
 | POST | `/api/backtest` | `{symbol, interval, setup, bars, target, max_hold_bars, fee_pct}` → trades, stats, equity curve |
+| GET | `/api/market-scan?interval=4h` | The last market scan of that timeframe (`result`: longs and shorts with entry, stop, T1, R:R, distance, timeframe agreement, track record, plan and overlays), plus `running`, `schedule`, `next_run` |
+| POST | `/api/market-scan/run?interval=4h&top=` | Scan now (or join the scan already running) → the same shape |
 | GET | `/api/futures/funding`, `/open-interest`, `/long-short`, `/liquidation-levels` `?symbol=` | Futures data for the market data tab (`source`: `binance`, `synthetic` or `unavailable`) |
 | GET | `/api/cvd?symbol=&interval=` | Spot taker buy and sell volume per bar and its running sum |
 | GET | `/api/orderbook/walls?symbol=&range_pct=5` | Large resting orders near price |
@@ -342,10 +351,12 @@ Overlay types: `box`, `horizontal_line`, `trendline`, `marker` (see `backend/app
 - **Grid bots** (`B`): track a Binance Spot Grid bot you already run. Copy its settings from Bot details on Binance: pair, lower and upper price, number of grids, arithmetic or geometric, investment and how long it has been running ("3d 4h 12m", or the start time). The app replays the bot on Binance's 1-minute candles from that moment and shows what the bot card shows: total PnL, grid profit, floating PnL, matched trades (all and last 24h), grid and total APR, plus its open orders, recent fills and matched trades per day. Its grid is drawn on the chart. To check it against Binance, type Binance's matched trades, grid profit and total PnL in the form and the bot shows both side by side. **More settings** covers fees (and the BNB discount), trigger price, take profit, stop loss, sell on stop and Binance's "Qty per order". The numbers can differ a little from Binance's: several fills inside one minute are not all seen, and Binance keeps a small fee reserve (enter its qty per order to remove that difference).
 - **Trade journal** (`J`): **Log trade** on a plan card tracks that plan, sized from your position-sizing settings, and **Add trade** logs your own. Each trade is followed on 1-minute candles: pending until the entry fills, then partial exits at each target (the stop moves to entry after the first), with R, PnL after fees, best and worst excursion. **Stats** shows win rate, average R, expectancy, profit factor, an equity curve and results by setup, coin and direction. Trades show on the chart; close or cancel them by hand when you exit early.
 - **Backtest** (`X`): pick a setup (first touch of fresh demand or supply, support or resistance holds, sweeps, Kimi Cooked signals, …), an exit (1.5R, 2R, 3R or the next level), a max hold and fees, and it replays the setup over the last 100–5,000 candles of the chart, with no look-ahead. It shows win rate, average and total R, profit factor, max drawdown, an equity curve and every trade; click a trade to see it on the chart.
+- **Track record on trade plans:** every long or short plan carries how the same kind of setup did on that coin and timeframe, from the backtest engine: "fresh 4h demand longs on INJ: 14 trades, 57% win, +0.60R avg, last 1 year". The plan's basis picks the setup (fresh demand or supply, support, resistance; a plan on an already-tested zone or with higher-timeframe confluence is compared with every such zone, and the card says so). It runs on about a year of closed candles (500–3,000), exits at the next opposing level like the plan's T1, and is cached per coin, timeframe and setup for 30 minutes to 6 hours. Under 8 trades, or under 300 candles of history, it says so instead of quoting a win rate; under 20 trades it is marked a small sample. Order blocks, your own zones and market entries beyond a swing have no matching backtest yet. Click the line on the plan card for the numbers and caveats, or the flask to open the same backtest, with every trade, in the Backtest tab. The agent quotes it in its answer.
+- **Scanner** (`U`): the best long and short setups across the top 100 USDT pairs by 24h volume (stablecoin and fiat pairs and leveraged tokens left out) on the timeframe you pick. Each coin gets a long and a short plan from the agent's own zones; plans entered at a zone with at least 1R to T1 are ranked by reward-to-risk, how far the entry is from price, how many timeframes trend its way (the scan's and the next two up; a range counts half) and the track record (computed for the best 8 per side). Rows show entry, stop, T1, R:R, distance, agreement and track record; click one to open that chart with the plan drawn. The agent uses it too: "best 5m setups right now", "scan the market for longs", "top short setups on the 1h". Scans load at most `MARKET_SCAN_CONCURRENCY` coins at once through the candle cache, one scan at a time, and the last one per timeframe is kept. `MARKET_SCAN_SCHEDULE` runs them on a timer and `MARKET_SCAN_NOTIFY_TOP` sends the best setups of each timed scan to Telegram / Discord. Without Binance it scans the fallback coin list on demo data and says so.
 - **Market data** (`O`): funding (now, next settlement, annualised, history), open interest, the long/short account ratio and top traders' ratio, 24h spot CVD, the biggest order-book walls within 5% of price, and estimated liquidation clusters (from volume and open interest, assuming common leverage, so treat them as estimates), plus real liquidations from Binance's stream. Walls and liquidation clusters can be shown on the chart.
 - **Calendar and news** (`E`): high-impact economic events (Forex Factory, USD by default) and crypto headlines (CoinDesk, Cointelegraph), filtered to the current coin or all. **Show on chart** draws events as dashed lines with their name and headlines as dots at the top of the chart; hover one for the details. The agent knows the calendar too: a trade plan warns when a high-impact event is due within 48 hours, and "any news?" or "what's funding like?" brings in the headlines or the futures data.
 - **Settings** (the gear): log scale, grid lines, timezone of the time axis (yours or UTC), the countdown, crosshair sync, linked coins, automatic levels, position sizing, and **Save a backup** / **Restore from a file**, which moves everything the app keeps in the browser (drawings, alerts, chats, watchlists, layouts, settings) to another browser or computer.
-- **Keyboard:** press `?` for the full list. `/` asks the agent, `S`, `Space` or `Ctrl+K` searches a coin, `1`–`9` and `0` pick the timeframe, `[` `]` or `Alt+↑` `↓` step through the watchlist, `G` cycles one, two and four charts, `Alt+R` fits the chart, `Alt+L` toggles log scale, `K` toggles Kimi Cooked, and `W` `A` `L` `J` `B` `E` `O` open the panel tabs.
+- **Keyboard:** press `?` for the full list. `/` asks the agent, `S`, `Space` or `Ctrl+K` searches a coin, `1`–`9` and `0` pick the timeframe, `[` `]` or `Alt+↑` `↓` step through the watchlist, `G` cycles one, two and four charts, `Alt+R` fits the chart, `Alt+L` toggles log scale, `K` toggles Kimi Cooked, and `W` `A` `L` `J` `B` `E` `O` `U` open the panel tabs.
 
 ## Tests
 

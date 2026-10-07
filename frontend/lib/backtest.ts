@@ -1,7 +1,10 @@
 // Setup backtests: types and the API call for backend/app/backtest.py, plus chart overlays for the trades.
 
+import { writeStored } from "@/hooks/usePersistentState";
+
 import { apiRequest } from "./api";
-import type { Interval, Overlay } from "./types";
+import { openDockPanel } from "./dock";
+import type { Interval, Overlay, TrackRecord } from "./types";
 
 export type BacktestSetup =
   | "demand_long"
@@ -110,6 +113,35 @@ export function runBacktest(req: BacktestRequest, signal?: AbortSignal) {
     signal,
     timeoutMs: 120_000, // first runs download history
   });
+}
+
+/** A run asked for from outside the Backtest tab; the tab fills its form from it and runs it once. */
+export interface BacktestAsk {
+  /** ms; asks older than a minute are ignored (e.g. on reload). */
+  at: number;
+  symbol: string;
+  interval: Interval;
+  setup: BacktestSetup;
+  bars: number;
+  target: BacktestTarget;
+}
+
+export const BACKTEST_ASK_KEY = "ac:backtest-ask";
+
+/** "Open in Backtest" on a plan's track record: the same backtest, with its trades, in the Backtest tab. */
+export function openTrackRecordInBacktest(tr: TrackRecord) {
+  if (!tr.setup) return;
+  const target = BACKTEST_TARGETS.some((t) => t.value === tr.target) ? (tr.target as BacktestTarget) : "next_level";
+  const ask: BacktestAsk = {
+    at: Date.now(),
+    symbol: tr.symbol,
+    interval: tr.interval,
+    setup: tr.setup as BacktestSetup,
+    bars: Math.min(5000, Math.max(100, tr.bars || 2000)),
+    target,
+  };
+  writeStored(BACKTEST_ASK_KEY, ask);
+  openDockPanel("backtest");
 }
 
 const BLUE = "#3b82f6";
