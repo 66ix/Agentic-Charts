@@ -68,8 +68,11 @@ TOOLS: list[dict[str, Any]] = [
         "description": "Read the user's own indicator, Kimi Cooked v5.7.4, on any coin and timeframe: its S/R levels "
                        "with the % chance price reaches each within the forecast window, the Fib ladder with odds, "
                        "its latest signals (B+/B- divergence, U/Dn trend, B+?/B-? early warnings) and how they "
-                       "resolved, its forecast (direction, range, next-candle call) and its signal stats. Use it "
-                       "whenever the user mentions Kimi.",
+                       "resolved, its chart patterns (double/triple tops and bottoms, head and shoulders, triangles, "
+                       "wedges, flags: break-out level, invalidation, measured target) and harmonic patterns "
+                       "(Gartley, Bat, Butterfly, Crab, Shark, 5-0, AB=CD...: PRZ, TP1/TP2, invalidation), its "
+                       "forecast (direction, range, next-candle call) and its signal stats. Use it whenever the user "
+                       "mentions Kimi.",
         "parameters": {
             "type": "object", "additionalProperties": False, "required": ["symbol", "timeframe"],
             "properties": {
