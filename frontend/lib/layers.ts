@@ -19,6 +19,8 @@ export type LayerId =
   | "kimiFib"
   | "kimiForecast"
   | "kimiSignals"
+  | "kimiPatterns"
+  | "kimiHarmonics"
   | "gridbots"
   | "journal"
   | "backtest"
@@ -48,6 +50,8 @@ export const LAYERS: LayerInfo[] = [
   { id: "kimiFib", label: "Fib ladder", group: "Kimi Cooked" },
   { id: "kimiForecast", label: "Forecast", group: "Kimi Cooked" },
   { id: "kimiSignals", label: "Signal labels", group: "Kimi Cooked" },
+  { id: "kimiPatterns", label: "Chart patterns and break-outs", group: "Kimi Cooked" },
+  { id: "kimiHarmonics", label: "Harmonic patterns and PRZ", group: "Kimi Cooked" },
   { id: "drawings", label: "My drawings", group: "Yours" },
   { id: "custom", label: "Levels you asked for", group: "Yours" },
   { id: "alerts", label: "Alert lines", group: "Yours" },

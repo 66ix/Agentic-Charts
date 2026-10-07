@@ -1,7 +1,14 @@
 import type { ISeriesPrimitivePaneView } from "lightweight-charts";
 
 import { formatPrice } from "../../format";
-import { INTERVAL_SECONDS, type KimiForecast, type KimiResult } from "../../types";
+import {
+  INTERVAL_SECONDS,
+  type KimiForecast,
+  type KimiHarmonic,
+  type KimiPattern,
+  type KimiResult,
+  type KimiSegment,
+} from "../../types";
 import type { TimeMapper } from "../timeMapper";
 import { dash, FONT, MediaRenderer, PaneView, PrimitiveBase, type LabelRegistry } from "./base";
 
@@ -13,6 +20,8 @@ const FORECAST = [55, 66, 250] as const; // #3742fa
 const GOLD = [255, 214, 10] as const; // #ffd60a
 const FIB_BLUE = [10, 132, 255] as const; // #0a84ff
 const FIB_EDGE = [176, 179, 184] as const; // #b0b3b8
+const AMBER = [255, 165, 2] as const; // #ffa502, a compromised harmonic
+const GRAY = [120, 123, 134] as const; // color.gray, a failed or expired pattern
 
 type Rgb = readonly [number, number, number];
 const rgba = ([r, g, b]: Rgb, a: number) => `rgba(${r}, ${g}, ${b}, ${a})`;
@@ -20,7 +29,8 @@ const LABEL_GAP = 13; // px between right-hand labels before one is dropped
 
 /**
  * Draws Kimi Cooked's own picture: S/R zones and rays with their odds, the auto Fib ladder and golden pocket,
- * and the forecast (confidence band, best-guess line, textured scenario path, end label and next-candle call).
+ * the forecast (confidence band, best-guess line, textured scenario path, end label and next-candle call), chart
+ * patterns with their break-out level and target lines, and harmonic XABCD legs with the PRZ box and TP lines.
  * Its B+/B-/U/Dn/B+?/B-? labels are series markers, set by the chart.
  */
 /** Which parts of Kimi's picture to draw (the Layers tab toggles them). */
@@ -28,6 +38,8 @@ export interface KimiParts {
   sr: boolean;
   fib: boolean;
   forecast: boolean;
+  patterns: boolean;
+  harmonics: boolean;
 }
 
 export class KimiPrimitive extends PrimitiveBase {
@@ -36,7 +48,7 @@ export class KimiPrimitive extends PrimitiveBase {
   constructor(
     mapper: TimeMapper,
     public data: KimiResult,
-    private readonly parts: KimiParts = { sr: true, fib: true, forecast: true },
+    private readonly parts: KimiParts = { sr: true, fib: true, forecast: true, patterns: true, harmonics: true },
   ) {
     super(mapper);
     this.views = [
@@ -97,6 +109,24 @@ export class KimiPrimitive extends PrimitiveBase {
 
     const f = this.parts.forecast ? this.data.forecast : null;
     if (f) this.drawBand(ctx, f);
+
+    // PRZ boxes: from C to the set's right end, while the set is live (active or compromised).
+    for (const h of this.parts.harmonics ? (this.data.harmonics ?? []) : []) {
+      const top = this.y(h.prz_high);
+      const bottom = this.y(h.prz_low);
+      const left = h.points[3] ? this.x(h.points[3].time) : null;
+      const right = this.x(h.time_end);
+      if (!h.prz_shown || top === null || bottom === null || left === null || right === null || right - left < 1) continue;
+      const rgb = h.direction === "bullish" ? SUPPORT : RESIST;
+      const hgt = Math.max(bottom - top, 1);
+      ctx.fillStyle = rgba(rgb, 0.1);
+      ctx.fillRect(left, top, right - left, hgt);
+      ctx.strokeStyle = rgba(rgb, 0.45);
+      ctx.lineWidth = 1;
+      dash(ctx, "dashed");
+      ctx.strokeRect(left + 0.5, top + 0.5, right - left - 1, hgt - 1);
+      ctx.setLineDash([]);
+    }
   }
 
   private points(f: KimiForecast, ys: number[]): { x: number; y: number }[] | null {
@@ -188,8 +218,99 @@ export class KimiPrimitive extends PrimitiveBase {
       }
     }
 
+    if (this.parts.patterns) this.drawPatterns(ctx, labels);
+    for (const h of this.parts.harmonics ? (this.data.harmonics ?? []) : []) this.drawHarmonic(ctx, h, labels);
+
     const f = this.parts.forecast ? this.data.forecast : null;
     if (f) this.drawForecast(ctx, f, width, labels);
+  }
+
+  private segment(ctx: CanvasRenderingContext2D, s: KimiSegment, color: string) {
+    const x1 = this.x(s.time_start);
+    const y1 = this.y(s.price_start);
+    const x2 = this.x(s.time_end);
+    const y2 = this.y(s.price_end);
+    if (x1 === null || y1 === null || x2 === null || y2 === null) return;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = s.width;
+    dash(ctx, s.style);
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  /** Chart patterns as the script draws them: outline and label (▲ after a break-out, greyed with ✕ once
+   *  invalidated), then each break-out's level (dashed) and measured-move target (dotted gold) with "BO▲ target". */
+  private drawPatterns(ctx: CanvasRenderingContext2D, labels: LabelRegistry | null) {
+    for (const p of this.data.patterns ?? []) {
+      const rgb = p.direction === "bullish" ? SUPPORT : RESIST;
+      for (const s of p.lines) this.segment(ctx, s, p.state === "failed" ? rgba(GRAY, 0.4) : rgba(rgb, 1));
+      this.patternLabel(ctx, p, labels);
+    }
+    for (const b of this.data.breakouts ?? []) {
+      const up = b.direction === "bullish";
+      const rgb = up ? SUPPORT : RESIST;
+      const span = { time_start: b.time, time_end: b.time_end };
+      this.segment(ctx, { ...span, price_start: b.price, price_end: b.price, width: 2, style: "dashed" }, rgba(rgb, 0.7));
+      this.segment(ctx, { ...span, price_start: b.target, price_end: b.target, width: 1, style: "dotted" }, rgba(GOLD, 1));
+      const x = this.x(b.time + 2 * INTERVAL_SECONDS[this.data.interval]);
+      const y = this.y(b.target);
+      if (x !== null && y !== null) pill(ctx, `BO${up ? "▲" : "▼"} ${formatPrice(b.target)}`, x, y, up, rgba(rgb, 0.9), labels);
+    }
+  }
+
+  private patternLabel(ctx: CanvasRenderingContext2D, p: KimiPattern, labels: LabelRegistry | null) {
+    const x = this.x(p.label_time);
+    const y = this.y(p.label_price);
+    if (x === null || y === null) return;
+    const bg = p.state === "failed" ? rgba(GRAY, 0.6) : rgba(p.direction === "bullish" ? SUPPORT : RESIST, 0.9);
+    pill(ctx, p.text, x, y, p.direction === "bullish", bg, labels);
+  }
+
+  /** A harmonic: XA and CD legs width 2, AB and BC width 1, X-D dashed, TP1/TP2 dotted gold with price labels;
+   *  grey once failed or expired, amber when compromised, TP1 bold gold once reached. Label under / over D. */
+  private drawHarmonic(ctx: CanvasRenderingContext2D, h: KimiHarmonic, labels: LabelRegistry | null) {
+    if (h.points.length < 5) return;
+    const up = h.direction === "bullish";
+    const dead = h.state === "failed" || h.state === "expired";
+    const amber = h.text.includes("⚠");
+    const rgb = up ? SUPPORT : RESIST;
+    const legColor = dead ? rgba(GRAY, 0.4) : amber ? rgba(AMBER, 0.75) : rgba(rgb, 1);
+    const leg = (a: number, b: number, width: number, style: KimiSegment["style"] = "solid"): KimiSegment => ({
+      time_start: h.points[a].time,
+      price_start: h.points[a].price,
+      time_end: h.points[b].time,
+      price_end: h.points[b].price,
+      width,
+      style,
+    });
+    this.segment(ctx, leg(0, 1, 2), legColor);
+    this.segment(ctx, leg(1, 2, 1), legColor);
+    this.segment(ctx, leg(2, 3, 1), legColor);
+    this.segment(ctx, leg(3, 4, 2), legColor);
+    this.segment(ctx, leg(0, 4, 1, "dashed"), dead || amber ? legColor : rgba(rgb, 0.45));
+
+    const d = h.points[4];
+    const reached = h.text.includes("✓");
+    const tpColor = dead || amber ? legColor : rgba(GOLD, 0.85);
+    for (const [name, price] of [["TP1", h.tp1], ["TP2", h.tp2]] as const) {
+      const hit = name === "TP1" && reached;
+      const line = { time_start: d.time, price_start: price, time_end: h.time_end, price_end: price };
+      this.segment(ctx, { ...line, width: hit ? 2 : 1, style: "dotted" }, hit ? rgba(GOLD, 0.9) : tpColor);
+      const xe = this.x(h.time_end);
+      const y = this.y(price);
+      if (xe !== null && y !== null) {
+        text(ctx, `${name}  ${formatPrice(price)}${hit ? " ✓" : ""}`, xe + 4, y, dead ? rgba(GRAY, 0.6) : rgba(GOLD, 1), labels);
+      }
+    }
+
+    const xd = this.x(d.time);
+    const yd = this.y(d.price);
+    if (xd === null || yd === null) return;
+    const bg = dead ? rgba(GRAY, 0.6) : amber ? rgba(AMBER, 0.8) : rgba(rgb, 0.9);
+    pill(ctx, h.text, xd, yd + (up ? 6 : -6), up, bg, labels);
   }
 
   private drawForecast(ctx: CanvasRenderingContext2D, f: KimiForecast, width: number, labels: LabelRegistry | null) {
@@ -265,6 +386,40 @@ function text(ctx: CanvasRenderingContext2D, s: string, x: number, y: number, co
   ctx.strokeText(s, x, y + 0.5);
   ctx.fillStyle = color;
   ctx.fillText(s, x, y + 0.5);
+}
+
+/** label.style_label_up / _down: a pill centred on x, below (up) or above the point with a small pointer towards
+ *  it, white text. */
+function pill(
+  ctx: CanvasRenderingContext2D,
+  s: string,
+  x: number,
+  y: number,
+  up: boolean,
+  bg: string,
+  labels: LabelRegistry | null,
+) {
+  ctx.font = FONT;
+  const w = ctx.measureText(s).width + 10;
+  const h = 16;
+  const left = x - w / 2;
+  let mid = up ? y + 5 + h / 2 : y - 5 - h / 2;
+  if (labels) mid = labels.place(left, mid, w, h);
+  const edge = up ? mid - h / 2 : mid + h / 2;
+  ctx.fillStyle = bg;
+  ctx.beginPath();
+  ctx.moveTo(x - 4, edge);
+  ctx.lineTo(x, up ? edge - 4 : edge + 4);
+  ctx.lineTo(x + 4, edge);
+  ctx.closePath();
+  ctx.fill();
+  ctx.beginPath();
+  ctx.roundRect(left, mid - h / 2, w, h, 3);
+  ctx.fill();
+  ctx.fillStyle = "#ffffff";
+  ctx.textBaseline = "middle";
+  ctx.textAlign = "left";
+  ctx.fillText(s, left + 5, mid + 0.5);
 }
 
 /** Multi-line label right of (x, y), pointing at it like label.style_label_left; moved inside the pane when the

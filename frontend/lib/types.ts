@@ -548,6 +548,68 @@ export interface KimiForecast {
   next_candle: { direction: "up" | "down"; right_pct: number | null; calls: number } | null;
 }
 
+/** One line of a Kimi pattern drawing; times past the last candle are future candles on the chart's grid. */
+export interface KimiSegment {
+  time_start: number;
+  price_start: number;
+  time_end: number;
+  price_end: number;
+  width: number;
+  style: "solid" | "dashed" | "dotted";
+}
+
+export interface KimiPattern {
+  /** Triple Top, Head & Shoulders, Double Bottom, Falling Wedge, Bull Flag, ... */
+  name: string;
+  /** The chart label: "2B", "2B ▲" after a break-out, "2B ✕" once invalidated. */
+  text: string;
+  direction: "bullish" | "bearish";
+  time: number;
+  /** watching = tracked for a break-out; formed = drawn but never tracked. */
+  state: "watching" | "breakout" | "failed" | "formed";
+  label_time: number;
+  label_price: number;
+  lines: KimiSegment[];
+  breakout_level: number | null;
+  invalidation: number | null;
+  end_time: number | null;
+  breakout_price: number | null;
+  target: number | null;
+}
+
+/** A pattern break-out: its level and measured-move target lines. */
+export interface KimiBreakout {
+  name: string;
+  direction: "bullish" | "bearish";
+  time: number;
+  time_end: number;
+  price: number;
+  target: number;
+}
+
+export interface KimiHarmonic {
+  /** Gartley, Bat, Butterfly, Crab, Deep Crab, Alt Bat, Shark, 5-0, Three Drives, AB=CD */
+  name: string;
+  /** The chart label: "Gart ▲ ★2", then ⚠ / ✕ / ⋯ / ✓. */
+  text: string;
+  direction: "bullish" | "bearish";
+  time: number;
+  state: "active" | "failed" | "tp1" | "expired" | "compromised";
+  points: { label: "X" | "A" | "B" | "C" | "D"; time: number; price: number }[];
+  prz_low: number;
+  prz_high: number;
+  prz_shown: boolean;
+  /** Right end of the PRZ box and the TP lines. */
+  time_end: number;
+  tp1: number;
+  tp2: number;
+  tp_basis: string;
+  invalidation: number;
+  prz_tier: number;
+  end_time: number | null;
+  ratios: Record<string, number | null>;
+}
+
 export interface KimiRow {
   label: string;
   value: string;
@@ -565,6 +627,9 @@ export interface KimiResult {
   fib: KimiFib | null;
   signals: KimiSignal[];
   forecast: KimiForecast | null;
+  patterns: KimiPattern[];
+  breakouts: KimiBreakout[];
+  harmonics: KimiHarmonic[];
   verify: KimiRow[];
   stats: KimiRow[];
   notes: string[];

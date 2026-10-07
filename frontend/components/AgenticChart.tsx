@@ -100,9 +100,11 @@ export interface KimiVisibility {
   fib: boolean;
   forecast: boolean;
   signals: boolean;
+  patterns: boolean;
+  harmonics: boolean;
 }
 
-const ALL_KIMI: KimiVisibility = { sr: true, fib: true, forecast: true, signals: true };
+const ALL_KIMI: KimiVisibility = { sr: true, fib: true, forecast: true, signals: true, patterns: true, harmonics: true };
 
 interface Props {
   symbol: string;
@@ -1109,7 +1111,7 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [kimiOn, props.symbol, props.interval, kimiTick]);
 
-  const kimiPartsKey = `${kimiParts.sr}${kimiParts.fib}${kimiParts.forecast}${kimiParts.signals}`;
+  const kimiPartsKey = `${kimiParts.sr}${kimiParts.fib}${kimiParts.forecast}${kimiParts.signals}${kimiParts.patterns}${kimiParts.harmonics}`;
   useEffect(() => {
     const series = candleRef.current;
     if (!series) return;

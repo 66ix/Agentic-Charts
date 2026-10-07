@@ -215,6 +215,8 @@ export default function ChartWorkspace() {
       fib: isVisible(visibility, "kimiFib"),
       forecast: isVisible(visibility, "kimiForecast"),
       signals: isVisible(visibility, "kimiSignals"),
+      patterns: isVisible(visibility, "kimiPatterns"),
+      harmonics: isVisible(visibility, "kimiHarmonics"),
     }),
     [visibility],
   );
@@ -363,6 +365,8 @@ export default function ChartWorkspace() {
       kimiSignals: kimi,
       sessions: indicators.sessions && !isCustom(symbol) ? 1 : 0,
       heatmap: indicators.heatmap && !isCustom(symbol) ? 1 : 0,
+      kimiPatterns: kimi,
+      kimiHarmonics: kimi,
     };
   }, [composed.counts, drawings.length, compare.length, indicators.kimi, indicators.sessions, indicators.heatmap, symbol]);
 

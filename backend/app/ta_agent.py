@@ -674,6 +674,29 @@ def _kimi_lines(k: dict) -> list[str]:
         s = k["recent_signals"][-1]
         out.append(f"Last signal {s['label']} ({s['direction']}) at {_fmt(s['price'])}, {s['bars_ago']} bars ago, "
                    f"{s['result']}.")
+    out += _kimi_pattern_lines(k)
+    return out
+
+
+def _kimi_pattern_lines(k: dict) -> list[str]:
+    """Kimi's chart patterns still in play (or just broken out) and its newest harmonic."""
+    out = []
+    for p in reversed(k.get("chart_patterns", [])):
+        if p["state"] == "watching":
+            side = "above" if p["direction"] == "bullish" else "below"
+            out.append(f"{p['pattern']} ({p['direction']}, formed {p['formed_bars_ago']} bars ago): breaks out on a "
+                       f"close {side} {_fmt(p['breakout_level'])}, invalid past {_fmt(p['invalidation'])}.")
+        elif p["state"] == "breakout" and p.get("target") is not None:
+            out.append(f"{p['pattern']} broke out at {_fmt(p['broke_out_at'])}, measured-move target "
+                       f"{_fmt(p['target'])}.")
+        if len(out) == 2:
+            break
+    if k.get("harmonics"):
+        h = k["harmonics"][-1]
+        out.append(f"Harmonic: {h['direction']} {h['pattern']} ({h['state']}), D {_fmt(h['d'])} "
+                   f"{h['completed_bars_ago']} bars ago, PRZ {_fmt(h['prz'][0])}–{_fmt(h['prz'][1])} "
+                   f"(confluence {h['prz_confluence']}), TP1 {_fmt(h['tp1'])}, TP2 {_fmt(h['tp2'])}, "
+                   f"invalid past {_fmt(h['invalidation'])}.")
     return out
 
 

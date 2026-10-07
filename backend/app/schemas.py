@@ -564,6 +564,71 @@ class KimiRow(BaseModel):
     tone: Optional[Literal["up", "down", "mute"]] = None
 
 
+class KimiSegment(BaseModel):
+    """One line of a pattern drawing; times past the last candle are future candles on the chart's grid."""
+    time_start: int
+    price_start: float
+    time_end: int
+    price_end: float
+    width: int = 1
+    style: Literal["solid", "dashed", "dotted"] = "solid"
+
+
+class KimiPattern(BaseModel):
+    """A structural chart pattern as the script draws it (outline + label), with its break-out tracking."""
+    name: str = Field(..., description="Triple Top, Head & Shoulders, Double Bottom, Falling Wedge, Bull Flag, ...")
+    text: str = Field(..., description="The chart label: '2B', '2B ▲' after a break-out, '2B ✕' once invalidated")
+    direction: Literal["bullish", "bearish"]
+    time: int = Field(..., description="The candle it formed on")
+    state: Literal["watching", "breakout", "failed", "formed"] = Field(
+        ..., description="watching = tracked for a break-out; formed = drawn but never tracked (born broken)")
+    label_time: int
+    label_price: float
+    lines: list[KimiSegment]
+    breakout_level: Optional[float] = Field(None, description="Watching: the break-out line on the last candle")
+    invalidation: Optional[float] = Field(None, description="Watching: the invalidation line on the last candle")
+    end_time: Optional[int] = Field(None, description="The candle that broke it out or invalidated it")
+    breakout_price: Optional[float] = None
+    target: Optional[float] = Field(None, description="Measured-move target of the break-out")
+
+
+class KimiBreakout(BaseModel):
+    """A break-out's level and measured-move target lines and its 'BO▲ target' label."""
+    name: str
+    direction: Literal["bullish", "bearish"]
+    time: int
+    time_end: int
+    price: float
+    target: float
+
+
+class KimiPoint(BaseModel):
+    label: Literal["X", "A", "B", "C", "D"]
+    time: int
+    price: float
+
+
+class KimiHarmonic(BaseModel):
+    """An XABCD harmonic pattern with its PRZ box and TP1/TP2 projections."""
+    name: str = Field(..., description="Gartley, Bat, Butterfly, Crab, Deep Crab, Alt Bat, Shark, 5-0, Three Drives, AB=CD")
+    text: str = Field(..., description="The chart label: 'Gart ▲ ★2', then ⚠ / ✕ / ⋯ / ✓")
+    direction: Literal["bullish", "bearish"]
+    time: int = Field(..., description="The candle D confirmed on")
+    state: Literal["active", "failed", "tp1", "expired", "compromised"]
+    points: list[KimiPoint]
+    prz_low: float
+    prz_high: float
+    prz_shown: bool = Field(..., description="The PRZ box stays while the pattern is active or compromised")
+    time_end: int = Field(..., description="Right end of the PRZ box and TP lines")
+    tp1: float
+    tp2: float
+    tp_basis: str
+    invalidation: float
+    prz_tier: int = Field(..., description="PRZ cross-confluence: S/R, golden pocket, divergence at D (0-3)")
+    end_time: Optional[int] = None
+    ratios: dict[str, Optional[float]] = Field(default_factory=dict)
+
+
 class KimiResponse(BaseModel):
     symbol: str
     interval: str
@@ -575,6 +640,9 @@ class KimiResponse(BaseModel):
     fib: Optional[KimiFib] = None
     signals: list[KimiSignal] = Field(..., description="The labels on the chart, oldest first")
     forecast: Optional[KimiForecast] = None
+    patterns: list[KimiPattern] = Field(default_factory=list, description="Chart patterns on the chart, oldest first")
+    breakouts: list[KimiBreakout] = Field(default_factory=list, description="Pattern break-out targets, oldest first")
+    harmonics: list[KimiHarmonic] = Field(default_factory=list, description="Harmonic patterns, oldest first")
     verify: list[KimiRow]
     stats: list[KimiRow]
     notes: list[str] = Field(default_factory=list)
