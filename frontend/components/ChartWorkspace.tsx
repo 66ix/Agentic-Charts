@@ -8,7 +8,7 @@ import { useAlerts, type FiredAlert, type SignalFired } from "@/hooks/useAlerts"
 import { useIsMobile } from "@/hooks/useMediaQuery";
 import { readStored, usePersistentState, writeStored } from "@/hooks/usePersistentState";
 import { useUndo } from "@/hooks/useUndo";
-import { alertFromDrawing, alertOverlays } from "@/lib/alerts";
+import { alertFromDrawing, alertOverlays, chartZones } from "@/lib/alerts";
 import { analyze } from "@/lib/api";
 import { DEFAULT_INTERVAL, DEFAULT_SYMBOL } from "@/lib/config";
 import { isCustom } from "@/lib/customSymbols";
@@ -39,6 +39,7 @@ import type {
   LayoutState,
   Overlay,
   ToolId,
+  TriggerInterval,
 } from "@/lib/types";
 import { CURRENT_WORKSPACE_KEY, saveWorkspace, WORKSPACES_KEY, type SavedWorkspace } from "@/lib/workspaces";
 
@@ -341,7 +342,7 @@ export default function ChartWorkspace() {
   }, []);
   const onSignalFired = useCallback((f: SignalFired) => setToasts((t) => [...t, signalToast(uid(), f)].slice(-4)), []);
   const alertsApi = useAlerts(onAlertsFired, onSignalFired);
-  const { alerts, add: addAlerts, update: updateAlert } = alertsApi;
+  const { alerts, add: addAlerts, update: updateAlert, addTrigger } = alertsApi;
   const armedAlerts = alerts.filter((a) => a.armed).length;
   const alertOverlaysFor = useCallback((s: string) => alertOverlays(alerts, s), [alerts]);
 
@@ -423,13 +424,14 @@ export default function ChartWorkspace() {
         if (Object.keys(res.indicators ?? {}).length) setIndicators((ind) => ({ ...ind, ...res.indicators }));
         if (prompt) setLastIntent(res.intent);
         addAlerts(res.alerts ?? [], res.symbol);
+        for (const t of res.trigger_alerts ?? []) void addTrigger(t);
         const answer: AgentMessage = {
           id: uid(),
           role: "agent",
           text: opts.silent ? `Auto-detected levels. ${res.summary}` : res.summary,
           overlays: res.overlays,
           meta: engineNote(res),
-          alerts: res.alerts?.length || undefined,
+          alerts: (res.alerts?.length ?? 0) + (res.trigger_alerts?.length ?? 0) || undefined,
           plan: res.plan ?? undefined,
           scan: res.scan?.length ? res.scan : undefined,
           steps: res.steps?.length ? res.steps : undefined,
@@ -449,7 +451,7 @@ export default function ChartWorkspace() {
         if (analysisCtrl.current === ctrl) setBusy(false);
       }
     },
-    [symbol, interval, activeChart, setMessages, changeOverlays, setLastIntent, addAlerts, setCell, setIndicators],
+    [symbol, interval, activeChart, setMessages, changeOverlays, setLastIntent, addAlerts, addTrigger, setCell, setIndicators],
   );
 
   // Auto-detect levels on load, unless this chart already has saved AI overlays.
@@ -662,6 +664,26 @@ export default function ChartWorkspace() {
     }
   }, []);
 
+  /** "Alert on 5m confirmation" on a plan card: a trigger alert on the plan's entry zone. */
+  const planTrigger = useCallback(
+    async (m: AgentMessage, tf: TriggerInterval) => {
+      const plan = m.plan;
+      if (!plan || !m.symbol || plan.zone_low == null || plan.zone_high == null) return false;
+      const made = await addTrigger({
+        symbol: m.symbol,
+        interval: tf,
+        zone: {
+          source: "fixed", price_low: plan.zone_low, price_high: plan.zone_high, direction: plan.direction,
+          label: plan.basis.slice(0, 120),
+        },
+        confirm: "any",
+      });
+      return made != null;
+    },
+    [addTrigger],
+  );
+  const triggerZones = useMemo(() => chartZones(overlays, drawings, selectedId), [overlays, drawings, selectedId]);
+
   const dockProps: DockPanelProps = { symbol, interval, price, watchlist, onPickSymbol: pickSymbol, onChartOverlays };
   const tabs: DockTab[] = [
     {
@@ -684,6 +706,7 @@ export default function ChartWorkspace() {
           onPickSymbol={setSymbol}
           onTogglePin={togglePin}
           onLogTrade={logTrade}
+          onPlanTrigger={planTrigger}
         />
       ),
     },
@@ -726,7 +749,7 @@ export default function ChartWorkspace() {
       icon: Bell,
       badge: armedAlerts,
       render: () => (
-        <AlertsPanel {...dockProps} api={alertsApi} />
+        <AlertsPanel {...dockProps} api={alertsApi} zones={triggerZones} />
       ),
     },
     {

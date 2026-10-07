@@ -113,6 +113,8 @@ export interface AnalysisIntent {
   trade_plan: "long" | "short" | "auto" | null;
   indicators_on: string[];
   indicators_off: string[];
+  /** "Alert me when 1m shows a CHoCH inside the 4h demand". */
+  zone_trigger?: ZoneTriggerIntent | null;
 }
 
 export interface Navigate {
@@ -135,6 +137,9 @@ export interface TradePlan {
   basis: string;
   risk_pct: number;
   notes: string[];
+  /** The zone the entry is built on, when there is one. */
+  zone_low?: number | null;
+  zone_high?: number | null;
 }
 
 /** One coin's row in a watchlist scan. Mirrors ScanResult in schemas.py. */
@@ -178,6 +183,44 @@ export interface AlertSpec {
   /** ms; the alert disarms itself (expired) after this. */
   expires_at?: number | null;
   note?: string;
+}
+
+// Zone trigger alerts: a lower-timeframe confirmation inside a higher-timeframe zone. Mirrors schemas.py.
+export type TriggerInterval = "1m" | "5m" | "15m";
+export type Confirmation = "choch" | "sweep" | "engulfing" | "any";
+export type TriggerZoneKind = "demand" | "supply" | "support" | "resistance" | "any";
+
+/** Fixed prices (a zone picked on the chart, a plan's zone), or the nearest `kind` the detectors find on
+ *  `timeframe`, looked up again whenever that timeframe closes. */
+export interface TriggerZone {
+  source: "fixed" | "detected";
+  price_low?: number | null;
+  price_high?: number | null;
+  /** The way the confirmation must point; a fixed zone without one takes it from where price is. */
+  direction?: "long" | "short" | null;
+  timeframe?: Interval | null;
+  kind?: TriggerZoneKind;
+  /** Detected demand/supply: skip zones tested more than once (default true). */
+  fresh_only?: boolean;
+  label?: string;
+}
+
+export interface ZoneTriggerSpec {
+  symbol: string;
+  interval: TriggerInterval;
+  zone: TriggerZone;
+  confirm?: Confirmation;
+  /** At most one fire per this many minutes (default 60). */
+  cooldown_min?: number;
+  repeat?: boolean;
+  note?: string;
+}
+
+export interface ZoneTriggerIntent {
+  timeframe: TriggerInterval;
+  confirm: Confirmation;
+  zone_kind: TriggerZoneKind;
+  zone_timeframe: Interval | null;
 }
 
 /** A price alert stored and evaluated by the backend. Mirrors PriceAlert in schemas.py. */
@@ -225,6 +268,8 @@ export interface AnalyzeResponse {
   scan: ScanResult[];
   plan: TradePlan | null;
   steps: string[];
+  /** Zone trigger alerts the client should arm (POST /api/zone-triggers). */
+  trigger_alerts?: ZoneTriggerSpec[];
   generated_at: string;
 }
 

@@ -45,7 +45,7 @@ from .market_metrics import MarketMetricsService
 from .ratelimit import RateLimitMiddleware
 from .scanner import WatchlistCache, tickers
 from .schemas import (INTERVALS, AnalyzeRequest, AnalyzeResponse, CreateAlertsRequest, KimiResponse, MarketMetrics,
-                      ScanResult)
+                      ScanResult, ZoneTriggerSpec)
 from .signal_alerts import SIGNALS, CreateSignalAlertsRequest, SignalAlertPatch, SignalAlertService
 from .stream_hub import StreamHub
 
@@ -255,6 +255,34 @@ async def preview_signal_alert(request: Request, symbol: str = Query(...), inter
     try:
         return await request.app.state.signal_alerts.preview(_norm_symbol(symbol), _check_interval(interval),
                                                              signal, bars)
+    except MarketDataError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+# Zone trigger alerts (zone_triggers.py) are signal alerts with signal "zone_trigger": listed, edited and deleted
+# with the routes above.
+#   POST   /api/zone-triggers             ZoneTriggerSpec → {alert}
+#   POST   /api/zone-triggers/preview     ZoneTriggerSpec, ?bars= → {zone, hits: [{time, price, text, stop}], note?}
+
+
+@app.post("/api/zone-triggers")
+async def create_zone_trigger(spec: ZoneTriggerSpec, request: Request) -> dict:
+    try:
+        alert = await request.app.state.signal_alerts.add_trigger(spec)
+    except MarketDataError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"alert": alert.model_dump()}
+
+
+@app.post("/api/zone-triggers/preview")
+async def preview_zone_trigger(spec: ZoneTriggerSpec, request: Request,
+                               bars: int = Query(300, ge=10, le=1000)) -> dict:
+    try:
+        return await request.app.state.signal_alerts.preview_trigger(spec, bars)
     except MarketDataError as exc:
         raise HTTPException(502, str(exc)) from exc
     except ValueError as exc:

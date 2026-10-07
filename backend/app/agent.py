@@ -37,10 +37,12 @@ from .schemas import (
     BoxOverlay,
     HorizontalLineOverlay,
     Navigate,
+    ZoneTriggerSpec,
     is_custom_symbol,
 )
-from .ta_agent import _fmt, analyze, describe, higher_timeframes, rgba
+from .ta_agent import ORANGE, TEAL, _fmt, analyze, describe, higher_timeframes, rgba
 from .trade_plan import build_plan, plan_overlays
+from .zone_triggers import describe_trigger, detect_now, spec_from_intent
 
 CUSTOM_COLOR = "#a78bfa"
 INDICATOR_NAMES = {"kimi": "Kimi Cooked", "ema20": "EMA 20", "ema50": "EMA 50", "psar": "Parabolic SAR",
@@ -358,9 +360,12 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
             for ov in plan_ovs:
                 ov.id = _new_id()
     custom = custom_overlays(intent)
+    triggers, trigger_lines = await _trigger_alerts(intent, market, symbol, tf, custom_chart, custom)
     new = result.overlays + plan_ovs + custom
     if plan_ovs:  # a new plan replaces the previous one
         existing = [o for o in existing if (o.kind or "") not in TARGET_KINDS["plan"]]
+    if triggers and any(o.kind == "trigger_zone" for o in custom):  # so does a new trigger zone
+        existing = [o for o in existing if (o.kind or "") != "trigger_zone"]
     overlays, removed = merge_overlays(existing, new, run_intent)
     alerts = build_alerts(intent, overlays, new)
 
@@ -383,7 +388,7 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
     if navigate:
         nav.append(f"Switched the chart to {navigate.symbol} {navigate.interval}.")
     toggles = {**{k: True for k in intent.indicators_on}, **{k: False for k in intent.indicators_off}}
-    actions = _action_lines(intent, custom, removed, alerts)
+    actions = _action_lines(intent, [o for o in custom if o.kind != "trigger_zone"], removed, alerts) + trigger_lines
     show_kimi = want_kimi and "kimi" not in toggles  # asked about it: show it on the chart too, quietly
     if toggles:
         on = [INDICATOR_NAMES.get(k, k.upper()) for k, v in toggles.items() if v]
@@ -414,4 +419,25 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         scan=rows[:10],
         plan=plan,
         steps=steps,
+        trigger_alerts=triggers,
     )
+
+
+async def _trigger_alerts(intent: AnalysisIntent, market: MarketData, symbol: str, tf: str, custom_chart: bool,
+                          drawn: list) -> tuple[list[ZoneTriggerSpec], list[str]]:
+    """"Alert me when 1m shows a CHoCH inside the 4h demand" → the trigger alert for the client to arm, and the
+    action line naming the zone it watches now. That zone is also drawn (appended to `drawn`)."""
+    zt = intent.zone_trigger
+    if zt is None:
+        return [], []
+    if custom_chart:
+        return [], ["Trigger alerts need a Binance pair, not a ratio or index chart."]
+    spec = spec_from_intent(zt, symbol, tf)
+    found = await _guarded(detect_now(market, symbol, spec.zone), "trigger zone")
+    band = found[0] if found else None
+    if band is not None:
+        color = TEAL if band.direction == "long" else ORANGE
+        drawn.append(BoxOverlay(id=_new_id(), kind="trigger_zone", label=f"{band.label} (trigger zone)",
+                                price_low=band.low, price_high=band.high, color=rgba(color, 0.14),
+                                border_color=rgba(color, 0.8)))
+    return [spec], [f"Set a trigger alert: {describe_trigger(spec, band)}."]

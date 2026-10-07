@@ -1,5 +1,6 @@
 """Signal alerts: "tell me when Kimi prints B+ on BTC 4h", "when RSI diverges on any watchlist coin", "when price
-sweeps the H4 low and closes back inside", "when a new fresh demand zone forms".
+sweeps the H4 low and closes back inside", "when a new fresh demand zone forms", and trigger alerts: "when 1m shows a
+CHoCH inside the 4h demand" (signal `zone_trigger`, detection in zone_triggers.py).
 
 A signal alert watches one coin on one timeframe for one detector event. Signals are judged on closed candles
 only, so a wick that is still forming never fires one: for every (symbol, interval) with armed alerts the service
@@ -10,6 +11,10 @@ signal happened on the candle that just closed. An alert never fires twice for t
 
 Detection is the pure function `detect`; `scan_history` replays it bar by bar for the preview ("when would this
 have fired recently?"), each bar seeing only the candles up to it, exactly as the live check would have.
+
+A trigger alert watches its lower timeframe the same way; its zone is fixed, or looked up again on the higher
+timeframe whenever that closes (cached per coin, timeframe and kind until then), and it fires once per touch of
+the zone with a cooldown.
 
 A fire goes to the alert history, `/ws/alerts` listeners ({type: "signal_fired"} and a fresh
 {type: "signal_snapshot"}) and Telegram / Discord through AlertService. Candles from the synthetic fallback feed
@@ -35,10 +40,12 @@ from .alerts import AlertService, fmt_price, read_store, store_path, write_store
 from .config import Settings, get_settings
 from .indicators import rsi, rsi_divergence, structure_breaks
 from .kimi_service import closed_only
-from .market_data import MarketData, candles_to_df
+from .market_data import INTERVAL_SECONDS, MarketData, candles_to_df
 from .patterns import liquidity_sweeps
-from .schemas import Interval, KimiSignal, norm_symbol
+from .schemas import Interval, KimiSignal, TriggerZone, ZoneTriggerSpec, norm_symbol
 from .ta_agent import TF_LABEL, atr, find_swings, supply_demand_zones
+from .zone_triggers import (TriggerHit, ZoneBand, ZoneTrigger, detect_now, fixed_band, scan_triggers, trigger_hit,
+                            zone_phrase)
 
 if TYPE_CHECKING:
     from .kimi_service import KimiService
@@ -47,7 +54,8 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 SignalId = Literal["kimi_buy", "kimi_sell", "kimi_any", "rsi_bull_div", "rsi_bear_div", "sweep_low", "sweep_high",
-                   "new_demand", "new_supply", "bos_bull", "bos_bear", "rsi_overbought", "rsi_oversold"]
+                   "new_demand", "new_supply", "bos_bull", "bos_bear", "rsi_overbought", "rsi_oversold",
+                   "zone_trigger"]
 SIGNAL_IDS: tuple[str, ...] = get_args(SignalId)
 
 
@@ -75,6 +83,8 @@ SIGNALS: dict[str, SignalInfo] = {
                            "A candle closes below the last swing low (break of structure or change of character)"),
     "rsi_overbought": SignalInfo("RSI crosses above 70", "RSI moves up into overbought"),
     "rsi_oversold": SignalInfo("RSI crosses below 30", "RSI moves down into oversold"),
+    "zone_trigger": SignalInfo("Zone trigger", "A lower timeframe (1m/5m/15m) confirms inside a higher-timeframe zone: "
+                                               "a CHoCH / BOS, a liquidity sweep or an engulfing close"),
 }
 KIMI_SIGNALS = frozenset({"kimi_buy", "kimi_sell", "kimi_any"})
 KIMI_LABELS = {"kimi_buy": {"B+"}, "kimi_sell": {"B-"}}
@@ -85,6 +95,7 @@ MAX_SIGNAL_ALERTS = 200
 CLOSE_DELAY = 2.0     # seconds to let Binance settle the closed candle before fetching it
 RETRY_DELAY = 6.0     # longer than MarketData's 5 s klines cache, so a retry sees new data
 RETRIES = 4
+ZONE_RETRY = 30.0     # seconds before looking up a detected zone again when the higher timeframe lags
 
 
 # ----------------------------------------------------------------- models --
@@ -107,6 +118,8 @@ class SignalAlert(BaseModel):
     last_text: str = ""
     last_price: Optional[float] = None
     last_key: Optional[str] = Field(None, description="The event it last fired on, so it never fires twice")
+    trigger: Optional[ZoneTrigger] = Field(None, description="Signal zone_trigger: the zone and the confirmation")
+    last_stop: Optional[float] = Field(None, description="Zone triggers: the suggested stop of the last fire")
 
 
 class CreateSignalAlertsRequest(BaseModel):
@@ -184,6 +197,8 @@ def detect(signal: str, frame: Frame, prev: Optional[Frame] = None,
     chart (needed for the kimi_* signals)."""
     if signal in KIMI_SIGNALS:
         return _kimi_hit(signal, frame.time, kimi or [])
+    if signal == "zone_trigger":
+        return None  # each trigger alert has its own zone: SignalAlertService._trigger_hit
     if frame.n < MIN_BARS:
         return None
     t, close, n = frame.time, frame.close, frame.n
@@ -305,6 +320,8 @@ class SignalAlertService:
         self._tasks: set[asyncio.Task] = set()
         self._lock = asyncio.Lock()
         self._preview_sem = asyncio.Semaphore(1)       # previews are CPU-bound: one at a time
+        # Detected trigger zones per (symbol, timeframe, kind, fresh_only) → (look again after, zone or None).
+        self._zones: dict[tuple, tuple[float, Optional[ZoneBand]]] = {}
         self._closed = False
         self._load()
         alerts.add_snapshot_provider(self._snapshot)
@@ -337,6 +354,8 @@ class SignalAlertService:
         armed again with the new repeat / note, instead of a duplicate. Raises ValueError for bad input."""
         if signal not in SIGNALS:
             raise ValueError(f"signal must be one of {', '.join(SIGNAL_IDS)}")
+        if signal == "zone_trigger":
+            raise ValueError("create zone triggers with POST /api/zone-triggers")
         if interval not in get_args(Interval):
             raise ValueError(f"interval must be one of {', '.join(get_args(Interval))}")
         syms: list[str] = []
@@ -390,8 +409,8 @@ class SignalAlertService:
     async def preview(self, symbol: str, interval: str, signal: str, bars: int = 300) -> dict:
         """When `signal` would have fired on the last `bars` closed candles → {symbol, interval, signal, name,
         bars, data_source, hits: [{time, price, text}] newest first, note?}."""
-        if signal not in SIGNALS:
-            raise ValueError(f"signal must be one of {', '.join(SIGNAL_IDS)}")
+        if signal not in SIGNALS or signal == "zone_trigger":
+            raise ValueError(f"signal must be one of {', '.join(SIGNAL_IDS[:-1])}")
         bars = max(10, min(bars, 1000))
         out: dict = {"symbol": symbol, "interval": interval, "signal": signal, "name": SIGNALS[signal].name,
                      "bars": bars}
@@ -414,6 +433,125 @@ class SignalAlertService:
             hits = await asyncio.to_thread(scan_history, signal, candles_to_df(closed), bars, kimi)
         out["hits"] = [{"time": h.time, "price": h.price, "text": h.text} for h in reversed(hits)]
         return out
+
+    # ---------------------------------------------------- trigger alerts
+    async def add_trigger(self, spec: ZoneTriggerSpec) -> SignalAlert:
+        """A zone trigger alert (zone_triggers.py). The same coin, timeframe, zone and confirmation again re-arms
+        the existing alert with the new cooldown, repeat and note instead of adding a duplicate. A fixed zone
+        without a direction takes it from where price is (below price = long). Raises ValueError for bad input."""
+        sym = spec.symbol
+        if not (sym.isalnum() and 5 <= len(sym) <= 20):
+            raise ValueError(f"Invalid symbol {sym!r}")
+        zone = spec.zone
+        if zone.source == "detected":
+            if INTERVAL_SECONDS[zone.timeframe or "4h"] <= INTERVAL_SECONDS[spec.interval]:
+                raise ValueError("the zone's timeframe must be higher than the trigger's")
+        elif zone.direction is None:
+            zone = zone.model_copy(update={"direction": await self._side_of(sym, spec.interval, zone)})
+        trig = ZoneTrigger(zone=zone, confirm=spec.confirm, cooldown_min=spec.cooldown_min)
+        if zone.source == "fixed":
+            band = fixed_band(zone)
+            trig = trig.model_copy(update={"zone_low": band.low, "zone_high": band.high, "zone_label": band.label})
+        same = next((a for a in self._alerts.values() if a.trigger is not None and a.symbol == sym
+                     and a.interval == spec.interval and a.trigger.confirm == spec.confirm
+                     and a.trigger.zone.model_dump(exclude={"label"}) == zone.model_dump(exclude={"label"})), None)
+        if same is None and len(self._alerts) >= MAX_SIGNAL_ALERTS:
+            raise ValueError(f"At most {MAX_SIGNAL_ALERTS} signal alerts; delete some first")
+        note = spec.note.strip()[:500]
+        if same is not None:
+            kept = same.trigger if zone.source == "detected" and same.trigger else trig
+            a = same.model_copy(update={"armed": True, "repeat": spec.repeat, "note": note,
+                                        "trigger": kept.model_copy(update={"cooldown_min": spec.cooldown_min})})
+        else:
+            a = SignalAlert(id=uuid.uuid4().hex[:10], symbol=sym, interval=spec.interval, signal="zone_trigger",
+                            repeat=spec.repeat, note=note, created_at=int(time.time() * 1000), trigger=trig)
+        self._alerts[a.id] = a
+        self._changed()
+        await self._sync()
+        return a
+
+    async def _side_of(self, symbol: str, interval: str, zone: TriggerZone) -> str:
+        candles, _ = await self.market.get_klines(symbol, interval, 2)
+        if not candles:
+            raise ValueError("No price for this coin; choose long or short")
+        last = candles[-1].close
+        if (zone.price_low or 0) <= last <= (zone.price_high or 0):
+            raise ValueError("Price is inside this zone: choose long (demand) or short (supply)")
+        return "long" if last > (zone.price_high or 0) else "short"
+
+    async def preview_trigger(self, spec: ZoneTriggerSpec, bars: int = 300) -> dict:
+        """When the trigger would have fired on the last `bars` closed candles of its timeframe → {symbol,
+        interval, name, zone: {low, high, label, direction} | null, bars, data_source, hits: [{time, price, text,
+        stop}] newest first, note?}. A detected zone is replayed as it is now."""
+        bars = max(10, min(bars, 1000))
+        out: dict = {"symbol": spec.symbol, "interval": spec.interval, "name": SIGNALS["zone_trigger"].name,
+                     "bars": bars, "zone": None, "hits": []}
+        notes: list[str] = []
+        zone = spec.zone
+        if zone.source == "detected":
+            band, source, _ = await detect_now(self.market, spec.symbol, zone)
+            if band is None:
+                out.update(data_source=source, note=f"No {zone_phrase(zone).removeprefix('the ')} right now.")
+                return out
+            notes.append("Replayed on the zone the detectors find now; before it formed the alert would have "
+                         "watched another one.")
+        else:
+            if zone.direction is None:
+                zone = zone.model_copy(update={"direction": await self._side_of(spec.symbol, spec.interval, zone)})
+            band = fixed_band(zone)
+        out["zone"] = {"low": band.low, "high": band.high, "label": band.label, "direction": band.direction}
+        candles, source = await self.market.get_klines(spec.symbol, spec.interval, min(bars + WINDOW + 2, 5000))
+        closed = closed_only(candles, spec.interval)
+        out["data_source"] = source
+        if source == "synthetic":
+            notes.insert(0, "Demo data: these candles are synthetic, not the live market.")
+        async with self._preview_sem:
+            hits = await asyncio.to_thread(scan_triggers, candles_to_df(closed), band, spec.confirm, bars,
+                                           spec.cooldown_min * 60, spec.interval)
+        out["hits"] = [{"time": h.time, "price": h.price, "text": h.text, "stop": h.stop} for h in reversed(hits)]
+        if notes:
+            out["note"] = " ".join(notes)
+        return out
+
+    async def _trigger_zone(self, symbol: str, tr: ZoneTrigger) -> tuple[Optional[ZoneBand], bool]:
+        """The zone a trigger watches now: fixed, or the detected one, looked up again after each close of its
+        timeframe → (zone or None, whether that is a real answer rather than "could not look")."""
+        z = tr.zone
+        if z.source == "fixed":
+            return fixed_band(z), True
+        key = (symbol, z.timeframe, z.kind, z.fresh_only)
+        cached = self._zones.get(key)
+        now = time.time()
+        if cached and cached[0] > now:
+            return cached[1], True
+        try:
+            band, source, last_closed = await detect_now(self.market, symbol, z)
+        except Exception as exc:
+            log.info("Trigger zone %s %s %s unavailable: %s", symbol, z.timeframe, z.kind, exc)
+            return (cached[1], True) if cached else (None, False)
+        if source == "synthetic" and self.s.data_source != "synthetic":
+            return None, False
+        nxt = last_closed + 2 * INTERVAL_SECONDS[z.timeframe or "4h"] + self.close_delay
+        self._zones[key] = (nxt if nxt > now else now + ZONE_RETRY, band)
+        return band, True
+
+    async def _trigger_hit(self, a: SignalAlert, frame: Frame) -> tuple[Optional[TriggerHit], bool]:
+        """→ (the trigger's hit on the frame's last candle, whether its detected zone moved or went away)."""
+        tr = a.trigger
+        if tr is None:
+            return None, False
+        band, known = await self._trigger_zone(a.symbol, tr)
+        now = (band.low, band.high, band.label) if band else (None, None, "")
+        moved = known and now != (tr.zone_low, tr.zone_high, tr.zone_label)
+        cur = self._alerts.get(a.id)
+        if moved and cur is not None and cur.trigger is not None:
+            self._alerts[a.id] = cur.model_copy(update={"trigger": cur.trigger.model_copy(update={
+                "zone_low": now[0], "zone_high": now[1], "zone_label": now[2]})})
+        if band is None:
+            return None, moved
+        hit = await asyncio.to_thread(trigger_hit, frame.df, band, tr.confirm, a.last_bar, tr.cooldown_min * 60,
+                                      a.interval)
+        return hit, moved
 
     # --------------------------------------------------------- listeners
     def _snapshot(self) -> dict:
@@ -489,28 +627,36 @@ class SignalAlertService:
             kimi = await self._kimi_signals(symbol, interval, bar_time)
         hits: dict[str, Optional[SignalHit]] = {}
         fired: list[SignalAlert] = []
+        moved = False
         for a in targets:
             if a.signal in KIMI_SIGNALS and kimi is None:
                 continue
-            if a.signal not in hits:
-                hits[a.signal] = await asyncio.to_thread(detect, a.signal, frame, prev, kimi)
-            hit = hits[a.signal]
+            hit: Optional[SignalHit | TriggerHit]
+            if a.trigger is not None:
+                hit, zone_moved = await self._trigger_hit(a, frame)
+                moved = moved or zone_moved
+            else:
+                if a.signal not in hits:
+                    hits[a.signal] = await asyncio.to_thread(detect, a.signal, frame, prev, kimi)
+                hit = hits[a.signal]
             current = self._alerts.get(a.id)  # may have been edited or deleted while we computed
             if hit is None or hit.time != bar_time or current is None or not current.armed:
                 continue
             if hit.key == current.last_key:
                 continue
             fired.append(self._fire(current, hit, source))
-        if fired:
+        if fired or moved:
             self._changed()
+        if fired:
             await self._sync()
         return fired
 
-    def _fire(self, a: SignalAlert, hit: SignalHit, source: str) -> SignalAlert:
+    def _fire(self, a: SignalAlert, hit: SignalHit | TriggerHit, source: str) -> SignalAlert:
         text = f"{a.symbol} {a.interval}: {hit.text}" + (f" — {a.note}" if a.note else "")
         new = a.model_copy(update={
             "armed": a.repeat, "last_fired_at": int(time.time() * 1000), "fire_count": a.fire_count + 1,
             "last_bar": hit.time, "last_key": hit.key, "last_text": text, "last_price": hit.price,
+            "last_stop": getattr(hit, "stop", None),
         })
         self._alerts[a.id] = new
         log.info("Signal alert fired: %s", text)

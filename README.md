@@ -228,6 +228,19 @@ everything that fired. The **Brief** sends a market summary to Telegram or Disco
 forecast, funding and open interest, key levels and the day's high-impact economic events); **Preview**
 shows it in the app without sending.
 
+**Trigger alerts** wait for a lower-timeframe confirmation inside a higher-timeframe zone, e.g. "a 5m
+CHoCH inside the 4h demand". The zone is either fixed (an AI zone or a rectangle on the chart, a plan's
+entry zone, or two prices) or detected: the nearest (fresh) demand, supply, support or resistance on the
+timeframe you pick, looked up again each time that timeframe closes. On every 1m, 5m or 15m close the
+server checks for a CHoCH / BOS in the zone's direction, a sweep of a low (high) that closes back, or an
+engulfing close, while price is in the zone or just reacting from it. A trigger fires at most once per
+touch of the zone and once per cooldown (60 minutes by default), through the same toast, Telegram and
+Discord channels, with the zone, the trigger, the price and a suggested stop just beyond the
+lower-timeframe swing, e.g. `M5 bullish CHoCH (closed above the swing high 103.00) after touching H4 demand
+98.80–100.20, close 103.40. Suggested stop 98.87, under the M5 swing low 99.00.` Create one in the
+**Triggers** tab of Alerts (with **Preview**), with **Alert on 5m confirmation** on a trade plan card, or by
+asking the agent ("alert me when 1m shows a CHoCH inside the 4h demand").
+
 **Telegram**
 
 1. In Telegram, message [@BotFather](https://t.me/BotFather), send `/newbot` and follow the prompts. It replies with the bot token (`123456:ABC...`).
@@ -269,6 +282,8 @@ they are uploaded once the first time the app connects to a backend that has non
 | GET/POST | `/api/signal-alerts` | Signal alerts and the list of signals; POST `{symbols, interval, signal, repeat, note}` |
 | PATCH/DELETE | `/api/signal-alerts/{id}` | Arm or disarm, repeat, note; delete |
 | GET | `/api/signal-alerts/preview?symbol=&interval=&signal=` | Where the signal fired on past candles |
+| POST | `/api/zone-triggers` | Trigger alert `{symbol, interval: 1m/5m/15m, zone: {source: fixed/detected, …}, confirm, cooldown_min, repeat, note}`; listed, edited and deleted as a signal alert |
+| POST | `/api/zone-triggers/preview?bars=300` | Where a trigger would have fired on past candles, and the zone it used |
 | GET/PUT | `/api/brief/settings` | Brief schedule, time zone, coins, timeframe and sections |
 | GET | `/api/brief/preview` | The brief as it would be sent now |
 | POST | `/api/brief/send` | Send the brief now |

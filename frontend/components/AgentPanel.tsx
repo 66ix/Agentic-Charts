@@ -22,7 +22,7 @@ import { Fragment, useEffect, useImperativeHandle, useRef, useState, type ReactN
 import { usePersistentState } from "@/hooks/usePersistentState";
 import { displaySymbol, formatPct, formatPrice } from "@/lib/format";
 import { DEFAULT_SIZING, orderText, qtyText, sizePlan, type SizingSettings } from "@/lib/sizing";
-import type { Interval, Overlay, ScanResult, TradePlan } from "@/lib/types";
+import type { Interval, Overlay, ScanResult, TradePlan, TriggerInterval } from "@/lib/types";
 
 export interface AgentMessage {
   id: string;
@@ -72,10 +72,24 @@ function emphasize(text: string, last: number | undefined): ReactNode {
   return out;
 }
 
-function PlanCard({ plan, symbol, onLog }: { plan: TradePlan; symbol?: string; onLog?(): Promise<boolean> }) {
+function PlanCard({
+  plan,
+  symbol,
+  onLog,
+  onTrigger,
+}: {
+  plan: TradePlan;
+  symbol?: string;
+  onLog?(): Promise<boolean>;
+  /** Arms a trigger alert: a `tf` confirmation inside the plan's entry zone. */
+  onTrigger?(tf: TriggerInterval): Promise<boolean>;
+}) {
   const [sizing] = usePersistentState<SizingSettings>("ac:sizing", DEFAULT_SIZING);
   const [copied, setCopied] = useState(false);
   const [logged, setLogged] = useState<"idle" | "busy" | "done" | "error">("idle");
+  const [triggerTf, setTriggerTf] = usePersistentState<TriggerInterval>("ac:plan-trigger-tf", "5m");
+  const [armed, setArmed] = useState<"idle" | "busy" | "done" | "error">("idle");
+  const zone = plan.zone_low != null && plan.zone_high != null ? [plan.zone_low, plan.zone_high] : null;
   const long = plan.direction === "long";
   const sized = sizePlan(plan, sizing);
   return (
@@ -117,7 +131,7 @@ function PlanCard({ plan, symbol, onLog }: { plan: TradePlan; symbol?: string; o
         <p key={n} className="mt-1 text-mute">{n}</p>
       ))}
       {symbol && (
-        <div className="mt-1.5 flex gap-1">
+        <div className="mt-1.5 flex flex-wrap gap-1">
           <button
             type="button"
             className="btn-ghost h-6 border border-line px-1.5 text-[11px]"
@@ -146,6 +160,36 @@ function PlanCard({ plan, symbol, onLog }: { plan: TradePlan; symbol?: string; o
               {logged === "done" ? <Check className="h-3.5 w-3.5 text-up" /> : <NotebookPen className="h-3.5 w-3.5" />}
               {logged === "done" ? "In journal" : logged === "error" ? "Not saved, retry" : "Log trade"}
             </button>
+          )}
+          {onTrigger && zone && (
+            <span className="inline-flex items-center rounded border border-line">
+              <button
+                type="button"
+                disabled={armed === "busy" || armed === "done"}
+                className="btn-ghost h-6 px-1.5 text-[11px] disabled:opacity-60"
+                title={`Alert once per touch when a ${triggerTf} candle confirms the ${long ? "bounce" : "rejection"} inside ${formatPrice(zone[0])}–${formatPrice(zone[1])}`}
+                onClick={async () => {
+                  setArmed("busy");
+                  setArmed((await onTrigger(triggerTf)) ? "done" : "error");
+                }}
+              >
+                {armed === "done" ? <Check className="h-3.5 w-3.5 text-up" /> : <Bell className="h-3.5 w-3.5" />}
+                {armed === "done" ? "Trigger set" : armed === "error" ? "Not saved, retry" : `Alert on ${triggerTf} confirmation`}
+              </button>
+              <select
+                aria-label="Trigger timeframe"
+                className="h-6 border-l border-line bg-transparent px-0.5 text-[11px] text-mute outline-none"
+                value={triggerTf}
+                onChange={(e) => {
+                  setTriggerTf(e.target.value as TriggerInterval);
+                  setArmed("idle");
+                }}
+              >
+                <option value="1m">1m</option>
+                <option value="5m">5m</option>
+                <option value="15m">15m</option>
+              </select>
+            </span>
           )}
         </div>
       )}
@@ -193,6 +237,8 @@ interface Props {
   onTogglePin(message: AgentMessage): void;
   /** Adds an answer's plan to the trade journal → saved. */
   onLogTrade?(message: AgentMessage): Promise<boolean>;
+  /** Arms a lower-timeframe trigger alert on an answer's plan zone → saved. */
+  onPlanTrigger?(message: AgentMessage, tf: TriggerInterval): Promise<boolean>;
   handleRef?: Ref<AgentPanelHandle>;
 }
 
@@ -266,7 +312,12 @@ export default function AgentPanel(p: Props) {
                   {m.role === "agent" ? emphasize(m.text, m.lastPrice) : m.text}
                 </p>
                 {m.plan && (
-                  <PlanCard plan={m.plan} symbol={m.symbol} onLog={p.onLogTrade ? () => p.onLogTrade!(m) : undefined} />
+                  <PlanCard
+                    plan={m.plan}
+                    symbol={m.symbol}
+                    onLog={p.onLogTrade ? () => p.onLogTrade!(m) : undefined}
+                    onTrigger={p.onPlanTrigger ? (tf) => p.onPlanTrigger!(m, tf) : undefined}
+                  />
                 )}
                 {m.scan && <ScanTable rows={m.scan} onPick={p.onPickSymbol} />}
                 {m.overlays && m.overlays.length > 0 && (

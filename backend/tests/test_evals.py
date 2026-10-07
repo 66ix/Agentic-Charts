@@ -13,4 +13,4 @@ def test_prompt(case, errors):
 def test_cases_cover_every_ability():
     keys = {k for c in load_cases() for k in c["expect"]}
     assert {"symbol", "switch_chart", "scan_watchlist", "trade_plan", "indicators_on", "remove",
-            "alert_targets", "custom_levels_count"} <= keys
+            "alert_targets", "custom_levels_count", "zone_trigger"} <= keys
