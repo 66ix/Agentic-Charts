@@ -143,6 +143,12 @@ export interface GridBotResult {
   base_held: number;
   quote_held: number;
   current_value: number;
+  /** Largest fall of the bot's value from a high (the investment counts as the first high), %. */
+  max_drawdown_pct: number;
+  /** Share of the running time the price spent inside the range, %. */
+  time_in_range_pct: number;
+  /** [time, value] points; only from the history test. */
+  equity?: [number, number][] | null;
   open_orders: GridOrder[];
   /** Up to 200, newest first. */
   recent_fills: GridFill[];
@@ -254,6 +260,8 @@ export function gridOverlays(bot: Pick<GridBot, "id" | "params">, result: GridBo
     border_color: "rgba(59, 130, 246, 0.35)",
     time_start: start,
     time_end: result?.stopped_at ?? null,
+    // A wide range would zoom the price scale out to fit it; the chart keeps scaling to the candles.
+    autoscale: false,
   };
   out.push(box);
 
@@ -271,6 +279,7 @@ export function gridOverlays(bot: Pick<GridBot, "id" | "params">, result: GridBo
       time_start: start,
       // Hundreds of price tags would bury the axis; tag only the range ends.
       axis_label: k === 0 || k === lines.length - 1,
+      autoscale: false,
     };
     out.push(line);
   });
@@ -291,4 +300,244 @@ export function gridOverlays(bot: Pick<GridBot, "id" | "params">, result: GridBo
     out.push(marker);
   }
   return out;
+}
+
+// ------------------------------------------------------------- planner --
+// Mirrors backend/app/grid_planner.py.
+
+export type PlanTimeframe = "1h" | "4h" | "1d";
+
+/** What POST /api/gridbot/plan takes. */
+export interface GridPlanRequest {
+  symbol: string;
+  /** Quote asset, default 1000. */
+  investment?: number;
+  /** Timeframe the zones and ATR come from (default 4h). */
+  timeframe?: PlanTimeframe;
+  /** null lets the planner choose. */
+  grid_type?: GridType | null;
+  fee_rate?: number;
+  bnb_discount?: boolean;
+  /** Least profit per grid after fees, % (default 0.3). */
+  min_net_pct?: number;
+}
+
+export interface PlanEdge {
+  price: number;
+  /** e.g. "H4 demand low (+D1)", "30-day high", "3 ATR below price". */
+  basis: string;
+  distance_atr: number;
+  distance_pct: number;
+}
+
+export interface PlanZone {
+  kind: string;
+  low: number;
+  high: number;
+  label: string;
+  score: number;
+  distance_atr: number;
+}
+
+export interface GridPlan {
+  symbol: string;
+  base_asset: string;
+  quote_asset: string;
+  timeframe: PlanTimeframe;
+  data_source: string;
+  last_price: number;
+  atr: number;
+  atr_pct: number;
+  lower: PlanEdge;
+  upper: PlanEdge;
+  grids: number;
+  grid_type: GridType;
+  investment: number;
+  fee_rate: number;
+  bnb_discount: boolean;
+  /** Fee per fill after the BNB discount. */
+  fee_per_fill: number;
+  profit_per_grid_min_pct: number;
+  profit_per_grid_max_pct: number;
+  order_value: number;
+  /** 0 = lower price, 100 = upper price. */
+  position_pct: number;
+  /** Why this range, type and count, one sentence each. */
+  reasoning: string[];
+  warnings: string[];
+  zones: PlanZone[];
+  /** Other grid counts worth testing on history. */
+  compare_grids: number[];
+  filters: SymbolFilters;
+}
+
+/** A grid to test on the last `days` days (POST /api/gridbot/backtest). */
+export interface GridBacktestRequest {
+  symbol: string;
+  lower: number;
+  upper: number;
+  grids: number;
+  grid_type: GridType;
+  investment: number;
+  fee_rate?: number;
+  bnb_discount?: boolean;
+  days: number;
+  compare_grids?: number[];
+}
+
+export interface GridBacktestRow {
+  grids: number;
+  profit_per_grid_min_pct: number;
+  profit_per_grid_max_pct: number;
+  matched_trades: number;
+  grid_profit: number;
+  grid_apr_pct: number;
+  total_pnl: number;
+  total_pnl_pct: number;
+  max_drawdown_pct: number;
+  /** The grid count that was asked for. */
+  chosen: boolean;
+}
+
+export interface GridBacktestResult {
+  symbol: string;
+  quote_asset: string;
+  days: number;
+  start_time: number;
+  end_time: number;
+  data_source: string;
+  grid_profit: number;
+  grid_profit_pct: number;
+  matched_trades: number;
+  grid_apr_pct: number;
+  total_pnl: number;
+  total_pnl_pct: number;
+  total_apr_pct: number;
+  max_drawdown_pct: number;
+  time_in_range_pct: number;
+  /** Buying the coin with the investment and holding it over the same period. */
+  hold_return_pct: number;
+  start_price: number;
+  last_price: number;
+  /** [time, value] of the bot, up to 400 points. */
+  equity: [number, number][];
+  alternatives: GridBacktestRow[];
+  result: GridBotResult;
+  notes: string[];
+}
+
+export function planGridBot(req: GridPlanRequest, signal?: AbortSignal) {
+  return apiRequest<GridPlan>("/api/gridbot/plan", { method: "POST", body: JSON.stringify(req), signal, timeoutMs: 60_000 });
+}
+
+/** Replay a grid over past 1m candles (90 days is about 130 Binance calls the first time; cached after). */
+export function backtestGrid(req: GridBacktestRequest, signal?: AbortSignal) {
+  return apiRequest<GridBacktestResult>("/api/gridbot/backtest", {
+    method: "POST",
+    body: JSON.stringify(req),
+    signal,
+    timeoutMs: SLOW,
+  });
+}
+
+/** The chat agent's grid plan, handed to the Grid bots tab ("plan a grid bot on INJ"). The tab may mount after the
+ *  answer arrives, so the plan waits here until it is taken. */
+export const GRID_PLAN_EVENT = "ac-grid-plan";
+let pendingPlan: GridPlan | null = null;
+
+export function offerGridPlan(plan: GridPlan) {
+  pendingPlan = plan;
+  if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent(GRID_PLAN_EVENT));
+}
+
+export function takeGridPlan(): GridPlan | null {
+  const p = pendingPlan;
+  pendingPlan = null;
+  return p;
+}
+
+const PLAN = "rgba(245, 158, 11, 0.6)";
+const MAX_PLAN_LINES = 200;
+
+/**
+ * A plan being edited, drawn on the chart: an amber box over the range, dashed edges with price tags labelled with
+ * what each edge is built on, and dotted lines in between (thinned to MAX_PLAN_LINES). Like the bots' overlays these
+ * stay out of the price auto-scale, so a wide range doesn't zoom the chart out.
+ */
+export function planOverlays(
+  draft: Pick<GridBotParams, "lower" | "upper" | "grids" | "grid_type">,
+  plan: GridPlan | null,
+): Overlay[] {
+  const { lower, upper } = draft;
+  if (!(lower > 0) || !(upper > lower) || !(draft.grids >= 1)) return [];
+  const lines = gridLinesFor(draft);
+  const edge = (side: "lower" | "upper") => (plan && plan[side].price === draft[side] ? ` (${plan[side].basis})` : "");
+  const out: Overlay[] = [
+    {
+      type: "box",
+      id: "gridplan:range",
+      kind: "gridplan",
+      label: `Grid plan ${formatPrice(lower)}–${formatPrice(upper)} (${draft.grids} ${draft.grid_type})`,
+      price_low: lower,
+      price_high: upper,
+      color: "rgba(245, 158, 11, 0.06)",
+      border_color: "rgba(245, 158, 11, 0.45)",
+      autoscale: false,
+    },
+    {
+      type: "horizontal_line", id: "gridplan:upper", kind: "gridplan", label: `Upper${edge("upper")}`, price: upper,
+      color: "#f59e0b", line_style: "dashed", line_width: 1, autoscale: false,
+    },
+    {
+      type: "horizontal_line", id: "gridplan:lower", kind: "gridplan", label: `Lower${edge("lower")}`, price: lower,
+      color: "#f59e0b", line_style: "dashed", line_width: 1, autoscale: false,
+    },
+  ];
+  const every = Math.max(1, Math.ceil((lines.length - 2) / MAX_PLAN_LINES));
+  for (let k = 1; k < lines.length - 1; k += every) {
+    out.push({
+      type: "horizontal_line", id: `gridplan:line:${k}`, kind: "gridplan", label: "", price: lines[k], color: PLAN,
+      line_style: "dotted", line_width: 1, axis_label: false, autoscale: false,
+    });
+  }
+  return out;
+}
+
+// --------------------------------------------------- real vs simulated --
+
+export interface RealVsSimRow {
+  time: number;
+  side: "buy" | "sell";
+  price: number;
+  /** The fill on the user's Binance spot account, if one matched. */
+  real: { time: number; price: number; qty: number; key: string } | null;
+  /** The simulator's fill at the same line and about the same time, if any. */
+  sim: GridFill | null;
+}
+
+/** GET /api/binance/gridbots/{id}/compare: the bot's real fills (from the account import) next to the simulated. */
+export interface GridRealCompare {
+  bot_id: string;
+  name: string;
+  symbol: string;
+  quote_asset: string;
+  real_fills: number;
+  sim_fills: number;
+  matched: number;
+  real_only: number;
+  sim_only: number;
+  real_sells: number;
+  sim_matched_trades: number;
+  /** Sells minus buys minus quote fees of the real fills. */
+  real_net_quote: number;
+  rows: RealVsSimRow[];
+  /** Only simulated fills from this time are compared (the simulator keeps the latest 200). */
+  since: number;
+  notes: string[];
+  /** Always false: Binance has no public API for Spot Grid bots. */
+  spot_grid_api: boolean;
+}
+
+export function fetchGridRealCompare(id: string, signal?: AbortSignal) {
+  return apiRequest<GridRealCompare>(`/api/binance/gridbots/${encodeURIComponent(id)}/compare`, { signal, timeoutMs: SLOW });
 }

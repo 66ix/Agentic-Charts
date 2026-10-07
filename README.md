@@ -52,6 +52,8 @@ agentic-charts/
 │   │   ├── llm.py             Ollama / OpenAI-compatible / Anthropic structured outputs + rule fallback
 │   │   ├── symbols.py         "eth", "solana", "$NEAR" → Binance pairs
 │   │   ├── scanner.py         Watchlist scan and tickers
+│   │   ├── market_scanner.py  Best long / short setups across the top coins by volume, on demand or on a timer
+│   │   ├── track_record.py    How a plan's setup type did in the backtest on that coin and timeframe (cached)
 │   │   ├── market_data.py     Binance klines (paginated, 3h resampled), synthetic fallback
 │   │   ├── candle_store.py    SQLite candle cache (only new bars are downloaded)
 │   │   ├── ratelimit.py       Per-client rate limits and a daily agent cap
@@ -59,6 +61,8 @@ agentic-charts/
 │   │   ├── market_metrics.py  Header metrics (CoinGecko, Fear & Greed, Binance futures)
 │   │   ├── derivatives.py     Open interest + rolling 24h liquidations from Binance futures
 │   │   ├── alerts.py          Server-side price alerts, Telegram / Discord notifications
+│   │   ├── session_levels.py  Asia / London / NY session highs and lows, PDH/PWH/PMH, opening range
+│   │   ├── orderbook_heatmap.py  Order-book sampler and rolling depth history for the heatmap
 │   │   ├── schemas.py         Pydantic models (overlay contract)
 │   │   └── config.py          Env configuration
 │   ├── tests/                 pytest: detectors, API, conversation, payloads (mocked) + opt-in live checks
@@ -162,6 +166,14 @@ the plan in one call. If the model is unreachable, has no tool support or return
 backend logs a warning, falls back to the single-call plan and then the rule parser, and skips the LLM
 for 30 seconds.
 
+**Picking and comparing models in the app:** Settings → AI model lists the Ollama models you have
+installed (size, quantisation) and switches the agent to another one, or another provider with a key
+in `.env`, without a restart; "Use the default" goes back to `.env`. "Test it" runs the prompt eval set
+(`backend/evals/intents.jsonl`) against a model and shows how many plans it got right, the time per
+answer and, for Ollama, whether the model fitted in GPU memory or spilled onto the CPU. The pick and the
+scores are kept in `LLM_CHOICE_STORE` (default `.cache/llm_choice.json`). The same from the command line:
+`python -m evals.run --llm` scores the `.env` model.
+
 ## Configuration
 
 | Variable | Default | Notes |
@@ -190,9 +202,20 @@ for 30 seconds.
 | `ALERT_HISTORY_STORE` / `SIGNAL_ALERTS_STORE` / `BRIEF_STORE` | `backend/.cache/*.json` | Alert history, signal alerts and brief settings; `memory` = not saved |
 | `GRIDBOTS_STORE` | `backend/.cache/gridbots.json` | Saved grid bots; `memory` = not saved |
 | `JOURNAL_STORE` | `backend/.cache/journal.json` | Trade journal; `memory` = not saved |
+| `JOURNAL_REVIEW_STORE` | `backend/.cache/journal_review.json` | Weekly trade review schedule; `memory` = not saved |
+| `BINANCE_API_KEY` / `BINANCE_API_SECRET` | empty | A **read-only** Binance key for the account import (see [Binance account](#binance-account-read-only-key)); wins over a key entered in the app |
+| `BINANCE_KEY_STORE` / `BINANCE_IMPORT_STORE` | `backend/.cache/binance_key.json`, `binance_import.json` | Key entered in the app, and imported fills with their classifications (both file mode 600); `memory` = not saved |
 | `CALENDAR_URLS` | Forex Factory this week + next week | Economic calendar feeds (JSON, Forex Factory format) |
 | `CALENDAR_COUNTRIES` | `USD` | Currencies kept from the calendar, or `ALL` |
 | `NEWS_FEEDS` | CoinDesk, Cointelegraph RSS | News feeds (RSS or Atom), comma-separated |
+| `MARKET_SCAN_TOP` | `100` | Market scanner: the top N USDT pairs by 24h quote volume (5–300) |
+| `MARKET_SCAN_CONCURRENCY` | `4` | Coins whose candles load at once during a scan |
+| `MARKET_SCAN_SCHEDULE` | empty | Timed scans as `timeframe=minutes`, e.g. `15m=10,4h=60` (at least 5 minutes; empty = on demand only) |
+| `MARKET_SCAN_NOTIFY_TOP` | `0` | Send this many of the best setups to Telegram / Discord after each timed scan (`0` = off) |
+| `MARKET_SCAN_STORE` | `backend/.cache/market_scan.json` | The last scan per timeframe; `memory` = not saved |
+| `HEATMAP_INTERVAL_SECONDS` | `10` | How often the order-book heatmap samples the book of a symbol someone is viewing |
+| `HEATMAP_DEPTH_LIMIT` | `1000` | Levels per snapshot (Binance request weight 50; `5000` reaches further but weighs 250) |
+| `HEATMAP_HISTORY_MINUTES` / `HEATMAP_RANGE_PCT` | `240`, `3` | Heatmap history kept per symbol (in memory) and how far from the mid it reaches |
 | `NEXT_PUBLIC_API_URL` | `http://localhost:8000` | Frontend → backend |
 | `NEXT_PUBLIC_WS_URL` | derived from API URL | Override for proxies |
 
@@ -207,6 +230,25 @@ rolling 24h total saved to `backend/.cache/`). Both futures figures cover Binanc
 sends at most one liquidation per symbol per second, so that total is a lower bound; hover a metric
 for its source. Binance futures has no US-accessible mirror, so from a US IP those two fall back to
 mocked values (marked with a dot).
+
+## Live trades (trade manager)
+
+The Live trades tab (Q) watches trades you are in and tells you what to do with them, in the tab, as a browser
+notification and on Telegram/Discord. Add one from an open trade in the journal or type it in (entry, stop,
+targets) and pick the timeframe it is managed on. On every closed candle of that timeframe the backend
+(`app/trade_manager.py`) checks, in this order: the stop (out, and for how many R), each target (take that
+target's share off; after T1, move the stop to breakeven), a trailing stop once the trade is past T1 or +1R
+(just under the newest confirmed higher low for a long, or ATR × N from the close), and a change of character
+against the position (structure broke: consider closing). Each suggestion comes once, with the stop it
+suggests drawn on the chart in yellow. The app never touches your orders: "Moved it" records that you moved
+the stop there, and "I closed it" closes the trade at your price. Trades are kept in `TRADES_STORE`
+(default `.cache/trades.json`).
+
+With a read-only Binance key (see [Binance account](#binance-account-read-only-key)) the tab also lists your own
+open positions: spot holdings worth $5 or more with their average entry, and USD-M positions. Holdings and
+positions classed as a grid bot's are left out (override the class in the Account tab). Pick one, add its stop
+and targets, and it is managed like any other trade; when the position is no longer open on Binance (checked
+every 2 minutes) the trade is closed here at the last price. The key can't trade, so you still act on Binance.
 
 ## Alerts
 
@@ -228,6 +270,19 @@ everything that fired. The **Brief** sends a market summary to Telegram or Disco
 forecast, funding and open interest, key levels and the day's high-impact economic events); **Preview**
 shows it in the app without sending.
 
+**Trigger alerts** wait for a lower-timeframe confirmation inside a higher-timeframe zone, e.g. "a 5m
+CHoCH inside the 4h demand". The zone is either fixed (an AI zone or a rectangle on the chart, a plan's
+entry zone, or two prices) or detected: the nearest (fresh) demand, supply, support or resistance on the
+timeframe you pick, looked up again each time that timeframe closes. On every 1m, 5m or 15m close the
+server checks for a CHoCH / BOS in the zone's direction, a sweep of a low (high) that closes back, or an
+engulfing close, while price is in the zone or just reacting from it. A trigger fires at most once per
+touch of the zone and once per cooldown (60 minutes by default), through the same toast, Telegram and
+Discord channels, with the zone, the trigger, the price and a suggested stop just beyond the
+lower-timeframe swing, e.g. `M5 bullish CHoCH (closed above the swing high 103.00) after touching H4 demand
+98.80–100.20, close 103.40. Suggested stop 98.87, under the M5 swing low 99.00.` Create one in the
+**Triggers** tab of Alerts (with **Preview**), with **Alert on 5m confirmation** on a trade plan card, or by
+asking the agent ("alert me when 1m shows a CHoCH inside the 4h demand").
+
 **Telegram**
 
 1. In Telegram, message [@BotFather](https://t.me/BotFather), send `/newbot` and follow the prompts. It replies with the bot token (`123456:ABC...`).
@@ -246,6 +301,92 @@ Restart the backend, open the bell panel in the header and press **Send test**, 
 the token) and never block other alerts. Alerts created before this version lived in the browser;
 they are uploaded once the first time the app connects to a backend that has none.
 
+## Session and period levels
+
+**Session levels** in the Indicators menu draws the Asia, London and New York session highs and lows (the
+latest session and the one before), the previous day, week and month high and low (`PDH`, `PWL`, …) and the
+opening range (the first 30 minutes of the UTC day, or of each session). **Lengths and colours…** picks which
+ones show, whether session ranges are shaded, the opening-range length (5 to 240 minutes) and whether levels
+price has already traded through stay on the chart (as a faint stub ending in a cross where price took them).
+Untaken levels run to the right edge with a short label; only the previous day / week / month get price tags on
+the axis. The levels of a session that is still running follow the live candle.
+
+Sessions are local exchange hours, converted to UTC per date so they stay right across daylight saving:
+Asia 09:00–18:00 Tokyo (00:00–09:00 UTC), London 08:00–16:30 London time (07:00 UTC in summer time, 08:00 in
+winter), New York 09:30–16:00 New York time (13:30 or 14:30 UTC). Only weekday sessions count. Days, weeks
+(from Monday) and months are UTC, like Binance's candles. The backend (`session_levels.py`) computes everything
+from 30m, 4h and (for opening ranges that aren't a multiple of 30 minutes) 15m or 5m candles, whatever the chart's
+timeframe. Sessions and opening ranges are hidden on D and above, the previous day on D, the previous week on W.
+The chart agent gets the same levels in its facts, so it can say "price is at the London high" or name the
+nearest untaken level each side. On the synthetic feed they are computed from demo candles and marked as demo
+data on the chart.
+
+## Order-book heatmap
+
+**Order-book heatmap** in the Indicators menu paints resting liquidity behind the candles, Bookmap-style: one
+column per time step (two per candle), one cell per price bin, brighter for more resting size, so a wall shows
+as a bright band that starts when it is placed and ends when it is pulled or eaten. The biggest walls in the
+newest snapshot are tagged with their size at the right end. The backend (`orderbook_heatmap.py`) samples the
+spot order book (`/api/v3/depth`, 1,000 levels) of a symbol every 10 seconds only while a chart polls it, buckets
+it into fixed price bins and keeps up to 4 hours per symbol in memory; nobody polling for 45 seconds stops the
+sampling (a hidden tab stops polling), and the history goes 15 minutes later. Binance only serves the book as it
+is now, so the heatmap starts when you turn it on ("Order book since 14:02" on the chart). Without Binance it
+shows a synthetic book with walls that come and go, with 45 minutes of made-up history, marked **Heatmap: demo
+order book**. It has a layer in the Layers tab, like the session levels.
+
+## Grid bot planner
+
+**Plan** in the Grid bots tab (or ask the agent "plan a grid bot on INJ") suggests a Spot Grid bot for a coin
+and says why (`backend/app/grid_planner.py`):
+
+- **Range:** the lower price is the low of the best support or demand zone below price, the upper price the high
+  of the best resistance or supply zone above it, from the same detectors the agent draws (on 1h, 4h or 1d, with
+  daily confluence). Each edge must sit 1.5–12 ATR from price; without a zone in that band it falls back to the
+  30-day low or high, then to 3 ATR.
+- **Grid type:** geometric when the upper price is 25% or more above the lower one, else arithmetic.
+- **Grids:** about 0.3 ATR per grid, widened until each grid clears the fees by at least 0.3% after both fills,
+  and capped so every order stays above Binance's minimum order size.
+
+The proposed range is drawn on the chart in amber while you plan (kept out of the price auto-scale, like the
+bots' own grids). Edit anything, then **Last 7/30/90 days** replays it with the tracker's simulator on 1-minute
+candles: grid profit, matched trades, grid and total APR, max drawdown, time in range, holding the coin instead
+and the bot's value over time, next to the same grid with a few other grid counts (**Use** switches to one).
+**Track this bot** saves it as a tracked bot starting now; the app never places orders.
+
+## Binance account (read-only key)
+
+The **Account** tab (and Settings) imports your own Binance fills into the journal and shows your positions,
+through an API key that can only read (`binance_account.py`, `binance_import.py`).
+
+- **The key:** on Binance, **Profile > API Management > Create API**, and tick **only "Enable Reading"**: no spot,
+  margin, futures or options trading, no withdrawals, no transfers. Before saving the key, and again every hour
+  and after any error, the backend asks Binance what it may do (`GET /sapi/v1/account/apiRestrictions`) and
+  refuses a key that can trade, withdraw or transfer, or whose permissions it cannot read. The key is stored on
+  the backend only (`backend/.cache/binance_key.json`, file mode 600) or comes from `BINANCE_API_KEY` /
+  `BINANCE_API_SECRET`; the browser only ever gets its last 4 characters. Requests are signed with HMAC-SHA256
+  over the query (with `timestamp` and `recvWindow`), and the clock is re-synced when Binance says it is off.
+- **Import:** spot fills (`/api/v3/myTrades`) for the coins in your wallet, your grid bots' pairs and any pairs you
+  list, and USD-M futures fills (`/fapi/v1/userTrades`) for every symbol with realized PnL or an open position.
+  Each fill is stored once, so re-imports never double up; **Auto-import** repeats it every 5 minutes to daily.
+  Fills are rebuilt into round trips (flat → position → flat; futures flips split a round trip), and only your
+  own closed round trips go into the journal, with their real entry, exit and PnL after fees. They have no stop,
+  so they count in the PnL but not in the R statistics.
+- **Mine, bot or unknown:** every fill, holding and position is classified, with the reason shown: your override
+  first; then an order placed in Binance's own apps (its `clientOrderId` starts with `web_`, `ios_`, `and_` or
+  `electron_`) is yours; a fill on a tracked grid bot's pair, while it ran, on one of its grid lines and with its
+  order size is that bot's; any other API order (random or broker `x-` ids) is unknown. Change any of them in the
+  Account tab; overrides are saved on the server and the journal follows.
+- **Positions:** your spot holdings with the average entry from your own buys, your USD-M positions, and the bots
+  apart: the Trading Bots wallet's total, holdings you marked as a bot's, and the tracked bots' simulated holdings.
+
+What is documented and what is inferred: Binance documents the per-wallet balances
+(`GET /sapi/v1/asset/wallet/balance`, which lists a "Trading Bots" wallet with its total value only) and the
+`clientOrderId` on every order (random when the client does not set one). **Binance has no public API for Spot
+Grid bots**, so their settings, orders and fills cannot be read; the grid bot's **Real vs simulated** section only
+shows fills on your spot account that match the bot. The app prefixes above, and that bot orders run from the
+Trading Bots wallet and so normally don't appear in your spot trade history, are inferred from what responses look
+like, not documented. Fees paid in BNB are not converted into the PnL (noted on the trade).
+
 ## API
 
 | Method | Path | Purpose |
@@ -256,8 +397,8 @@ they are uploaded once the first time the app connects to a backend that has non
 | GET | `/api/market/metrics` | Header metrics, each tagged `live` or `mock` |
 | GET | `/api/tickers?symbols=BTCUSDT,ETHUSDT` | Last price and 24h change per symbol |
 | GET | `/api/watchlist/scan?symbols=BTCUSDT,ETHUSDT&interval=4h` | Per symbol: trend, RSI, nearest zone and its distance, signals (cached 60s) |
-| GET | `/api/indicators/kimi?symbol=INJUSDT&interval=4h` | Kimi Cooked v5.7.4 on the closed candles: S/R levels with odds, Fib ladder, signals with outcomes, forecast path and band, and its PATH VERIFY and Signal Stats tables |
-| POST | `/api/agent/analyze` | `{symbol, interval, prompt, candles?, history?, overlays?, previous_intent?, watchlist?}` → overlays, summary, alerts, and when relevant `navigate` (chart to switch to), `plan`, `scan`, `indicators`, `steps` |
+| GET | `/api/indicators/kimi?symbol=INJUSDT&interval=4h` | Kimi Cooked v5.7.4 on the closed candles: S/R levels with odds, Fib ladder, signals with outcomes, forecast path and band, chart patterns, break-outs and harmonics, and its PATH VERIFY and Signal Stats tables |
+| POST | `/api/agent/analyze` | `{symbol, interval, prompt, candles?, history?, overlays?, previous_intent?, watchlist?}` → overlays, summary, alerts, and when relevant `navigate` (chart to switch to), `plan` (with its `track_record`), `scan`, `setups` (market scan), `indicators`, `steps` |
 | GET | `/api/alerts` | `{alerts, channels: {telegram, discord}}` |
 | POST | `/api/alerts` | `{symbol, alerts: [{kind: "cross"\|"zone", price?, price_low?, price_high?, label}]}` → created alerts |
 | DELETE | `/api/alerts/{id}` | Delete an alert |
@@ -269,6 +410,8 @@ they are uploaded once the first time the app connects to a backend that has non
 | GET/POST | `/api/signal-alerts` | Signal alerts and the list of signals; POST `{symbols, interval, signal, repeat, note}` |
 | PATCH/DELETE | `/api/signal-alerts/{id}` | Arm or disarm, repeat, note; delete |
 | GET | `/api/signal-alerts/preview?symbol=&interval=&signal=` | Where the signal fired on past candles |
+| POST | `/api/zone-triggers` | Trigger alert `{symbol, interval: 1m/5m/15m, zone: {source: fixed/detected, …}, confirm, cooldown_min, repeat, note}`; listed, edited and deleted as a signal alert |
+| POST | `/api/zone-triggers/preview?bars=300` | Where a trigger would have fired on past candles, and the zone it used |
 | GET/PUT | `/api/brief/settings` | Brief schedule, time zone, coins, timeframe and sections |
 | GET | `/api/brief/preview` | The brief as it would be sent now |
 | POST | `/api/brief/send` | Send the brief now |
@@ -278,13 +421,32 @@ they are uploaded once the first time the app connects to a backend that has non
 | GET/POST | `/api/gridbots` | Saved grid bots; POST `{name?, params, binance?}` → `{bot, result}` |
 | PATCH/DELETE | `/api/gridbots/{id}` | Edit or delete a saved bot |
 | GET | `/api/gridbots/{id}/result` | A saved bot's current numbers (recomputed at most once per 1m bar) |
+| POST | `/api/gridbot/plan` | `{symbol, investment?, timeframe?, grid_type?}` → suggested range, grids, type, reasoning, warnings |
+| POST | `/api/gridbot/backtest` | `{symbol, lower, upper, grids, grid_type, investment, days (1–90), compare_grids?}` → profit, matched trades, APR, max drawdown, time in range, value curve, other grid counts |
+| GET/PUT/DELETE | `/api/binance/key` | Read-only key status (last 4 characters, permissions); PUT `{api_key, api_secret}` saves it only if Binance reports it read-only |
+| POST | `/api/binance/key/test` | Ask Binance again what the key may do |
+| GET/POST | `/api/binance/import` | Import status; POST runs an import (new fills, journal added/updated/removed) |
+| PUT | `/api/binance/import/settings` | `{auto_minutes, symbols, futures, lookback_days}` |
+| GET | `/api/binance/fills?kind=&market=&symbol=` | Imported fills with their classification and reason |
+| GET | `/api/binance/trades?kind=` | Round trips rebuilt from the fills |
+| POST | `/api/binance/classify` | `{keys, kind ("manual"\|"bot"\|"unknown", null = automatic), bot_id?}` |
+| GET | `/api/binance/positions?refresh=` | Your spot holdings and USD-M positions, and the bots' apart |
+| GET | `/api/binance/gridbots/{id}/compare` | A tracked bot's real fills next to the simulated ones |
 | GET/POST | `/api/journal` | Logged trades with their evaluation; POST a trade `{symbol, interval, direction, entry, stop, targets, …}` |
 | PATCH/DELETE | `/api/journal/{id}` | Notes, tags, setup, cancel or close a trade; delete it |
 | GET | `/api/journal/stats?symbol=&setup=&direction=` | Win rate, R, expectancy, profit factor, breakdowns, equity curve |
+| POST | `/api/journal/{id}/postmortem` | Write (or rewrite) a closed trade's post-mortem now |
+| GET | `/api/journal/review?days=7` | Weekly review: win rate, average R, best and worst setups and coins, recurring lessons, the message text |
+| GET/PUT | `/api/journal/review/settings` | Weekly review schedule `{enabled, weekday, time, timezone, days}` |
+| POST | `/api/journal/review/send` | Send the weekly review to Telegram / Discord now |
 | POST | `/api/backtest` | `{symbol, interval, setup, bars, target, max_hold_bars, fee_pct}` → trades, stats, equity curve |
+| GET | `/api/market-scan?interval=4h` | The last market scan of that timeframe (`result`: longs and shorts with entry, stop, T1, R:R, distance, timeframe agreement, track record, plan and overlays), plus `running`, `schedule`, `next_run` |
+| POST | `/api/market-scan/run?interval=4h&top=` | Scan now (or join the scan already running) → the same shape |
 | GET | `/api/futures/funding`, `/open-interest`, `/long-short`, `/liquidation-levels` `?symbol=` | Futures data for the market data tab (`source`: `binance`, `synthetic` or `unavailable`) |
 | GET | `/api/cvd?symbol=&interval=` | Spot taker buy and sell volume per bar and its running sum |
 | GET | `/api/orderbook/walls?symbol=&range_pct=5` | Large resting orders near price |
+| GET | `/api/orderbook/heatmap?symbol=&step=60&since=` | Resting liquidity over time: `columns` of `[time, mid, first_bin, [notional per bin]]`, `bin_size`, current `walls`; polling it keeps the symbol sampled |
+| GET | `/api/levels/sessions?symbol=&interval=1h&or_minutes=30` | Asia / London / New York session highs and lows (latest and previous), previous day / week / month, opening ranges, each with when price took it |
 | GET | `/api/calendar?days=7&impact=high` | Economic events |
 | GET | `/api/news?symbol=` | Crypto headlines, tagged with the coins they mention |
 | GET | `/api/index/klines?name=TOTAL2&interval=4h` | TOTAL, TOTAL2, TOTAL3 market-cap index candles (top 20 coins) |
@@ -336,16 +498,22 @@ Overlay types: `box`, `horizontal_line`, `trendline`, `marker` (see `backend/app
 - **Watchlist:** each coin shows its price, 24h change, a 48-hour sparkline and the nearest zone on the active timeframe ("In demand", "Supply 0.8%"). Keep several named lists (the list name opens a menu to switch, rename, add or delete), drag coins to reorder them, or sort by change, nearest zone or name. Right-click a coin to open it in chart 2, 3 or 4, copy it to another list, or remove it. **+** adds a coin; the scan button asks the agent to rank them.
 - **Multiple charts:** the layout buttons in the chart header show 1, 2 or 4 charts. Click a chart to make it active (blue header); the timeframe buttons, toolbar and agent act on the active chart. Each chart keeps its own coin, timeframe and overlays. Hovering one chart shows the same time on the others, and **Every chart follows the same coin** (Settings) keeps one coin across charts with different timeframes. **Layouts** saves the open charts, timeframes, indicators, panels and layer toggles under a name (`Ctrl+S` saves the current one).
 - **Indicators:** two EMAs, Bollinger Bands, VWAP, Parabolic SAR, volume and a volume profile of the visible range on the price; RSI, MACD, Stoch RSI, ATR and CVD (taker buy minus sell volume) in panes under it; and Kimi Cooked (below). **Lengths and colours…** in the menu (or `I`) changes their settings. **Compare** draws other coins or the TOTAL indexes over the chart in % change; the ÷ button next to a compared coin opens it as a ratio chart. Search "ETH/BTC" for a ratio chart of any two coins, or "TOTAL" for the market-cap indexes (TOTAL, TOTAL2 without BTC, TOTAL3 without BTC and ETH, built from the top 20 coins). The countdown under the price shows when the candle closes. The camera button saves a PNG.
-- **Kimi Cooked v5.7.4:** Trick's own TradingView indicator, run from its Python port (`backend/app/kimi`) on the last 5,000 closed candles. Turn it on in the Indicators menu or ask the agent ("show my Kimi"). It draws what the script draws: S/R zones and rays with the chance price reaches each level within the forecast window, the auto Fib ladder with its odds and golden pocket, the B+/B-, U/Dn and B+?/B-? labels, and the forecast (confidence band, best-guess line, textured scenario path, end label and the next-candle ▲/▼). The **Kimi Cooked** pill under the legend opens the PATH VERIFY and Signal Stats tables and the latest signals with their outcomes. It reruns when a candle closes, like the script since v5.7.4. Ask "what does Kimi say?" and the agent reads its levels, signals and forecast; with an LLM it can also read it on other coins and timeframes. Chart patterns and harmonics are not in the port yet, so those drawings and the Pat BO and Harmonics rows are missing, and confluence scores run a little lower than on TradingView.
+- **Kimi Cooked v5.7.4:** Trick's own TradingView indicator, run from its Python port (`backend/app/kimi`) on the last 5,000 closed candles. Turn it on in the Indicators menu or ask the agent ("show my Kimi"). It draws what the script draws: S/R zones and rays with the chance price reaches each level within the forecast window, the auto Fib ladder with its odds and golden pocket, the B+/B-, U/Dn and B+?/B-? labels, and the forecast (confidence band, best-guess line, textured scenario path, end label and the next-candle ▲/▼). The **Kimi Cooked** pill under the legend opens the PATH VERIFY and Signal Stats tables and the latest signals with their outcomes. It reruns when a candle closes, like the script since v5.7.4. Ask "what does Kimi say?" and the agent reads its levels, signals and forecast; with an LLM it can also read it on other coins and timeframes. Only the higher-timeframe divergence factor is not ported, so confluence scores can run a little lower than on TradingView.
+- **Kimi chart patterns, harmonics and sessions:** the port also runs the script's chart-pattern engine (Double/Triple Top and Bottom, Head & Shoulders and its inverse, Ascending/Descending Triangle, Rising/Falling Wedge, Bull/Bear Flag) and harmonic engine (Gartley, Bat, Butterfly, Crab, Deep Crab, Alt Bat, Shark, 5-0, Three Drives, AB=CD), with the script's own tolerances, defaults and order of operations (`backend/app/kimi/patterns_v574.py`). Patterns are drawn with their outline and label (▲ after a break-out, ✕ once invalidated), each break-out with its level and measured-move target ("BO▲ …"); harmonics with their XABCD legs, the PRZ box (★ = PRZ confluence with S/R, golden pocket and divergence at D), the TP1/TP2 lines, and amber ⚠ when the opposing S/R level breaks. Each is its own layer under Kimi Cooked in the Layers tab, and the pill lists them. Break-outs and completed harmonics are signals like the script's (the Pat BO and Harmonics rows in Signal Stats; they also feed confluence and the forecast's magnet levels), and "what does Kimi say?" mentions the latest ones. The script's session filter and per-session zone/divergence multipliers are ported too (`sessions_v574.py`) and off by default, as in the script. Not ported: the HTF divergence factor (it runs inside `request.security` on a higher timeframe the app doesn't fetch OHLCV for).
 - **Caching:** candles are kept in the browser (IndexedDB) and on the backend (SQLite), so opening the app draws the chart from cache at once and only the bars since the last visit are downloaded.
 - **Layers:** the layers tab lists what is drawn on the chart by group (agent zones, window levels, structure, trade plan, pinned answers, each part of Kimi Cooked, your drawings, alerts, journal trades, grid bots, …) with an eye toggle each, plus the pinned answers and your drawings. Labels that would overlap move apart.
 - **Grid bots** (`B`): track a Binance Spot Grid bot you already run. Copy its settings from Bot details on Binance: pair, lower and upper price, number of grids, arithmetic or geometric, investment and how long it has been running ("3d 4h 12m", or the start time). The app replays the bot on Binance's 1-minute candles from that moment and shows what the bot card shows: total PnL, grid profit, floating PnL, matched trades (all and last 24h), grid and total APR, plus its open orders, recent fills and matched trades per day. Its grid is drawn on the chart. To check it against Binance, type Binance's matched trades, grid profit and total PnL in the form and the bot shows both side by side. **More settings** covers fees (and the BNB discount), trigger price, take profit, stop loss, sell on stop and Binance's "Qty per order". The numbers can differ a little from Binance's: several fills inside one minute are not all seen, and Binance keeps a small fee reserve (enter its qty per order to remove that difference).
+- **Grid bot planner:** **Plan** in the Grid bots tab, or "plan a grid bot on INJ" to the agent, suggests a range, grid count and type with the reasons, tests it on the last 7/30/90 days and tracks it in one click (see [Grid bot planner](#grid-bot-planner)).
+- **Binance account:** the Account tab imports your own fills into the journal with a read-only API key, shows your positions apart from the bots', and lets you correct what is yours (see [Binance account](#binance-account-read-only-key)).
 - **Trade journal** (`J`): **Log trade** on a plan card tracks that plan, sized from your position-sizing settings, and **Add trade** logs your own. Each trade is followed on 1-minute candles: pending until the entry fills, then partial exits at each target (the stop moves to entry after the first), with R, PnL after fees, best and worst excursion. **Stats** shows win rate, average R, expectancy, profit factor, an equity curve and results by setup, coin and direction. Trades show on the chart; close or cancel them by hand when you exit early.
+- **Post-mortems and the weekly review:** when a journal trade closes (stop, target, breakeven or by hand) the backend writes a short review onto it: where the fill sat in its zone (the plan's zone, else the agent's nearest one), the best and worst excursion in R and which came first, what happened at each target (hit, missed by how much, reached after the exit), what the agent's levels and Kimi Cooked said when the trade was taken, and one or two concrete lessons (e.g. "stopped, then T1 was reached 2h later: the stop sat inside the noise"). The numbers are computed in Python from the candles; the configured LLM only rewrites the text, and its answer is dropped for the template when it contains a number that is not in the facts. **Regenerate** on the trade writes it again. The **Review** tab sums up the last 7, 14 or 30 days (win rate, average R, best and worst setup types and coins, lessons that keep coming back) and can send that summary to Telegram / Discord every week at a time you pick, next to the brief.
 - **Backtest** (`X`): pick a setup (first touch of fresh demand or supply, support or resistance holds, sweeps, Kimi Cooked signals, …), an exit (1.5R, 2R, 3R or the next level), a max hold and fees, and it replays the setup over the last 100–5,000 candles of the chart, with no look-ahead. It shows win rate, average and total R, profit factor, max drawdown, an equity curve and every trade; click a trade to see it on the chart.
+- **Track record on trade plans:** every long or short plan carries how the same kind of setup did on that coin and timeframe, from the backtest engine: "fresh 4h demand longs on INJ: 14 trades, 57% win, +0.60R avg, last 1 year". The plan's basis picks the setup (fresh demand or supply, support, resistance; a plan on an already-tested zone or with higher-timeframe confluence is compared with every such zone, and the card says so). It runs on about a year of closed candles (500–3,000), exits at the next opposing level like the plan's T1, and is cached per coin, timeframe and setup for 30 minutes to 6 hours. Under 8 trades, or under 300 candles of history, it says so instead of quoting a win rate; under 20 trades it is marked a small sample. Order blocks, your own zones and market entries beyond a swing have no matching backtest yet. Click the line on the plan card for the numbers and caveats, or the flask to open the same backtest, with every trade, in the Backtest tab. The agent quotes it in its answer.
+- **Scanner** (`U`): the best long and short setups across the top 100 USDT pairs by 24h volume (stablecoin and fiat pairs and leveraged tokens left out) on the timeframe you pick. Each coin gets a long and a short plan from the agent's own zones; plans entered at a zone with at least 1R to T1 are ranked by reward-to-risk, how far the entry is from price, how many timeframes trend its way (the scan's and the next two up; a range counts half) and the track record (computed for the best 8 per side). Rows show entry, stop, T1, R:R, distance, agreement and track record; click one to open that chart with the plan drawn. The agent uses it too: "best 5m setups right now", "scan the market for longs", "top short setups on the 1h". Scans load at most `MARKET_SCAN_CONCURRENCY` coins at once through the candle cache, one scan at a time, and the last one per timeframe is kept. `MARKET_SCAN_SCHEDULE` runs them on a timer and `MARKET_SCAN_NOTIFY_TOP` sends the best setups of each timed scan to Telegram / Discord. Without Binance it scans the fallback coin list on demo data and says so.
 - **Market data** (`O`): funding (now, next settlement, annualised, history), open interest, the long/short account ratio and top traders' ratio, 24h spot CVD, the biggest order-book walls within 5% of price, and estimated liquidation clusters (from volume and open interest, assuming common leverage, so treat them as estimates), plus real liquidations from Binance's stream. Walls and liquidation clusters can be shown on the chart.
 - **Calendar and news** (`E`): high-impact economic events (Forex Factory, USD by default) and crypto headlines (CoinDesk, Cointelegraph), filtered to the current coin or all. **Show on chart** draws events as dashed lines with their name and headlines as dots at the top of the chart; hover one for the details. The agent knows the calendar too: a trade plan warns when a high-impact event is due within 48 hours, and "any news?" or "what's funding like?" brings in the headlines or the futures data.
 - **Settings** (the gear): log scale, grid lines, timezone of the time axis (yours or UTC), the countdown, crosshair sync, linked coins, automatic levels, position sizing, and **Save a backup** / **Restore from a file**, which moves everything the app keeps in the browser (drawings, alerts, chats, watchlists, layouts, settings) to another browser or computer.
-- **Keyboard:** press `?` for the full list. `/` asks the agent, `S`, `Space` or `Ctrl+K` searches a coin, `1`–`9` and `0` pick the timeframe, `[` `]` or `Alt+↑` `↓` step through the watchlist, `G` cycles one, two and four charts, `Alt+R` fits the chart, `Alt+L` toggles log scale, `K` toggles Kimi Cooked, and `W` `A` `L` `J` `B` `E` `O` open the panel tabs.
+- **Keyboard:** press `?` for the full list. `/` asks the agent, `S`, `Space` or `Ctrl+K` searches a coin, `1`–`9` and `0` pick the timeframe, `[` `]` or `Alt+↑` `↓` step through the watchlist, `G` cycles one, two and four charts, `Alt+R` fits the chart, `Alt+L` toggles log scale, `K` toggles Kimi Cooked, and `W` `A` `L` `J` `B` `E` `O` `U` open the panel tabs.
 
 ## Tests
 

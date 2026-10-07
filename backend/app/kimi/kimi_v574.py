@@ -39,6 +39,12 @@ NOT PORTED (their effects are absent here):
 Because w2/w3/w8 are always off, confluence scores (and so the Conf top/rest split) can
 differ from the chart. Everything else is meant to match closed-candle values exactly,
 apart from the start of history (bar 0 = the first candle you pass in, as on the chart).
+
+agentic-charts: chart patterns + harmonics (patterns_v574.py: detection, registry, break-outs / failures,
+lifecycle, w2 / w3, the "Pat BO" and "Harmonics" rows, their Long / Short / Conf entries and forecast magnets)
+and the session filter + multipliers (sessions_v574.py) are now ported and hooked into the loop below at the
+script's own points (lines marked agentic-charts). The HTF divergence factor w8 is still off. With
+Inputs(showChartPatterns=False, showHarmonics=False) the engine gives the original port's numbers.
 """
 from __future__ import annotations
 
@@ -47,6 +53,9 @@ from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Optional
 
 import numpy as np
+
+from .patterns_v574 import HARM_NAMES, ChartPatterns, Harmonics   # agentic-charts
+from .sessions_v574 import session_arrays                        # agentic-charts
 
 __version__ = "5.7.4"
 
@@ -144,6 +153,54 @@ class Inputs:
     fibShowExt: bool = True
     fcTexture: bool = True
     showBands: bool = True
+    # agentic-charts: the inputs of the modules ported in patterns_v574.py / sessions_v574.py (script defaults).
+    # showChartPatterns=False and showHarmonics=False give the original port's numbers back.
+    confWindow: int = 10              # Pattern Recency Window (bars) - confluence w2 / w3
+    showChartPatterns: bool = True
+    patTolATR: float = 0.75
+    autoPatTol: bool = True
+    patMinDepthATR: float = 1.0
+    flagPoleATR: float = 3.0
+    patExtend: int = 10
+    patBoVolReq: bool = True
+    patBoBufATR: float = 0.0
+    autoPatBoBuf: bool = True
+    patFailClean: bool = True
+    patDupATR: float = 0.75
+    patExpMult: float = 3.0
+    patMaxTgtPct: float = 30.0
+    showHarmonics: bool = True
+    harmGartley: bool = True
+    harmBat: bool = True
+    harmBfly: bool = True
+    harmCrab: bool = True
+    harmDeepCrab: bool = True
+    harmAltBat: bool = True
+    harmShark: bool = True
+    harmFiveZero: bool = True
+    harm3Drives: bool = True
+    harmABCD: bool = True
+    harmTol: float = 0.05
+    harmTolD: float = 0.025
+    przConfluence: bool = True
+    przDivConfirm: bool = True
+    useCrossInv: bool = True
+    harmMinXA: float = 1.0
+    harmShowPRZ: bool = True
+    harmExtend: int = 15
+    harmExpBars: int = 150
+    fibShowPocket: bool = True        # also gates the PRZ golden-pocket tier
+    useSessFilter: bool = False
+    sessTz: str = "UTC"
+    sess1On: bool = True
+    sess1: str = "0000-0800"
+    sess2On: bool = True
+    sess2: str = "1200-2100"
+    useSessionParams: bool = False
+    asiaZoneMult: float = 1.3
+    asiaDivMult: float = 1.2
+    ldnNyZoneMult: float = 0.85
+    ldnNyDivMult: float = 0.85
 
     @staticmethod
     def users_chart() -> "Inputs":
@@ -289,6 +346,8 @@ def _linreg_slope_series(y: np.ndarray, L: int) -> np.ndarray:
 # Engine
 # ════════════════════════════════════════════════════════════════════════════════════════
 SIG_NAMES = {0: "DIV", 1: "U/Dn", 2: "Early", 15: "Random long", 16: "Random short"}
+# agentic-charts: the pattern break-out and the ten harmonic signal types (types 5-14 follow hPatNm)
+SIG_NAMES.update({3: "Pat BO", **{5 + k: nm for k, nm in enumerate(HARM_NAMES)}})
 
 
 @dataclass
@@ -402,6 +461,10 @@ class KimiCooked:
         eff_stat_win = p.statWinATR * max(0.5, tf_scale) if p.autoParams else p.statWinATR
         eff_stat_loss = p.statLossATR * max(0.5, tf_scale) if p.autoParams else p.statLossATR
         eff_mitigate = p.mitigateBroken and not micro
+        # agentic-charts: session filter / session multipliers (sessOk, sessZoneMult, sessDivMult)
+        sess_ok, sess_zone, sess_div = session_arrays(t_ms, tf, p)
+        div_thr = div_thr * sess_div
+        eff_zone = eff_zone * sess_zone
         # forecast-steps line budget (rendering clamp; it also caps the scored horizon in the script)
         lines_per_step = 1 + (1 if p.fcTexture else 0) + (2 if p.showBands else 0)
         reserved = p.harmMaxSets * 7 + p.patMaxLabels * 6 + p.maxSR * 2 + (20 if p.patBreakout else 0) + ((9 if p.fibShowExt else 7) if p.showFib else 0) + 20
@@ -503,6 +566,11 @@ class KimiCooked:
         H_arr = np.zeros(N, dtype=int)
         gains_arr = np.zeros((N, 3))
         tilt_arr = np.zeros(N)
+        # agentic-charts: chart patterns + harmonics (patterns_v574.py) and their confluence recency bars
+        CP = ChartPatterns(p)
+        HM = Harmonics(p)
+        last_pat_bar = {1: None, -1: None}      # lastBullChartPatBar / lastBearChartPatBar
+        last_harm_bar = {1: None, -1: None}     # lastHarmBullBar / lastHarmBearBar
 
         for i in range(N):
             # ===== adaptive structure (uses the pivot gap as it stood before this bar) =====
@@ -602,9 +670,9 @@ class KimiCooked:
                 sep[dd] = sepok
                 if sepok and L["p"] is not None and L["r"] is not None and not np.isnan(pv_rsi):
                     if (pvt - L["p"]) * dd < 0 and (pv_rsi - L["r"]) * dd > div_thr[i]:
-                        now[dd]["reg"] = (not pause[i]) and (not trending[i])
+                        now[dd]["reg"] = bool(sess_ok[i]) and (not pause[i]) and (not trending[i])   # agentic-charts: sessOk
                     elif (pvt - L["p"]) * dd > 0 and (pv_rsi - L["r"]) * dd < -div_thr[i]:
-                        now[dd]["hid"] = (not pause[i]) and (not ranging[i])
+                        now[dd]["hid"] = bool(sess_ok[i]) and (not pause[i]) and (not ranging[i])
                 if sepok and not pause[i] and L["m"] is not None and not np.isnan(pv_macd) and (pvt - L["p"]) * dd < 0 and (pv_macd - L["m"]) * dd > 0:
                     now[dd]["macd"] = True
                 if sepok and not pause[i] and L["f"] is not None and not np.isnan(pv_mfi) and (pvt - L["p"]) * dd < 0 and (pv_mfi - L["f"]) * dd > 0:
@@ -645,6 +713,12 @@ class KimiCooked:
                 last_gap_bar = pb
             while len(piv_hist) > 50:
                 piv_hist.pop(0)
+            # ===== agentic-charts: f_detectChartPatterns (after the pivot history, before S/R, as in the script) =====
+            pat_now = CP.detect(i, c[i], atr[i], vol_reg[i], tf_scale, plen, eff_lb, piv_hist,
+                                conf_lo is not None or conf_hi is not None, bool(pause[i]))
+            for dd, hit in zip((1, -1), pat_now):
+                if hit:
+                    last_pat_bar[dd] = i
             # ===== f_updateSR =====
             for dd, px in ((1, conf_lo), (-1, conf_hi)):
                 if px is None:
@@ -673,7 +747,7 @@ class KimiCooked:
                         if x[2] and (x[0] - c[i]) * dd > atr[i] * eff_mitbuf[i]:
                             x[2] = False
                             x[6] = i
-                if p.srRetestOn and not pause[i]:
+                if p.srRetestOn and sess_ok[i] and not pause[i]:   # agentic-charts: sessOk
                     tdist = atr[i] * p.srRetestZone
                     for x in Ls:
                         act = (x[2] if eff_mitigate else True) and ((not p.srExpire) or i - x[1] <= eff_lb)
@@ -695,6 +769,7 @@ class KimiCooked:
                         if nearest[dd] is None or (x[0] > nearest[dd] if dd > 0 else x[0] < nearest[dd]):
                             nearest[dd] = x[0]
             # ===== f_checkEarlyDivergence =====
+            early_now = {1: False, -1: False}   # agentic-charts: earlyBullNow / earlyBearNow (PRZ divergence tier)
             for dd in (1, -1):
                 if not p.showEarlyDiv:
                     break
@@ -711,14 +786,16 @@ class KimiCooked:
                     rsi_ok = smooth[i] > L["r"] + div_thr[i] if dd > 0 else smooth[i] < L["r"] - div_thr[i]
                     if E["armed"] and not E["fired"] and not now[dd]["reg"] and rsi_ok:
                         E["fired"] = True
-                        early_now = (not pause[i]) and (not trending[i])
-                        if early_now and pend[dd] is None:
+                        early_now[dd] = bool(sess_ok[i]) and (not pause[i]) and (not trending[i])   # agentic-charts: sessOk
+                        if early_now[dd] and pend[dd] is None:
                             pend[dd] = 2
-            # ===== confluence (w2/w3/w8 not ported -> off) =====
+            # ===== confluence (agentic-charts: w2 chart pattern / w3 harmonic recency ported; w8 HTF div still off) =====
             rsi_x = {1: (not np.isnan(dyn_os)) and smooth[i] < dyn_os, -1: (not np.isnan(dyn_ob)) and smooth[i] > dyn_ob}
+            pat_rec = {dd: last_pat_bar[dd] is not None and i - last_pat_bar[dd] <= p.confWindow for dd in (1, -1)}
+            harm_rec = {dd: last_harm_bar[dd] is not None and i - last_harm_bar[dd] <= p.confWindow for dd in (1, -1)}
             fac = {}
             for dd in (1, -1):
-                fac[dd] = [near[dd], retest[dd], False, False, htf_bull if dd > 0 else htf_bear, rsi_x[dd],
+                fac[dd] = [near[dd], retest[dd], pat_rec[dd], harm_rec[dd], htf_bull if dd > 0 else htf_bear, rsi_x[dd],
                            step_drift > 0 if dd > 0 else step_drift < 0, bool(vol_high[i]), False, multi_osc[dd]]
             conf_w = {dd: int(sum(fw[k] for k in range(10) if fac[dd][k])) for dd in (1, -1)}
             mask = {dd: sum((1 << k) for k in range(10) if fac[dd][k]) for dd in (1, -1)}
@@ -768,7 +845,7 @@ class KimiCooked:
                     fw = nw / nw.sum() * 100.0
                 open_sigs.remove(s)
             # ===== register signals + random controls =====
-            def register(dd, typ, conf, msk):
+            def register(dd, typ, conf, msk, at=None):
                 tier = -1
                 if typ < 15:
                     nH = len(conf_hist)
@@ -783,13 +860,27 @@ class KimiCooked:
                     sgl.pivot_bar, sgl.price = i - plen, float(conf_lo if dd > 0 else conf_hi)
                 elif typ == 2:
                     sgl.pivot_bar, sgl.price = i, float(EARLY[dd]["arm"] if EARLY[dd]["arm"] is not None else c[i])
+                elif at is not None:     # agentic-charts: harmonic D / pattern break-out level
+                    sgl.pivot_bar, sgl.price = at
                 open_sigs.append(sgl)
                 R.signals.append(sgl)
+            # ===== agentic-charts: f_detectHarmonics (after the resolver, before the divergence registrations) =====
+            HM.lifecycle(i, c[i], h[i], l[i], atr[i], eff_mitbuf[i])
+            div_at = {dd: now[dd]["reg"] or now[dd]["hid"] or early_now[dd] for dd in (1, -1)}
+            for hs in HM.detect(i, plen, conf_lo, conf_hi, piv_hist, atr[i], bool(pause[i]), nearest[1], nearest[-1],
+                                eff_zone[i], eff_mitbuf[i], eff_lb, div_at):
+                if sess_ok[i] and not trending[i]:      # pauseEntries already gates detection
+                    register(hs.dir, 5 + hs.best, conf_w[hs.dir] + hs.tier * 5, mask[hs.dir], (hs.points[4][0], hs.points[4][1]))
+                    last_harm_bar[hs.dir] = i
             for dd in (1, -1):
                 if pend[dd] is not None:
                     register(dd, pend[dd], conf_w[dd], mask[dd])
-            if i % 5 == 0 and not pause[i]:
+            if i % 5 == 0 and sess_ok[i] and not pause[i]:   # agentic-charts: sessOk
                 register(1 if i % 10 == 0 else -1, 15 if i % 10 == 0 else 16, 0, 0)
+            # ===== agentic-charts: f_updatePatternLifecycle (break-outs register "Pat BO") =====
+            for pat in CP.lifecycle(i, c[i], c[i - 1] if i >= 1 else None, atr[i], vol_reg[i], bool(vol_spike[i]),
+                                    bool(pause[i]), bool(ranging[i]), bool(sess_ok[i])):
+                register(pat.dir, 3, conf_w[pat.dir], mask[pat.dir], (i, pat.breakout["price"]))
             # ===== PATH VERIFY sweep =====
             tot = dict(evals=0, traj=0.0, mate=0.0, hits=0, flat=0.0, node_in=0, node_n=0, calls=0, traj_n=0, tgt_n=0, miss_u=0, miss_d=0)
             if p.verifyOn and vf:
@@ -899,12 +990,20 @@ class KimiCooked:
                 rH = (c[i] - c[i - H]) / c[i - H] if i >= H and c[i - H] > 0 else 0.0
                 pre_win = atr[i] * mag_dist[i] * 2.0
                 mwin = atr[i] * mag_dist[i] * 1.5
-                pool = []
+                pool_side = {1: [], -1: []}
                 for dd in (1, -1):
                     for x in LEV[dd]:
                         active = x[2] if eff_mitigate else True
                         if active and i - x[1] <= eff_lb and abs(x[0] - c[i]) < pre_win:
-                            pool.append((x[0], min(1.0 + (x[4] - 1.0) * 0.15, 2.0)))
+                            pool_side[dd].append((x[0], x[4]))
+                # agentic-charts: live harmonic TP1s (7.667 pre-solved -> 2.0x) and the last pattern break-out
+                # target (4.333 -> 1.5x) join the pool, supports after supports and resistances after resistances
+                for hs in HM.sets:
+                    if hs.state in (0, 4) and abs(hs.tp1 - c[i]) < pre_win:
+                        pool_side[-1 if hs.tp1 > c[i] else 1].append((hs.tp1, 7.667))
+                if CP.last_tgt is not None and i - CP.last_tgt_bar <= eff_lb and abs(CP.last_tgt - c[i]) < pre_win:
+                    pool_side[-1 if CP.last_tgt > c[i] else 1].append((CP.last_tgt, 4.333))
+                pool = [(lv, min(1.0 + (st - 1.0) * 0.15, 2.0)) for dd in (1, -1) for lv, st in pool_side[dd]]
                 mom = abs(lr_slope if lr_slope is not None else 0.0) / atr[i] if atr[i] > 0 else 0.5
                 gS, gH, gL = mzS[0], mzS[1], mzS[2]
                 floor_ = c[i] * 0.05
@@ -951,7 +1050,8 @@ class KimiCooked:
                        factor_weights=fw.copy(), atr=atr[-1], sig=sig_bar[-1], H=H_arr[-1], close=c[-1],
                        eff_stat_loss=eff_stat_loss, levels={dd: [list(x) for x in LEV[dd]] for dd in (1, -1)},
                        eff_mitigate=eff_mitigate, eff_lb=eff_lb, piv_hist=list(piv_hist),
-                       eff_zone=float(eff_zone[-1]), vol_reg=float(vol_reg[-1]))   # agentic-charts: for drawing
+                       eff_zone=float(eff_zone[-1]), vol_reg=float(vol_reg[-1]),   # agentic-charts: for drawing
+                       patterns=list(CP.drawn), breakouts=list(CP.bos), harmonics=list(HM.sets))
         R.H = H_arr
         R.gains = gains_arr
         R.tilt = tilt_arr
@@ -1012,6 +1112,7 @@ class Result:
             return dict(win_pct=w * 100.0 / n if n else None, wins=w, n=n,
                         edge_pts=(w - e) * 100.0 / n if (n and e > 0) else None, z=z)
         rows = {"DIV +/-": cell(0, 0), "U / Dn": cell(1, 1), "Early ?": cell(2, 2),
+                "Pat BO": cell(3, 3), "Harmonics": cell(5, 14),          # agentic-charts: ported rows
                 f"Conf top {p.confMinAlert}%": cell(20, 20), "Conf rest": cell(21, 21),
                 "Long": cell(18, 18), "Short": cell(19, 19), "Random": cell(15, 16)}
         fee_r = F["close"] * 2.0 * p.statCostPct / 100.0 / (F["atr"] * F["eff_stat_loss"]) if F["atr"] * F["eff_stat_loss"] > 0 else None

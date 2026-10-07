@@ -1,5 +1,7 @@
 import type {
+  AutoscaleInfo,
   IChartApi,
+  Logical,
   ISeriesApi,
   ISeriesPrimitive,
   ISeriesPrimitiveAxisView,
@@ -11,6 +13,10 @@ import type {
 } from "lightweight-charts";
 
 import type { TimeMapper } from "../timeMapper";
+
+/** How far beyond the visible candles (as a share of their high-low range, each side) an overlay may stretch the
+ * price scale. Further away it stays off-screen, so zooming in keeps the candles tall, like TradingView. */
+const AUTOSCALE_REACH = 0.25;
 
 export type DrawTarget = Parameters<ISeriesPrimitivePaneRenderer["draw"]>[0];
 export type MediaScope = { context: CanvasRenderingContext2D; mediaSize: { width: number; height: number } };
@@ -165,6 +171,16 @@ export abstract class PrimitiveBase implements ISeriesPrimitive<Time> {
 
   priceAxisViews(): readonly ISeriesPrimitiveAxisView[] {
     return this.emptyAxis;
+  }
+
+  /** The part of [low, high] the price scale should make room for: only what lies near the visible candles. */
+  protected nearAutoscale(low: number, high: number, start: Logical, end: Logical): AutoscaleInfo | null {
+    const r = this.mapper.priceRange(start, end);
+    if (!r) return null;
+    const reach = (r.hi - r.lo) * AUTOSCALE_REACH;
+    const lo = Math.max(low, r.lo - reach);
+    const hi = Math.min(high, r.hi + reach);
+    return lo <= hi ? { priceRange: { minValue: lo, maxValue: hi } } : null;
   }
 
   /** This chart's shared label registry (null before attach). */

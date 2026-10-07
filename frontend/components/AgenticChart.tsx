@@ -19,6 +19,8 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useSta
 import KimiPanel from "./KimiPanel";
 
 import { useChartEvents } from "@/hooks/useChartEvents";
+import { useOrderbookHeatmap } from "@/hooks/useOrderbookHeatmap";
+import { useSessionLevels } from "@/hooks/useSessionLevels";
 
 import { apiRequest, fetchKimi, fetchKlines } from "@/lib/api";
 import { mergeCandles, readCandles, writeCandles } from "@/lib/candleCache";
@@ -28,14 +30,18 @@ import { BoxZonePrimitive } from "@/lib/chart/primitives/BoxZonePrimitive";
 import { CountdownPrimitive } from "@/lib/chart/primitives/CountdownPrimitive";
 import { DrawingLayerPrimitive } from "@/lib/chart/primitives/DrawingLayerPrimitive";
 import { EventLinesPrimitive, type EventLine } from "@/lib/chart/primitives/EventLinesPrimitive";
+import { HeatmapPrimitive } from "@/lib/chart/primitives/HeatmapPrimitive";
 import { KimiPrimitive } from "@/lib/chart/primitives/KimiPrimitive";
 import { LabeledRayPrimitive } from "@/lib/chart/primitives/LabeledRayPrimitive";
+import { SessionLevelsPrimitive } from "@/lib/chart/primitives/SessionLevelsPrimitive";
 import { TrendLinePrimitive } from "@/lib/chart/primitives/TrendLinePrimitive";
 import { VolumeProfilePrimitive } from "@/lib/chart/primitives/VolumeProfilePrimitive";
 import { TimeMapper } from "@/lib/chart/timeMapper";
 import { HISTORY_BARS, WS_URL } from "@/lib/config";
 import { customLabel, fetchCustom, isCustom, POLL_MS } from "@/lib/customSymbols";
 import { formatCompact, formatPrice, pricePrecision } from "@/lib/format";
+import { isVisible, type LayerVisibility } from "@/lib/layers";
+import { sessionDrawing } from "@/lib/sessionLevels";
 import {
   atr,
   bollinger,
@@ -94,9 +100,11 @@ export interface KimiVisibility {
   fib: boolean;
   forecast: boolean;
   signals: boolean;
+  patterns: boolean;
+  harmonics: boolean;
 }
 
-const ALL_KIMI: KimiVisibility = { sr: true, fib: true, forecast: true, signals: true };
+const ALL_KIMI: KimiVisibility = { sr: true, fib: true, forecast: true, signals: true, patterns: true, harmonics: true };
 
 interface Props {
   symbol: string;
@@ -122,6 +130,8 @@ interface Props {
   onCrosshairTime?(time: number | null): void;
   /** An alert line or zone was dragged to a new price. */
   onAlertMove?(alertId: string, patch: { price?: number; price_low?: number; price_high?: number }): void;
+  /** Layers tab visibility, for the indicator layers drawn here (session levels, order-book heatmap). */
+  layers?: LayerVisibility;
 }
 
 const UP = "#22c55e";
@@ -299,6 +309,8 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
   const countdownRef = useRef<CountdownPrimitive | null>(null);
   const profileRef = useRef<VolumeProfilePrimitive | null>(null);
   const eventsRef = useRef<EventLinesPrimitive | null>(null);
+  const heatmapRef = useRef<HeatmapPrimitive | null>(null);
+  const sessionsRef = useRef<SessionLevelsPrimitive | null>(null);
   const overlayPrims = useRef<Array<BoxZonePrimitive | LabeledRayPrimitive | TrendLinePrimitive>>([]);
   const kimiPrimRef = useRef<KimiPrimitive | null>(null);
   const markersRef = useRef<{ ai: SeriesMarker<Time>[]; kimi: SeriesMarker<Time>[] }>({ ai: [], kimi: [] });
@@ -457,6 +469,10 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
 
     // First primitive on the series: clears the shared label registry at the start of every paint.
     candles.attachPrimitive(new LabelResetPrimitive(mapperRef.current));
+    const heatmap = new HeatmapPrimitive(mapperRef.current); // first of the bottom layer: behind everything else
+    candles.attachPrimitive(heatmap);
+    const sessions = new SessionLevelsPrimitive(mapperRef.current);
+    candles.attachPrimitive(sessions);
     const axisMask = new AxisMaskPrimitive("#0b0e14"); // hides price ticks inside the sub-panes
     candles.attachPrimitive(axisMask);
     const profile = new VolumeProfilePrimitive(mapperRef.current);
@@ -487,6 +503,8 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
     countdownRef.current = countdown;
     profileRef.current = profile;
     eventsRef.current = events;
+    heatmapRef.current = heatmap;
+    sessionsRef.current = sessions;
 
     // Sub-pane labels are placed in px: track the plot height (container minus time axis).
     // The time axis only gets its height on the first paint, hence the size-change hook too.
@@ -509,6 +527,8 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
       countdownRef.current = null;
       profileRef.current = null;
       eventsRef.current = null;
+      heatmapRef.current = null;
+      sessionsRef.current = null;
       overlayPrims.current = [];
       kimiPrimRef.current = null;
     };
@@ -659,7 +679,7 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
       if (last && c.time === last.time) data[data.length - 1] = c;
       else {
         data.push(c);
-        mapperRef.current.setData(data.map((d) => d.time), INTERVAL_SECONDS[interval]);
+        mapperRef.current.setData(data.map((d) => d.time), INTERVAL_SECONDS[interval], data);
         setBarCount((n) => n + 1);
         if (last && propsRef.current.indicators.kimi) {
           // The previous candle just closed: Kimi Cooked has a new run.
@@ -716,10 +736,13 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
     const load = async () => {
       // Puts a full dataset on the chart: the cached bars at once, then the network's.
       const render = (data: Candle[], src: DataSource) => {
+        // A second render of the same chart (cached bars, then the network's; a retry) keeps the view the user zoomed to.
+        const prevLen = candlesRef.current.length;
+        const prevRange = prevLen ? chartRef.current?.timeScale().getVisibleLogicalRange() : null;
         candlesRef.current = data;
         const lastBar = data[data.length - 1];
         setLegend(lastBar ? { c: lastBar, change: ((lastBar.close - lastBar.open) / lastBar.open) * 100 } : null);
-        mapperRef.current.setData(data.map((d) => d.time), INTERVAL_SECONDS[interval]);
+        mapperRef.current.setData(data.map((d) => d.time), INTERVAL_SECONDS[interval], data);
         const precision = pricePrecision(data[data.length - 1]?.close ?? 1);
         candleRef.current?.applyOptions({
           priceFormat: { type: "price", precision, minMove: 1 / 10 ** precision },
@@ -735,9 +758,15 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
           })),
         );
         refreshIndicators(true);
+        // Anchored to the newest bar, so bars that arrived in between scroll in as they do live.
+        const shift = data.length - prevLen;
         chartRef.current
           ?.timeScale()
-          .setVisibleLogicalRange({ from: Math.max(0, data.length - 160), to: data.length - 2 + rightOffsetRef.current });
+          .setVisibleLogicalRange(
+            prevRange
+              ? { from: prevRange.from + shift, to: prevRange.to + shift }
+              : { from: Math.max(0, data.length - 160), to: data.length - 2 + rightOffsetRef.current },
+          );
         source = src;
         emitFeed(source, true);
         setBarCount(data.length);
@@ -838,8 +867,10 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
     refreshIndicators(true);
   }, [props.indicators, settings, refreshIndicators]);
 
+  // Re-applying percentage mode turns the price scale's auto-scale back on, so only apply on a real change.
+  const comparing = (props.compare ?? []).length > 0;
   useEffect(() => {
-    const compare = (props.compare ?? []).length > 0;
+    const compare = comparing;
     chartRef.current?.applyOptions({
       grid: {
         vertLines: { visible: props.layout.grid },
@@ -849,7 +880,7 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
         mode: compare ? PriceScaleMode.Percentage : props.layout.logScale ? PriceScaleMode.Logarithmic : PriceScaleMode.Normal,
       },
     });
-  }, [props.layout.grid, props.layout.logScale, props.compare]);
+  }, [props.layout.grid, props.layout.logScale, comparing]);
 
   // Timezone of the time axis and crosshair label.
   useEffect(() => {
@@ -1030,6 +1061,31 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
     eventsRef.current?.setItems(eventItems);
   }, [eventItems]);
 
+  // ---------------------------------------------------- session / period levels and the order-book heatmap
+  const layers = props.layers ?? {};
+  const sessionsOn = !!props.indicators.sessions && !custom && isVisible(layers, "sessions");
+  const sessionSettings = settings.sessions ?? DEFAULT_INDICATOR_SETTINGS.sessions;
+  const levels = useSessionLevels(props.symbol, props.interval, sessionsOn, sessionSettings.orMinutes);
+  useEffect(() => {
+    sessionsRef.current?.set(sessionDrawing(sessionsOn ? levels.data : null, sessionSettings));
+  }, [levels.data, sessionsOn, sessionSettings]);
+
+  const heatmapOn = !!props.indicators.heatmap && !custom && isVisible(layers, "heatmap");
+  const heat = useOrderbookHeatmap(props.symbol, props.interval, heatmapOn);
+  useEffect(() => {
+    heatmapRef.current?.set(heatmapOn ? heat.data : null);
+  }, [heat.data, heatmapOn]);
+  const chips: { text: string; demo: boolean }[] = [];
+  if (sessionsOn && (levels.error || levels.data?.source === "synthetic"))
+    chips.push({ text: levels.error ? `Session levels: ${levels.error}` : "Session levels: demo data", demo: !levels.error });
+  if (heatmapOn && heat.error) chips.push({ text: `Heatmap: ${heat.error}`, demo: false });
+  else if (heatmapOn && heat.data?.source === "synthetic") chips.push({ text: "Heatmap: demo order book", demo: true });
+  else if (heatmapOn && heat.data?.startedAt)
+    chips.push({
+      text: `Order book since ${new Date(heat.data.startedAt * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`,
+      demo: false,
+    });
+
   // ---------------------------------------------------- Kimi Cooked
   const kimiOn = !!props.indicators.kimi && !custom;
   useEffect(() => {
@@ -1055,7 +1111,7 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [kimiOn, props.symbol, props.interval, kimiTick]);
 
-  const kimiPartsKey = `${kimiParts.sr}${kimiParts.fib}${kimiParts.forecast}${kimiParts.signals}`;
+  const kimiPartsKey = `${kimiParts.sr}${kimiParts.fib}${kimiParts.forecast}${kimiParts.signals}${kimiParts.patterns}${kimiParts.harmonics}`;
   useEffect(() => {
     const series = candleRef.current;
     if (!series) return;
@@ -1093,9 +1149,16 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
     const ts = chartRef.current?.timeScale();
     if (!ts) return;
     const offset = kimiHorizon ? kimiHorizon + 36 : 12;
+    const prev = rightOffsetRef.current;
+    if (offset === prev) return;
+    // Only follow the new room on the right while the user is looking at the newest bars; a chart they
+    // scrolled back through stays where it is when Kimi re-runs on a closed candle.
+    const atLiveEdge = ts.scrollPosition() >= prev - 2;
+    const range = ts.getVisibleLogicalRange();
     rightOffsetRef.current = offset;
     ts.applyOptions({ rightOffset: offset });
-    ts.scrollToPosition(offset, false);
+    if (atLiveEdge) ts.scrollToPosition(offset, false);
+    else if (range) ts.setVisibleLogicalRange(range);
   }, [kimiHorizon]);
 
   // ---------------------------------------------------- user drawings
@@ -1412,6 +1475,18 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
           {paneVals.cvd && <span style={{ color: CVD_COLOR }}>{paneVals.cvd}</span>}
           {cvdError && <span className="text-yellow-300">{cvdError}</span>}
         </PaneLabel>
+      )}
+      {chips.length > 0 && (
+        <div className={`pointer-events-none absolute left-3 z-10 flex flex-wrap gap-1 ${kimiOn ? "top-12" : "top-7"}`}>
+          {chips.map((c) => (
+            <span
+              key={c.text}
+              className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${c.demo ? "bg-yellow-400/15 text-yellow-300" : "bg-panel/80 text-mute"}`}
+            >
+              {c.text}
+            </span>
+          ))}
+        </div>
       )}
       {eventTip && (
         <div

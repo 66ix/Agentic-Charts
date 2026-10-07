@@ -48,6 +48,12 @@ class Settings:
     oi_top_symbols: int = field(default_factory=lambda: int(_env("OI_TOP_SYMBOLS", "40")))
     liquidations_store: str = field(default_factory=lambda: _env(
         "LIQUIDATIONS_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "liquidations.json")))
+    # Order-book heatmap (orderbook_heatmap.py): spot depth snapshots every N seconds while someone views the symbol,
+    # `limit` levels each (Binance weight 50 at 1000, 250 at 5000), kept for M minutes, ±R% around the mid.
+    heatmap_interval_seconds: float = field(default_factory=lambda: float(_env("HEATMAP_INTERVAL_SECONDS", "10")))
+    heatmap_depth_limit: int = field(default_factory=lambda: int(_env("HEATMAP_DEPTH_LIMIT", "1000")))
+    heatmap_history_minutes: int = field(default_factory=lambda: int(_env("HEATMAP_HISTORY_MINUTES", "240")))
+    heatmap_range_pct: float = field(default_factory=lambda: float(_env("HEATMAP_RANGE_PCT", "3")))
 
     llm_provider: str = field(default_factory=lambda: _env("LLM_PROVIDER", "ollama").lower())
     llm_timeout: float = field(default_factory=lambda: float(_env("LLM_TIMEOUT_SECONDS", "30")))
@@ -63,6 +69,9 @@ class Settings:
     anthropic_model: str = field(default_factory=lambda: _env("ANTHROPIC_MODEL", "claude-sonnet-5-5"))
     # "tools": the model may look at other timeframes/coins before planning (agent_loop.py);
     # "plan": one structured call, faster and better suited to small local models.
+    # The model picked in Settings → AI model, and its eval runs (model_choice.py); memory = not kept.
+    llm_choice_store: str = field(default_factory=lambda: _env(
+        "LLM_CHOICE_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "llm_choice.json")))
     agent_mode: str = field(default_factory=lambda: _env("AGENT_MODE", "tools").lower())
     agent_max_steps: int = field(default_factory=lambda: int(_env("AGENT_MAX_STEPS", "4")))
     # Rate limits per client ("N/second|minute|hour|day", or 0 to disable) and a global daily agent cap.
@@ -101,6 +110,9 @@ class Settings:
     # Trade journal (journal.py): logged trades. JOURNAL_STORE=memory keeps them in memory only (lost on restart).
     journal_store: str = field(default_factory=lambda: _env(
         "JOURNAL_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "journal.json")))
+    # Weekly trade review schedule (postmortem.py); `memory` keeps it in memory only.
+    journal_review_store: str = field(default_factory=lambda: _env(
+        "JOURNAL_REVIEW_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "journal_review.json")))
 
     # ---- Economic calendar and crypto news (events.py) ----
     # Forex Factory-format JSON feeds; next week's is often published late in the week, until then it is skipped.
@@ -123,6 +135,30 @@ class Settings:
         "SIGNAL_ALERTS_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "signal_alerts.json")))
     brief_store: str = field(default_factory=lambda: _env(
         "BRIEF_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "brief.json")))
+    # Trade manager (trade_manager.py): live trades it watches and the advice it gave.
+    trades_store: str = field(default_factory=lambda: _env(
+        "TRADES_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "trades.json")))
+
+    # Market-wide setup scanner (market_scanner.py): the top N USDT pairs by 24h quote volume, at most this many
+    # coins loading at once. MARKET_SCAN_SCHEDULE runs it on a timer, "timeframe=minutes" pairs such as
+    # "15m=10,4h=60" (empty = on demand only). MARKET_SCAN_NOTIFY_TOP > 0 sends that many of the best setups to
+    # Telegram / Discord after each timed run. MARKET_SCAN_STORE=memory keeps the last results in memory only.
+    market_scan_top: int = field(default_factory=lambda: max(5, min(int(_env("MARKET_SCAN_TOP", "100")), 300)))
+    market_scan_concurrency: int = field(
+        default_factory=lambda: max(1, min(int(_env("MARKET_SCAN_CONCURRENCY", "4")), 16)))
+    market_scan_schedule: str = field(default_factory=lambda: _env("MARKET_SCAN_SCHEDULE", ""))
+    market_scan_notify_top: int = field(default_factory=lambda: max(0, int(_env("MARKET_SCAN_NOTIFY_TOP", "0"))))
+    market_scan_store: str = field(default_factory=lambda: _env(
+        "MARKET_SCAN_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "market_scan.json")))
+
+    # Read-only Binance account import (binance_account.py, binance_import.py). The env key wins over one entered
+    # in the app, which is kept in BINANCE_KEY_STORE (mode 600). Imported fills live in BINANCE_IMPORT_STORE.
+    binance_api_key: str = field(default_factory=lambda: _env("BINANCE_API_KEY", ""), repr=False)
+    binance_api_secret: str = field(default_factory=lambda: _env("BINANCE_API_SECRET", ""), repr=False)
+    binance_key_store: str = field(default_factory=lambda: _env(
+        "BINANCE_KEY_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "binance_key.json")))
+    binance_import_store: str = field(default_factory=lambda: _env(
+        "BINANCE_IMPORT_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "binance_import.json")))
 
 
 @lru_cache

@@ -7,11 +7,13 @@ import { useEffect, useRef, useState } from "react";
 import EquityCurve from "@/components/EquityCurve";
 import { usePersistentState } from "@/hooks/usePersistentState";
 import {
+  BACKTEST_ASK_KEY,
   BACKTEST_SETUPS,
   BACKTEST_TARGETS,
   backtestAllOverlays,
   backtestTradeOverlays,
   runBacktest,
+  type BacktestAsk,
   type BacktestResult,
   type BacktestSetup,
   type BacktestTarget,
@@ -71,6 +73,9 @@ function Card({ label, value, cls }: { label: string; value: string; cls?: strin
  */
 export default function BacktestPanel(p: DockPanelProps) {
   const [form, setForm] = usePersistentState<Form>("ac:backtest-form", DEFAULT_FORM);
+  // "Open in Backtest" on a plan's track record (lib/backtest.ts openTrackRecordInBacktest).
+  const [ask] = usePersistentState<BacktestAsk | null>(BACKTEST_ASK_KEY, null);
+  const handledAsk = useRef(0);
   const [result, setResult] = useState<BacktestResult | null>(null);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -95,7 +100,7 @@ export default function BacktestPanel(p: DockPanelProps) {
     setShowAll(false);
   };
 
-  const run = async () => {
+  const run = async (g: Form = f) => {
     abortRef.current?.abort();
     const ctrl = new AbortController();
     abortRef.current = ctrl;
@@ -104,7 +109,15 @@ export default function BacktestPanel(p: DockPanelProps) {
     clearChart();
     try {
       const res = await runBacktest(
-        { symbol, interval, setup: f.setup, bars: f.bars, target: f.target, max_hold_bars: f.maxHold, fee_pct: f.fee },
+        {
+          symbol: normCoin(g.coin) || p.symbol,
+          interval: g.interval || p.interval,
+          setup: g.setup,
+          bars: g.bars,
+          target: g.target,
+          max_hold_bars: g.maxHold,
+          fee_pct: g.fee,
+        },
         ctrl.signal,
       );
       setResult(res);
@@ -114,6 +127,15 @@ export default function BacktestPanel(p: DockPanelProps) {
       if (abortRef.current === ctrl) setRunning(false);
     }
   };
+
+  useEffect(() => {
+    if (!ask || ask.at <= handledAsk.current || Date.now() - ask.at > 60_000) return;
+    handledAsk.current = ask.at;
+    const next: Form = { ...DEFAULT_FORM, coin: ask.symbol, interval: ask.interval, setup: ask.setup, bars: ask.bars, target: ask.target };
+    setForm(next);
+    void run(next);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ask]);
 
   const draw = (res: BacktestResult, overlays: ReturnType<typeof backtestAllOverlays>) => {
     if (drawnFor.current && drawnFor.current !== res.symbol) onChartOverlays("backtest", drawnFor.current, []);
@@ -202,7 +224,7 @@ export default function BacktestPanel(p: DockPanelProps) {
             <span className="min-w-0 flex-1 truncate">
               {displaySymbol(symbol)} · {interval} · last {f.bars.toLocaleString()} candles
             </span>
-            <button type="button" onClick={run} disabled={running}
+            <button type="button" onClick={() => run()} disabled={running}
               className="inline-flex h-7 items-center gap-1 rounded bg-accent px-3 text-[11px] font-semibold text-white disabled:opacity-60">
               {running ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
               {running ? "Running…" : "Run"}

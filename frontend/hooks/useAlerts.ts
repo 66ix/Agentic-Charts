@@ -15,11 +15,13 @@ import {
 import {
   clearAlertHistory,
   createSignalAlerts,
+  createZoneTrigger,
   deleteSignalAlert,
   fetchAlertHistory,
   fetchBriefSettings,
   previewBrief,
   previewSignalAlert,
+  previewZoneTrigger,
   saveBriefSettings,
   sendBrief,
   updateSignalAlert,
@@ -31,7 +33,7 @@ import {
   type SignalId,
 } from "@/lib/alerts";
 import { WS_URL } from "@/lib/config";
-import type { AlertChannels, AlertSpec, Interval, PriceAlert } from "@/lib/types";
+import type { AlertChannels, AlertSpec, Interval, PriceAlert, ZoneTriggerSpec } from "@/lib/types";
 
 import { usePersistentState } from "./usePersistentState";
 
@@ -136,6 +138,7 @@ interface WsMessage {
   text?: string;
   time?: number;
   item?: AlertHistoryItem;
+  trade_id?: string;
 }
 
 /**
@@ -232,6 +235,10 @@ export function useAlerts(onFire: (fired: FiredAlert[]) => void, onSignal?: (fir
           beep(660);
           notify(`${fired.alert.symbol} ${fired.alert.interval} signal`, fired.text, `signal-${fired.alert.id}`);
           onSignalRef.current?.(fired);
+        } else if (msg.type === "trade_advice" && msg.text) {
+          // The trade manager (Live trades tab) has advice on an open trade.
+          beep(880);
+          notify("Live trade", String(msg.text), `trade-${msg.trade_id}`);
         } else if (msg.type === "history" && msg.item) {
           addHistory([msg.item]);
         }
@@ -361,6 +368,23 @@ export function useAlerts(onFire: (fired: FiredAlert[]) => void, onSignal?: (fir
     [setSignalAlerts],
   );
 
+  /** A lower-timeframe confirmation inside a zone → the saved alert, or null (and `error`) on failure. */
+  const addTrigger = useCallback(
+    async (spec: ZoneTriggerSpec) => {
+      requestNotificationPermission();
+      try {
+        const { alert } = await createZoneTrigger(spec);
+        setSignalAlerts((as) => [alert, ...as.filter((a) => a.id !== alert.id)]);
+        setActionError(null);
+        return alert;
+      } catch (err) {
+        setActionError(`Trigger alert not saved: ${(err as Error).message}`);
+        return null;
+      }
+    },
+    [setSignalAlerts],
+  );
+
   const updateSignal = useCallback(
     (id: string, patch: SignalAlertPatch) =>
       run("Could not update the signal alert", async () => {
@@ -428,6 +452,8 @@ export function useAlerts(onFire: (fired: FiredAlert[]) => void, onSignal?: (fir
     updateSignal,
     removeSignal,
     previewSignal: previewSignalAlert,
+    addTrigger,
+    previewTrigger: previewZoneTrigger,
     history,
     refreshHistory,
     clearHistory,

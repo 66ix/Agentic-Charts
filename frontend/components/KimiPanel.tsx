@@ -36,6 +36,28 @@ export default function KimiPanel({ data, loading, error }: { data: KimiResult |
   const [open, setOpen] = usePersistentState("ac:kimi-panel-open", false);
   const status = error ? "unavailable" : loading && !data ? "computing…" : null;
   const recent = data ? data.signals.slice(-6).reverse() : [];
+  // Chart patterns and harmonics on the chart, newest first, with what they are waiting for.
+  const shapes = data
+    ? [
+        ...(data.patterns ?? []).map((p) => ({
+          name: p.name,
+          direction: p.direction,
+          time: p.time,
+          detail:
+            p.state === "watching" && p.breakout_level !== null
+              ? `breaks ${formatPrice(p.breakout_level)}`
+              : p.state === "breakout" && p.target !== null
+                ? `broke out → ${formatPrice(p.target)}`
+                : p.state,
+        })),
+        ...(data.harmonics ?? []).map((h) => ({
+          name: h.name,
+          direction: h.direction,
+          time: h.time,
+          detail: h.state === "active" || h.state === "compromised" ? `${h.state} · TP1 ${formatPrice(h.tp1)}` : h.state,
+        })),
+      ].sort((a, b) => b.time - a.time)
+    : [];
 
   return (
     <div className="absolute left-3 top-7 z-20 max-w-[calc(100%-5rem)] font-mono text-[10px] leading-4">
@@ -69,6 +91,22 @@ export default function KimiPanel({ data, loading, error }: { data: KimiResult |
                         {s.result}
                         {s.r !== null ? ` ${s.r >= 0 ? "+" : ""}${s.r.toFixed(2)}R` : ""}
                       </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {shapes.length > 0 && (
+            <div>
+              <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wide text-mute">Patterns</div>
+              <table className="w-full">
+                <tbody>
+                  {shapes.map((p) => (
+                    <tr key={`${p.name}-${p.time}`}>
+                      <td className={clsx("pr-2", p.direction === "bullish" ? "text-up" : "text-down")}>{p.name}</td>
+                      <td className="pr-2 text-mute">{new Date(p.time * 1000).toISOString().slice(5, 16).replace("T", " ")}</td>
+                      <td className="text-right text-ink">{p.detail}</td>
                     </tr>
                   ))}
                 </tbody>

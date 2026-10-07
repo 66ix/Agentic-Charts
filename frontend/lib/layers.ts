@@ -19,6 +19,8 @@ export type LayerId =
   | "kimiFib"
   | "kimiForecast"
   | "kimiSignals"
+  | "kimiPatterns"
+  | "kimiHarmonics"
   | "gridbots"
   | "journal"
   | "backtest"
@@ -26,7 +28,9 @@ export type LayerId =
   | "liqs"
   | "events"
   | "compare"
-  | "panels";
+  | "panels"
+  | "sessions"
+  | "heatmap";
 
 export interface LayerInfo {
   id: LayerId;
@@ -46,6 +50,8 @@ export const LAYERS: LayerInfo[] = [
   { id: "kimiFib", label: "Fib ladder", group: "Kimi Cooked" },
   { id: "kimiForecast", label: "Forecast", group: "Kimi Cooked" },
   { id: "kimiSignals", label: "Signal labels", group: "Kimi Cooked" },
+  { id: "kimiPatterns", label: "Chart patterns and break-outs", group: "Kimi Cooked" },
+  { id: "kimiHarmonics", label: "Harmonic patterns and PRZ", group: "Kimi Cooked" },
   { id: "drawings", label: "My drawings", group: "Yours" },
   { id: "custom", label: "Levels you asked for", group: "Yours" },
   { id: "alerts", label: "Alert lines", group: "Yours" },
@@ -56,6 +62,8 @@ export const LAYERS: LayerInfo[] = [
   { id: "liqs", label: "Liquidation levels", group: "Tools and data" },
   { id: "events", label: "Events and news", group: "Tools and data" },
   { id: "compare", label: "Compared symbols", group: "Tools and data" },
+  { id: "sessions", label: "Session and period levels", group: "Tools and data" },
+  { id: "heatmap", label: "Order-book heatmap", group: "Tools and data" },
   { id: "panels", label: "Other panels", group: "Tools and data" },
 ];
 
@@ -71,7 +79,7 @@ const KIND_LAYER: Array<[RegExp, LayerId]> = [
   [/^(poc|vah|val)$/, "volume"],
   [/^custom_/, "custom"],
   [/^plan_/, "plan"],
-  [/^alert$/, "alerts"],
+  [/^(alert|trigger_zone)$/, "alerts"],
 ];
 
 /** Layer of an agent overlay, by its `kind`. */
@@ -87,6 +95,7 @@ export function panelLayer(key: string): LayerId {
   const map: Record<string, LayerId> = {
     gridbot: "gridbots",
     journal: "journal",
+    trade: "journal",
     backtest: "backtest",
     walls: "walls",
     liqs: "liqs",

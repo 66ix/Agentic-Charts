@@ -11,6 +11,9 @@ REST
   POST /api/agent/analyze        prompt → structured chart overlays
   *    /api/alerts*              price alerts, signal alerts and the alert history
   *    /api/brief*               the scheduled market brief
+  *    /api/market-scan*         best long / short setups across the top coins by volume
+  GET  /api/levels/sessions      session (Asia/London/NY), previous day/week/month and opening-range levels
+  GET  /api/orderbook/heatmap    resting order-book liquidity over time (sampled while someone polls it)
 WebSocket
   /ws/klines?symbol=INJUSDT&interval=4h   live candle updates
   /ws/alerts                              alert snapshots, fires and history items
@@ -23,6 +26,7 @@ import contextlib
 import logging
 from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
@@ -34,20 +38,30 @@ from .brief import BriefService, BriefSettings, NoChannelError
 from .config import get_settings
 from .derivatives import DerivativesService
 from .gridbot import GridBotCreate, GridBotPatch, GridBotService, GridSimulateRequest, error_text
+from .grid_planner import GridBacktestRequest, GridPlanRequest, backtest_grid, plan_grid
+from .binance_account import BinanceAccount, BinanceApiError, BinanceKeyError
+from .binance_import import BinanceImportService, ClassifyRequest, ImportSettings
 from .journal import JournalPatch, JournalService, NewJournalEntry, entry_json
 from .events import EventsService
 from .futures_data import FUTURES_PERIODS, FuturesDataService
 from .kimi_service import KimiService
 from .llm import LLMClient
+from .postmortem import PostMortemService, ReviewSettings
 from .market_data import MarketData, MarketDataError
 from .market_index import MarketIndexService
 from .market_metrics import MarketMetricsService
+from .model_choice import ModelChoice, ModelChooser
+from .market_scanner import MarketScanner
+from .orderbook_heatmap import OrderbookHeatmapService
 from .ratelimit import RateLimitMiddleware
 from .scanner import WatchlistCache, tickers
+from .session_levels import SessionLevelsService
 from .schemas import (INTERVALS, AnalyzeRequest, AnalyzeResponse, CreateAlertsRequest, KimiResponse, MarketMetrics,
-                      ScanResult)
+                      ScanResult, ZoneTriggerSpec)
 from .signal_alerts import SIGNALS, CreateSignalAlertsRequest, SignalAlertPatch, SignalAlertService
 from .stream_hub import StreamHub
+from .trade_manager import NewManagedTrade, TradeManager, TradePatch, from_journal
+from .track_record import TrackRecordService
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("agentic-charts")
@@ -58,6 +72,7 @@ async def lifespan(app: FastAPI):
     market = MarketData()
     app.state.market = market
     app.state.llm = LLMClient()
+    app.state.models = ModelChooser(app.state.llm)  # model picked in the app's settings, and model evals
     app.state.derivatives = DerivativesService()
     app.state.derivatives.start()
     app.state.metrics = MarketMetricsService(app.state.derivatives)
@@ -68,6 +83,9 @@ async def lifespan(app: FastAPI):
     await app.state.alerts.start()
     app.state.gridbots = GridBotService(market)  # grid bot tracker: saved bots, results cached per 1m bar
     app.state.journal = JournalService(market)  # trade journal: entries tracked on 1m candles
+    # Read-only Binance account: fills → journal, bot vs manual, positions (binance_account.py, binance_import.py).
+    app.state.binance = BinanceImportService(BinanceAccount(), app.state.journal, app.state.gridbots, market)
+    app.state.binance.start()
     # Market data panel (futures, order flow, estimated liquidation levels), calendar + news, market-cap indexes.
     app.state.futures = FuturesDataService(market, app.state.derivatives)
     app.state.events = EventsService()
@@ -79,10 +97,31 @@ async def lifespan(app: FastAPI):
     app.state.brief = BriefService(market, app.state.kimi, app.state.derivatives, app.state.alerts,
                                    events_provider=app.state.events.upcoming_events)
     app.state.brief.start()
+    # Trade manager: live trades it watches on closed candles, advising through the same channels.
+    app.state.trades = TradeManager(market, app.state.alerts)
+    app.state.trades.open_positions = app.state.binance.open_position_keys  # closes positions sold on Binance
+    app.state.trades.start()
+    # Market-wide setup scanner (market_scanner.py) with plan track records (track_record.py), shared with the agent.
+    app.state.market_scanner = MarketScanner(market, TrackRecordService(market), app.state.alerts)
+    app.state.market_scanner.start()
+    # Session/period levels (session_levels.py) and the order-book heatmap (orderbook_heatmap.py).
+    app.state.session_levels = SessionLevelsService(market)
+    app.state.heatmap = OrderbookHeatmapService(market, app.state.hub)
+    # Post-mortems of closed journal trades and the weekly trade review (postmortem.py).
+    app.state.postmortems = PostMortemService(app.state.journal, market, app.state.llm, app.state.alerts,
+                                              kimi=app.state.kimi)
+    app.state.postmortems.start()
     log.info("Data source: %s | LLM provider: %s %s", market.settings.data_source,
              app.state.llm.provider, app.state.llm.model)
     yield
+    await app.state.postmortems.close()
+    await app.state.market_scanner.close()
     await app.state.brief.close()
+    await app.state.models.close()
+    await app.state.trades.close()
+    await app.state.heatmap.close()
+    await app.state.binance.close()
+    await app.state.binance.account.close()
     await app.state.signal_alerts.close()
     await asyncio.gather(app.state.futures.close(), app.state.events.close(), app.state.indexes.close())
     await app.state.alerts.close()
@@ -187,7 +226,9 @@ async def agent_analyze(req: AnalyzeRequest, request: Request) -> AnalyzeRespons
     try:
         st = request.app.state
         return await run_analysis(req, st.market, st.llm, st.derivatives, st.kimi,
-                                  getattr(st, "futures", None), getattr(st, "events", None))
+                                  getattr(st, "futures", None), getattr(st, "events", None),
+                                  getattr(st, "market_scanner", None), levels=getattr(st, "session_levels", None),
+                                  gridbots=getattr(st, "gridbots", None))
     except MarketDataError as exc:
         raise HTTPException(502, str(exc)) from exc
     except ValueError as exc:
@@ -255,6 +296,34 @@ async def preview_signal_alert(request: Request, symbol: str = Query(...), inter
     try:
         return await request.app.state.signal_alerts.preview(_norm_symbol(symbol), _check_interval(interval),
                                                              signal, bars)
+    except MarketDataError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+# Zone trigger alerts (zone_triggers.py) are signal alerts with signal "zone_trigger": listed, edited and deleted
+# with the routes above.
+#   POST   /api/zone-triggers             ZoneTriggerSpec → {alert}
+#   POST   /api/zone-triggers/preview     ZoneTriggerSpec, ?bars= → {zone, hits: [{time, price, text, stop}], note?}
+
+
+@app.post("/api/zone-triggers")
+async def create_zone_trigger(spec: ZoneTriggerSpec, request: Request) -> dict:
+    try:
+        alert = await request.app.state.signal_alerts.add_trigger(spec)
+    except MarketDataError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"alert": alert.model_dump()}
+
+
+@app.post("/api/zone-triggers/preview")
+async def preview_zone_trigger(spec: ZoneTriggerSpec, request: Request,
+                               bars: int = Query(300, ge=10, le=1000)) -> dict:
+    try:
+        return await request.app.state.signal_alerts.preview_trigger(spec, bars)
     except MarketDataError as exc:
         raise HTTPException(502, str(exc)) from exc
     except ValueError as exc:
@@ -401,6 +470,110 @@ async def gridbot_simulate(request: Request, body: dict = Body(...)) -> dict:
     return result.model_dump()
 
 
+# ------------------------------------------------------------------ trade manager
+
+
+@app.get("/api/trades/managed")
+async def trades_list(request: Request) -> dict:
+    return {"trades": [t.model_dump(exclude={"keys"}) for t in request.app.state.trades.list()]}
+
+
+@app.post("/api/trades/managed")
+async def trades_add(request: Request, body: dict = Body(...)) -> dict:
+    """A trade to manage: its fields, or {"journal_id", "interval"?} to manage a journal entry."""
+    st = request.app.state
+    try:
+        if body.get("journal_id"):
+            entry = st.journal.get(body["journal_id"])
+            if entry is None:
+                raise HTTPException(404, "Journal entry not found")
+            new = from_journal(entry, body.get("interval"))
+        else:
+            new = NewManagedTrade.model_validate(body)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return (await st.trades.add(new)).model_dump(exclude={"keys"})
+
+
+@app.patch("/api/trades/managed/{trade_id}")
+async def trades_update(trade_id: str, request: Request, body: dict = Body(...)) -> dict:
+    try:
+        t = await request.app.state.trades.update(trade_id, TradePatch.model_validate(body))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    if t is None:
+        raise HTTPException(404, "Managed trade not found")
+    return t.model_dump(exclude={"keys"})
+
+
+@app.delete("/api/trades/managed/{trade_id}")
+async def trades_delete(trade_id: str, request: Request) -> dict:
+    if not request.app.state.trades.remove(trade_id):
+        raise HTTPException(404, "Managed trade not found")
+    return {"ok": True}
+
+
+# ------------------------------------------------------------------ AI model (Settings → AI model)
+
+
+@app.get("/api/llm/models")
+async def llm_models(request: Request) -> dict:
+    models = request.app.state.models
+    return {**models.current(), "ollama": await models.ollama_models()}
+
+
+@app.put("/api/llm/model")
+async def llm_choose(request: Request, body: dict = Body(...)) -> dict:
+    """{"provider", "model"} switches the agent's model; {"provider": null} goes back to the .env one."""
+    try:
+        choice = ModelChoice.model_validate(body) if body.get("provider") else None
+        return request.app.state.models.choose(choice)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.get("/api/llm/evals")
+async def llm_evals(request: Request) -> dict:
+    return {"runs": [r.model_dump(exclude={"cases"}) for r in request.app.state.models.runs()]}
+
+
+@app.post("/api/llm/evals")
+async def llm_eval_start(request: Request, body: dict = Body(...)) -> dict:
+    try:
+        limit = body.pop("limit", None)
+        run = request.app.state.models.start_eval(ModelChoice.model_validate(body), limit)
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return run.model_dump()
+
+
+@app.get("/api/llm/evals/{run_id}")
+async def llm_eval_get(run_id: str, request: Request) -> dict:
+    run = request.app.state.models.run(run_id)
+    if run is None:
+        raise HTTPException(404, "Eval run not found")
+    return run.model_dump()
+
+
+# Grid bot planner (grid_planner.py):
+#   POST   /api/gridbot/plan              {symbol, investment?, timeframe?, grid_type?, fee_rate?, ...} → GridPlan
+#   POST   /api/gridbot/backtest          {symbol, lower, upper, grids, grid_type, investment, days, compare_grids}
+
+
+@app.post("/api/gridbot/plan")
+async def gridbot_plan(request: Request, body: dict = Body(...)) -> dict:
+    req: GridPlanRequest = _gridbot_body(GridPlanRequest, body)
+    return (await _gridbot_run(plan_grid(request.app.state.gridbots, req))).model_dump()
+
+
+@app.post("/api/gridbot/backtest")
+async def gridbot_backtest(request: Request, body: dict = Body(...)) -> dict:
+    req: GridBacktestRequest = _gridbot_body(GridBacktestRequest, body)
+    return (await _gridbot_run(backtest_grid(request.app.state.gridbots, req))).model_dump()
+
+
 @app.get("/api/gridbots")
 async def gridbots_list(request: Request) -> dict:
     return {"bots": [b.model_dump() for b in request.app.state.gridbots.list()]}
@@ -507,13 +680,19 @@ async def ws_klines(ws: WebSocket, symbol: str = "INJUSDT", interval: str = "4h"
 #   POST   /api/journal                   NewJournalEntry → {entry}
 #   PATCH  /api/journal/{id}              {notes?, tags?, setup?, cancel?, close?: {price?, time?}} → {entry}
 #   DELETE /api/journal/{id}
+#   POST   /api/journal/{id}/postmortem   (re)writes a closed trade's post-mortem → {entry}
+#   GET    /api/journal/review?days=7     weekly review: stats, best/worst setups and coins, recurring lessons, text
+#   GET/PUT /api/journal/review/settings  weekly review schedule {enabled, weekday, time, timezone, days}
+#   POST   /api/journal/review/send       sends the review now; 400 without a channel
 #   POST   /api/backtest                  BacktestRequest → trades, stats, equity, notes
 
 
 @app.get("/api/journal")
 async def list_journal(request: Request) -> dict:
     service: JournalService = request.app.state.journal
-    return {"entries": [entry_json(e, ev) for e, ev in await service.rows()]}
+    rows = await service.rows()
+    request.app.state.postmortems.schedule_missing(rows)  # closed trades without a review get one in the background
+    return {"entries": [entry_json(e, ev) for e, ev in rows]}
 
 
 @app.get("/api/journal/stats")
@@ -529,6 +708,7 @@ async def create_journal_entry(req: NewJournalEntry, request: Request) -> dict:
         entry, ev = await request.app.state.journal.add(req)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+    request.app.state.postmortems.schedule_missing([(entry, ev)])
     return {"entry": entry_json(entry, ev)}
 
 
@@ -540,7 +720,46 @@ async def update_journal_entry(entry_id: str, patch: JournalPatch, request: Requ
         raise HTTPException(409, str(exc)) from exc
     if res is None:
         raise HTTPException(404, "Trade not found")
+    request.app.state.postmortems.schedule_missing([res])
     return {"entry": entry_json(*res)}
+
+
+@app.post("/api/journal/{entry_id}/postmortem")
+async def journal_postmortem(entry_id: str, request: Request) -> dict:
+    journal: JournalService = request.app.state.journal
+    try:
+        entry = await request.app.state.postmortems.generate(entry_id)
+    except MarketDataError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if entry is None:
+        raise HTTPException(404, "Trade not found")
+    return {"entry": entry_json(entry, await journal.evaluate(entry))}
+
+
+@app.get("/api/journal/review")
+async def journal_review(request: Request, days: int | None = Query(None, ge=1, le=31)) -> dict:
+    return await request.app.state.postmortems.weekly(days)
+
+
+@app.get("/api/journal/review/settings")
+async def journal_review_settings(request: Request) -> dict:
+    return request.app.state.postmortems.status()
+
+
+@app.put("/api/journal/review/settings")
+async def save_journal_review_settings(settings_in: ReviewSettings, request: Request) -> dict:
+    request.app.state.postmortems.update_settings(settings_in)
+    return request.app.state.postmortems.status()
+
+
+@app.post("/api/journal/review/send")
+async def send_journal_review(request: Request, days: int | None = Query(None, ge=1, le=31)) -> dict:
+    try:
+        return await request.app.state.postmortems.send_weekly(days)
+    except NoChannelError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @app.delete("/api/journal/{entry_id}")
@@ -558,6 +777,104 @@ async def backtest(req: BacktestRequest, request: Request) -> dict:
         raise HTTPException(502, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+# ------------------------------------------------ Binance account (read-only key) --
+#   GET    /api/binance/key                  configured, source (env/file), last 4 chars, permissions, problems
+#   PUT    /api/binance/key                  {api_key, api_secret} → checked with Binance, saved only if read-only
+#   POST   /api/binance/key/test             ask Binance again what the key may do
+#   DELETE /api/binance/key
+#   GET    /api/binance/import               settings, last import, fill counts by kind
+#   PUT    /api/binance/import/settings      {auto_minutes, symbols, futures, lookback_days}
+#   POST   /api/binance/import               {symbols?} → new fills, journal added/updated/removed, notes
+#   GET    /api/binance/fills                ?symbol=&kind=manual|bot|unknown&market=spot|futures&limit=
+#   GET    /api/binance/trades               ?kind= → round trips rebuilt from the fills
+#   POST   /api/binance/classify             {keys, kind (null clears), bot_id?} → re-classify, journal re-synced
+#   GET    /api/binance/positions            ?refresh= → own spot holdings + futures positions, bots' separately
+#   GET    /api/binance/gridbots/{id}/compare  a tracked grid bot's real fills next to the simulated ones
+
+
+async def _binance_run(coro, key_status: int = 400):
+    try:
+        return await coro
+    except BinanceKeyError as exc:
+        raise HTTPException(key_status, str(exc)) from exc
+    except (BinanceApiError, httpx.HTTPError) as exc:
+        raise HTTPException(502, f"Binance: {exc}") from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.get("/api/binance/key")
+async def binance_key(request: Request) -> dict:
+    return request.app.state.binance.account.status()
+
+
+@app.put("/api/binance/key")
+async def binance_set_key(request: Request, body: dict = Body(...)) -> dict:
+    key, secret = body.get("api_key"), body.get("api_secret")
+    if not isinstance(key, str) or not isinstance(secret, str):
+        raise HTTPException(422, "Give api_key and api_secret")
+    return await _binance_run(request.app.state.binance.account.set_key(key, secret), key_status=422)
+
+
+@app.post("/api/binance/key/test")
+async def binance_test_key(request: Request) -> dict:
+    return await _binance_run(request.app.state.binance.account.test())
+
+
+@app.delete("/api/binance/key")
+async def binance_remove_key(request: Request) -> dict:
+    return await _binance_run(request.app.state.binance.account.remove_key())
+
+
+@app.get("/api/binance/import")
+async def binance_import_status(request: Request) -> dict:
+    return request.app.state.binance.status()
+
+
+@app.put("/api/binance/import/settings")
+async def binance_import_settings(new: ImportSettings, request: Request) -> dict:
+    return request.app.state.binance.update_settings(new)
+
+
+@app.post("/api/binance/import")
+async def binance_import(request: Request, body: dict | None = Body(None)) -> dict:
+    raw = (body or {}).get("symbols") or []
+    symbols = [_norm_symbol(s) for s in raw[:40] if isinstance(s, str) and s.strip()]
+    return await _binance_run(request.app.state.binance.run(symbols))
+
+
+@app.get("/api/binance/fills")
+async def binance_fills(request: Request, symbol: str | None = Query(None),
+                        kind: str | None = Query(None, pattern="^(manual|bot|unknown)$"),
+                        market: str | None = Query(None, pattern="^(spot|futures)$"),
+                        limit: int = Query(500, ge=1, le=5000)) -> dict:
+    rows = request.app.state.binance.fills(_norm_symbol(symbol) if symbol else None, kind, market, limit)
+    return {"fills": [f.model_dump() for f in rows]}
+
+
+@app.get("/api/binance/trades")
+async def binance_trades(request: Request, kind: str | None = Query(None, pattern="^(manual|bot|unknown)$")) -> dict:
+    return {"trades": [t.model_dump() for t in request.app.state.binance.trades(kind)]}
+
+
+@app.post("/api/binance/classify")
+async def binance_classify(req: ClassifyRequest, request: Request) -> dict:
+    return await _binance_run(request.app.state.binance.set_classification(req))
+
+
+@app.get("/api/binance/positions")
+async def binance_positions(request: Request, refresh: bool = Query(False)) -> dict:
+    return await _binance_run(request.app.state.binance.positions(refresh))
+
+
+@app.get("/api/binance/gridbots/{bot_id}/compare")
+async def binance_gridbot_compare(bot_id: str, request: Request) -> dict:
+    out = await _gridbot_run(request.app.state.binance.compare_bot(bot_id))
+    if out is None:
+        raise HTTPException(404, "Grid bot not found")
+    return out
 
 
 # ------------------------------------------- market data panel, calendar + news, market-cap indexes --
@@ -639,3 +956,51 @@ async def index_klines(request: Request, name: str = Query("TOTAL", description=
         raise HTTPException(502, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+# ------------------------------------------------------------ market-wide setup scanner --
+#   GET  /api/market-scan?interval=4h            {interval, result (last scan or null), running, schedule, next_run,
+#                                                 top, notify_top, channels}
+#   POST /api/market-scan/run?interval=4h&top=   scans now (or joins the scan already running) → the same shape
+
+
+@app.get("/api/market-scan")
+async def market_scan_status(request: Request, interval: str = Query("4h")) -> dict:
+    return request.app.state.market_scanner.status(_check_interval(interval))
+
+
+@app.post("/api/market-scan/run")
+async def market_scan_run(request: Request, interval: str = Query("4h"),
+                          top: int | None = Query(None, ge=5, le=300)) -> dict:
+    scanner: MarketScanner = request.app.state.market_scanner
+    iv = _check_interval(interval)
+    try:
+        await scanner.run(iv, top)
+    except MarketDataError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    return scanner.status(iv)
+# ------------------------------------------------------ session and period levels, order-book heatmap --
+#   GET /api/levels/sessions?symbol=BTCUSDT&interval=1h&or_minutes=30
+#       {source, price, sessions: [{key, name, label, which, open, close, live, high, low, high_taken_at,
+#        low_taken_at}], periods: [...same, day/week/month], opening_ranges: [{key, label, open, close, until, live,
+#        high, low}]}; levels that don't belong on `interval` (sessions on D and above, ...) are left out
+#   GET /api/orderbook/heatmap?symbol=BTCUSDT&step=60&since=1700000000
+#       {source, note, bin_size, cadence, step, started_at, collecting, price, walls,
+#        columns: [[time, mid, first_bin, [notional per bin]]]}; polling it keeps the symbol sampled
+
+
+@app.get("/api/levels/sessions")
+async def session_levels(request: Request, symbol: str = Query("BTCUSDT"), interval: str | None = Query(None),
+                         or_minutes: int = Query(30, ge=5, le=240)) -> dict:
+    try:
+        return await request.app.state.session_levels.get(_norm_symbol(symbol),
+                                                          _check_interval(interval) if interval else None, or_minutes)
+    except MarketDataError as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+
+@app.get("/api/orderbook/heatmap")
+async def orderbook_heatmap(request: Request, symbol: str = Query("BTCUSDT"),
+                            step: int = Query(0, ge=0, le=86400, description="Column width in seconds"),
+                            since: int | None = Query(None, ge=0, description="Columns from this time on")) -> dict:
+    return await request.app.state.heatmap.get(_norm_symbol(symbol), step or None, since)

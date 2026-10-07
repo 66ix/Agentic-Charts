@@ -8,13 +8,15 @@ import { useAlerts, type FiredAlert, type SignalFired } from "@/hooks/useAlerts"
 import { useIsMobile } from "@/hooks/useMediaQuery";
 import { readStored, usePersistentState, writeStored } from "@/hooks/usePersistentState";
 import { useUndo } from "@/hooks/useUndo";
-import { alertFromDrawing, alertOverlays } from "@/lib/alerts";
+import { alertFromDrawing, alertOverlays, chartZones } from "@/lib/alerts";
 import { analyze } from "@/lib/api";
 import { DEFAULT_INTERVAL, DEFAULT_SYMBOL } from "@/lib/config";
 import { isCustom } from "@/lib/customSymbols";
+import { CHAT_ID_KEY, CHATS_KEY, toSession, upsertSession, worthKeeping, type ChatSession } from "@/lib/chatHistory";
 import { createJournalEntry, planToJournalEntry } from "@/lib/journal";
 import { DEFAULT_SIZING, sizePlan, type SizingSettings } from "@/lib/sizing";
-import type { DockPanelProps } from "@/lib/dock";
+import { OPEN_PANEL_EVENT, type DockPanelProps } from "@/lib/dock";
+import { offerGridPlan } from "@/lib/gridbot";
 import {
   composeOverlays,
   drawingsFor,
@@ -37,8 +39,10 @@ import type {
   IndicatorState,
   Interval,
   LayoutState,
+  MarketSetup,
   Overlay,
   ToolId,
+  TriggerInterval,
 } from "@/lib/types";
 import { CURRENT_WORKSPACE_KEY, saveWorkspace, WORKSPACES_KEY, type SavedWorkspace } from "@/lib/workspaces";
 
@@ -213,6 +217,8 @@ export default function ChartWorkspace() {
       fib: isVisible(visibility, "kimiFib"),
       forecast: isVisible(visibility, "kimiForecast"),
       signals: isVisible(visibility, "kimiSignals"),
+      patterns: isVisible(visibility, "kimiPatterns"),
+      harmonics: isVisible(visibility, "kimiHarmonics"),
     }),
     [visibility],
   );
@@ -341,7 +347,7 @@ export default function ChartWorkspace() {
   }, []);
   const onSignalFired = useCallback((f: SignalFired) => setToasts((t) => [...t, signalToast(uid(), f)].slice(-4)), []);
   const alertsApi = useAlerts(onAlertsFired, onSignalFired);
-  const { alerts, add: addAlerts, update: updateAlert } = alertsApi;
+  const { alerts, add: addAlerts, update: updateAlert, addTrigger } = alertsApi;
   const armedAlerts = alerts.filter((a) => a.armed).length;
   const alertOverlaysFor = useCallback((s: string) => alertOverlays(alerts, s), [alerts]);
 
@@ -359,8 +365,12 @@ export default function ChartWorkspace() {
       kimiFib: kimi,
       kimiForecast: kimi,
       kimiSignals: kimi,
+      sessions: indicators.sessions && !isCustom(symbol) ? 1 : 0,
+      heatmap: indicators.heatmap && !isCustom(symbol) ? 1 : 0,
+      kimiPatterns: kimi,
+      kimiHarmonics: kimi,
     };
-  }, [composed.counts, drawings.length, compare.length, indicators.kimi, symbol]);
+  }, [composed.counts, drawings.length, compare.length, indicators.kimi, indicators.sessions, indicators.heatmap, symbol]);
 
   // ------------------------------------------------------------------ the chart agent
   const [messages, setStoredMessages] = usePersistentState<AgentMessage[]>("ac:chat", []);
@@ -376,6 +386,40 @@ export default function ChartWorkspace() {
   const [error, setError] = useState<string | null>(null);
   const [dialog, setDialog] = useState<"settings" | "indicators" | "shortcuts" | null>(null);
   const analysisCtrl = useRef<AbortController | null>(null);
+
+  // Past conversations: "New chat" files the current one here, and opening one brings it back to continue.
+  const [chats, setChats] = usePersistentState<ChatSession[]>(CHATS_KEY, []);
+  const [chatId, setChatId] = usePersistentState<string>(CHAT_ID_KEY, "");
+  const archiveChat = useCallback(() => {
+    if (worthKeeping(messages)) setChats((list) => upsertSession(list, toSession(chatId || uid(), messages, lastIntent)));
+  }, [messages, lastIntent, chatId, setChats]);
+  const stopAnswer = useCallback(() => {
+    // An answer still on its way belongs to the conversation it was asked in, not the next one.
+    analysisCtrl.current?.abort();
+    setBusy(false);
+  }, []);
+  const newChat = useCallback(() => {
+    stopAnswer();
+    archiveChat();
+    setMessages(() => []);
+    setLastIntent(null);
+    setChatId(uid());
+  }, [stopAnswer, archiveChat, setMessages, setLastIntent, setChatId]);
+  const openChat = useCallback(
+    (id: string) => {
+      const chat = chats.find((c) => c.id === id);
+      if (!chat) return;
+      stopAnswer();
+      archiveChat();
+      // The opened one is the current conversation now; it goes back in the history when it is left.
+      setChats((list) => list.filter((c) => c.id !== id));
+      setMessages(() => chat.messages);
+      setLastIntent(chat.intent);
+      setChatId(chat.id);
+    },
+    [chats, stopAnswer, archiveChat, setChats, setMessages, setLastIntent, setChatId],
+  );
+  const deleteChat = useCallback((id: string) => setChats((list) => list.filter((c) => c.id !== id)), [setChats]);
 
   // Latest conversation state for the request, without re-creating runAnalysis on every message.
   const convoRef = useRef({ messages, overlays, lastIntent, watchlist });
@@ -423,15 +467,17 @@ export default function ChartWorkspace() {
         if (Object.keys(res.indicators ?? {}).length) setIndicators((ind) => ({ ...ind, ...res.indicators }));
         if (prompt) setLastIntent(res.intent);
         addAlerts(res.alerts ?? [], res.symbol);
+        for (const t of res.trigger_alerts ?? []) void addTrigger(t);
         const answer: AgentMessage = {
           id: uid(),
           role: "agent",
           text: opts.silent ? `Auto-detected levels. ${res.summary}` : res.summary,
           overlays: res.overlays,
           meta: engineNote(res),
-          alerts: res.alerts?.length || undefined,
+          alerts: (res.alerts?.length ?? 0) + (res.trigger_alerts?.length ?? 0) || undefined,
           plan: res.plan ?? undefined,
           scan: res.scan?.length ? res.scan : undefined,
+          setups: res.setups?.length ? res.setups : undefined,
           steps: res.steps?.length ? res.steps : undefined,
           symbol: target.symbol,
           interval: target.interval,
@@ -440,6 +486,11 @@ export default function ChartWorkspace() {
         };
         setMessages((m) => [...m, answer]);
         if (!opts.silent) setQuickAnswer(answer);
+        if (res.grid_plan && !opts.silent) {
+          // "Plan a grid bot on INJ": the Grid bots tab takes the plan to test, edit and track it.
+          offerGridPlan(res.grid_plan);
+          openTabRef.current("gridbots");
+        }
       } catch (err) {
         if ((err as Error).name === "AbortError") return;
         const msg: AgentMessage = { id: uid(), role: "error", text: (err as Error).message };
@@ -449,7 +500,7 @@ export default function ChartWorkspace() {
         if (analysisCtrl.current === ctrl) setBusy(false);
       }
     },
-    [symbol, interval, activeChart, setMessages, changeOverlays, setLastIntent, addAlerts, setCell, setIndicators],
+    [symbol, interval, activeChart, setMessages, changeOverlays, setLastIntent, addAlerts, addTrigger, setCell, setIndicators],
   );
 
   // Auto-detect levels on load, unless this chart already has saved AI overlays.
@@ -509,6 +560,14 @@ export default function ChartWorkspace() {
     },
     [mobile, setDock],
   );
+  // Other tabs and cards open a tab with openDockPanel (lib/dock.ts), e.g. "Open in Backtest" on a plan card.
+  useEffect(() => {
+    const onOpen = (e: Event) => openTab((e as CustomEvent<string>).detail);
+    window.addEventListener(OPEN_PANEL_EVENT, onOpen);
+    return () => window.removeEventListener(OPEN_PANEL_EVENT, onOpen);
+  }, [openTab]);
+  const openTabRef = useRef(openTab);
+  openTabRef.current = openTab;
   const closeDock = useCallback(() => (mobile ? setMobileTab(null) : setDock((d) => ({ ...d, open: false }))), [mobile, setDock]);
   const focusAgent = useCallback(() => {
     openTab("agent");
@@ -662,6 +721,35 @@ export default function ChartWorkspace() {
     }
   }, []);
 
+  /** A market-scanner setup in an agent answer: its chart with the plan drawn (the Scanner tab's overlay set). */
+  const openSetup = useCallback(
+    (s: MarketSetup) => {
+      pickSymbol(s.symbol, s.interval);
+      onChartOverlays("scanner", s.symbol, s.overlays);
+      if (mobile) setMobileTab(null);
+    },
+    [pickSymbol, onChartOverlays, mobile],
+  );
+  /** "Alert on 5m confirmation" on a plan card: a trigger alert on the plan's entry zone. */
+  const planTrigger = useCallback(
+    async (m: AgentMessage, tf: TriggerInterval) => {
+      const plan = m.plan;
+      if (!plan || !m.symbol || plan.zone_low == null || plan.zone_high == null) return false;
+      const made = await addTrigger({
+        symbol: m.symbol,
+        interval: tf,
+        zone: {
+          source: "fixed", price_low: plan.zone_low, price_high: plan.zone_high, direction: plan.direction,
+          label: plan.basis.slice(0, 120),
+        },
+        confirm: "any",
+      });
+      return made != null;
+    },
+    [addTrigger],
+  );
+  const triggerZones = useMemo(() => chartZones(overlays, drawings, selectedId), [overlays, drawings, selectedId]);
+
   const dockProps: DockPanelProps = { symbol, interval, price, watchlist, onPickSymbol: pickSymbol, onChartOverlays };
   const tabs: DockTab[] = [
     {
@@ -677,13 +765,15 @@ export default function ChartWorkspace() {
           pinned={pinnedSet}
           onSubmit={(p) => void runAnalysis(p)}
           onClearOverlays={() => changeOverlays(overlaysKey, [], "clear AI levels")}
-          onClearChat={() => {
-            setMessages(() => []);
-            setLastIntent(null);
-          }}
+          onNewChat={newChat}
+          chats={chats}
+          onOpenChat={openChat}
+          onDeleteChat={deleteChat}
           onPickSymbol={setSymbol}
+          onOpenSetup={openSetup}
           onTogglePin={togglePin}
           onLogTrade={logTrade}
+          onPlanTrigger={planTrigger}
         />
       ),
     },
@@ -726,7 +816,7 @@ export default function ChartWorkspace() {
       icon: Bell,
       badge: armedAlerts,
       render: () => (
-        <AlertsPanel {...dockProps} api={alertsApi} />
+        <AlertsPanel {...dockProps} api={alertsApi} zones={triggerZones} />
       ),
     },
     {

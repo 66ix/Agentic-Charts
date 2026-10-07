@@ -7,7 +7,7 @@ can draw is described here and mirrored in `frontend/lib/types.ts`.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Annotated, Literal, Optional, Union
+from typing import Annotated, Any, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -177,6 +177,71 @@ class CustomLevel(BaseModel):
         return self
 
 
+# ------------------------------------------------------ zone trigger alerts --
+# A lower-timeframe confirmation inside a higher-timeframe zone (zone_triggers.py). Mirrors the ZoneTrigger types in
+# frontend/lib/alerts.ts.
+
+TriggerInterval = Literal["1m", "5m", "15m"]
+TRIGGER_INTERVALS: tuple[str, ...] = ("1m", "5m", "15m")
+Confirmation = Literal["choch", "sweep", "engulfing", "any"]
+CONFIRMATIONS: tuple[str, ...] = ("choch", "sweep", "engulfing", "any")
+TriggerZoneKind = Literal["demand", "supply", "support", "resistance", "any"]
+TRIGGER_ZONE_KINDS: tuple[str, ...] = ("demand", "supply", "support", "resistance", "any")
+
+
+class TriggerZone(BaseModel):
+    """The zone a trigger alert watches: fixed prices (an AI zone or rectangle picked on the chart, a plan's zone),
+    or the nearest zone of `kind` the detectors find on `timeframe`, looked up again each time that timeframe
+    closes."""
+
+    source: Literal["fixed", "detected"] = "fixed"
+    price_low: Optional[float] = Field(None, gt=0)
+    price_high: Optional[float] = Field(None, gt=0)
+    direction: Optional[Literal["long", "short"]] = Field(
+        None, description="The way the confirmation must point; a fixed zone without one takes it from where price is")
+    timeframe: Optional[Interval] = Field(None, description="Detected: where to find it; fixed: where it came from")
+    kind: TriggerZoneKind = Field("any", description="Detected: which zone (any = nearest demand or supply)")
+    fresh_only: bool = Field(True, description="Detected demand/supply: skip zones tested more than once")
+    label: str = Field("", max_length=120)
+
+    @model_validator(mode="after")
+    def _complete(self) -> "TriggerZone":
+        if self.source == "fixed":
+            if self.price_low is None or self.price_high is None:
+                raise ValueError("a fixed zone needs price_low and price_high")
+            if self.price_low > self.price_high:
+                self.price_low, self.price_high = self.price_high, self.price_low
+        elif self.timeframe is None:
+            raise ValueError("a detected zone needs the timeframe to find it on")
+        return self
+
+
+class ZoneTriggerSpec(BaseModel):
+    """A trigger alert to create: POST /api/zone-triggers, or returned by the agent for the client to arm."""
+
+    symbol: str = Field(..., min_length=2, max_length=20)
+    interval: TriggerInterval = Field("5m", description="The lower timeframe that must confirm")
+    zone: TriggerZone
+    confirm: Confirmation = "any"
+    cooldown_min: int = Field(60, ge=0, le=1440, description="At most one fire per this many minutes")
+    repeat: bool = True
+    note: str = Field("", max_length=500)
+
+    @field_validator("symbol")
+    @classmethod
+    def _symbol(cls, v: str) -> str:
+        return norm_symbol(v)
+
+
+class ZoneTriggerIntent(BaseModel):
+    """"Alert me when 1m shows a CHoCH inside the 4h demand" → the trigger alert the agent sets up."""
+
+    timeframe: TriggerInterval = "5m"
+    confirm: Confirmation = "any"
+    zone_kind: TriggerZoneKind = "any"
+    zone_timeframe: Optional[Interval] = Field(None, description="Where the zone is; null = the chart's timeframe")
+
+
 class AnalysisIntent(BaseModel):
     """What the user asked for, normalised. Produced by the LLM or the rule parser."""
 
@@ -194,9 +259,12 @@ class AnalysisIntent(BaseModel):
     switch_chart: bool = Field(False, description="Move the chart to the analysed symbol and timeframe")
     scan_watchlist: bool = Field(False, description="Scan every watchlist symbol instead of one chart")
     scan_filter: ScanFilter = "any"
+    scan_market: bool = Field(False, description="Scan the top coins by volume for the best setups")
     trade_plan: Optional[Literal["long", "short", "auto"]] = Field(None, description="Build a trade plan")
+    grid_plan: bool = Field(False, description="Plan a Spot Grid bot: range, grids, type (grid_planner.py)")
     indicators_on: list[IndicatorName] = Field(default_factory=list)
     indicators_off: list[IndicatorName] = Field(default_factory=list)
+    zone_trigger: Optional[ZoneTriggerIntent] = Field(None, description="Set a lower-timeframe trigger alert")
 
     @field_validator("symbol")
     @classmethod
@@ -223,8 +291,8 @@ class AnalysisIntent(BaseModel):
     @property
     def has_actions(self) -> bool:
         return bool(self.custom_levels or self.remove or self.alert_prices or self.alert_targets or self.symbol
-                    or self.switch_chart or self.scan_watchlist or self.trade_plan or self.indicators_on
-                    or self.indicators_off)
+                    or self.switch_chart or self.scan_watchlist or self.scan_market or self.trade_plan or self.indicators_on
+                    or self.indicators_off or self.zone_trigger or self.grid_plan)
 
     @model_validator(mode="after")
     def _default_features(self) -> "AnalysisIntent":
@@ -268,6 +336,32 @@ class PlanTarget(BaseModel):
     rr: float = Field(..., description="Reward-to-risk at this target")
 
 
+class TrackRecord(BaseModel):
+    """How the backtest setup matching a plan's basis did on that coin and timeframe (track_record.py).
+    Mirrors TrackRecord in frontend/lib/types.ts."""
+
+    setup: Optional[str] = Field(None, description="Backtest setup id (backtest.py), null when nothing matches")
+    label: str = Field("", description="e.g. 'fresh 4h demand longs on INJ'")
+    symbol: str
+    interval: str
+    status: Literal["ok", "small_sample", "too_few_trades", "short_history", "no_match", "unavailable"]
+    trades: int = 0
+    wins: int = 0
+    win_rate: Optional[float] = None
+    avg_r: Optional[float] = None
+    total_r: Optional[float] = None
+    profit_factor: Optional[float] = None
+    max_drawdown_r: Optional[float] = None
+    bars: int = 0
+    from_time: Optional[int] = None
+    to_time: Optional[int] = None
+    period: str = Field("", description="'last 1 year', 'last 4 months'")
+    target: str = "next_level"
+    data_source: str = ""
+    summary: str = Field("", description="One line for the plan card and the narrator")
+    notes: list[str] = Field(default_factory=list)
+
+
 class TradePlan(BaseModel):
     direction: Literal["long", "short"]
     entry: float
@@ -276,6 +370,14 @@ class TradePlan(BaseModel):
     basis: str = Field("", description="What the entry is built on, e.g. 'H4 demand 23.9–24.2'")
     risk_pct: float = Field(..., description="Entry-to-stop distance as % of entry")
     notes: list[str] = Field(default_factory=list)
+    # What the entry zone is, for matching the plan to a backtest setup: its kind ("demand", "support", ...,
+    # "swing" for a market entry beyond the last swing), whether it is untested, and higher-timeframe confluence.
+    zone_kind: Optional[str] = None
+    zone_fresh: Optional[bool] = None
+    zone_htf: list[str] = Field(default_factory=list)
+    track_record: Optional[TrackRecord] = None
+    zone_low: Optional[float] = Field(None, description="The zone the entry is built on, when there is one")
+    zone_high: Optional[float] = None
 
 
 class ScanResult(BaseModel):
@@ -291,6 +393,40 @@ class ScanResult(BaseModel):
     distance_pct: Optional[float] = Field(None, description="Signed distance to the nearest zone, % of price; 0 inside")
     signals: list[str] = Field(default_factory=list)
     score: float = 0.0
+    data_source: str = "binance"
+
+
+class SetupAgreement(BaseModel):
+    """Trend per timeframe (the scan's own and the next ones up) against the setup's direction."""
+
+    frames: dict[str, Literal["up", "down", "range"]] = Field(default_factory=dict)
+    aligned: float = Field(0.0, description="Frames trending the setup's way (a range counts half)")
+    total: int = 0
+
+
+class MarketSetup(BaseModel):
+    """One long or short setup from the market-wide scanner (market_scanner.py). Mirrors MarketSetup in
+    frontend/lib/types.ts."""
+
+    symbol: str
+    interval: Interval
+    direction: Literal["long", "short"]
+    last_price: float
+    change_pct: Optional[float] = None
+    quote_volume: Optional[float] = Field(None, description="24h quote volume, USDT")
+    entry: float
+    stop: float
+    target: float = Field(..., description="T1")
+    rr: float = Field(..., description="Reward-to-risk at T1")
+    risk_pct: float
+    distance_pct: float = Field(..., description="Entry distance from price, % of price (0 = at market)")
+    distance_atr: float
+    basis: str = ""
+    agreement: SetupAgreement = Field(default_factory=SetupAgreement)
+    track_record: Optional[TrackRecord] = None
+    score: float = 0.0
+    plan: TradePlan
+    overlays: list[Overlay] = Field(default_factory=list, description="The plan as chart overlays")
     data_source: str = "binance"
 
 
@@ -370,7 +506,10 @@ class AnalyzeResponse(BaseModel):
     indicators: dict[str, bool] = Field(default_factory=dict, description="Indicator toggles to apply")
     scan: list[ScanResult] = Field(default_factory=list)
     plan: Optional[TradePlan] = None
+    setups: list[MarketSetup] = Field(default_factory=list, description="Market-wide scanner results")
+    grid_plan: Optional[dict[str, Any]] = Field(None, description="A grid bot plan (grid_planner.GridPlan)")
     steps: list[str] = Field(default_factory=list, description="What the agent looked at, in order")
+    trigger_alerts: list[ZoneTriggerSpec] = Field(default_factory=list, description="Trigger alerts for the client")
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -496,6 +635,71 @@ class KimiRow(BaseModel):
     tone: Optional[Literal["up", "down", "mute"]] = None
 
 
+class KimiSegment(BaseModel):
+    """One line of a pattern drawing; times past the last candle are future candles on the chart's grid."""
+    time_start: int
+    price_start: float
+    time_end: int
+    price_end: float
+    width: int = 1
+    style: Literal["solid", "dashed", "dotted"] = "solid"
+
+
+class KimiPattern(BaseModel):
+    """A structural chart pattern as the script draws it (outline + label), with its break-out tracking."""
+    name: str = Field(..., description="Triple Top, Head & Shoulders, Double Bottom, Falling Wedge, Bull Flag, ...")
+    text: str = Field(..., description="The chart label: '2B', '2B ▲' after a break-out, '2B ✕' once invalidated")
+    direction: Literal["bullish", "bearish"]
+    time: int = Field(..., description="The candle it formed on")
+    state: Literal["watching", "breakout", "failed", "formed"] = Field(
+        ..., description="watching = tracked for a break-out; formed = drawn but never tracked (born broken)")
+    label_time: int
+    label_price: float
+    lines: list[KimiSegment]
+    breakout_level: Optional[float] = Field(None, description="Watching: the break-out line on the last candle")
+    invalidation: Optional[float] = Field(None, description="Watching: the invalidation line on the last candle")
+    end_time: Optional[int] = Field(None, description="The candle that broke it out or invalidated it")
+    breakout_price: Optional[float] = None
+    target: Optional[float] = Field(None, description="Measured-move target of the break-out")
+
+
+class KimiBreakout(BaseModel):
+    """A break-out's level and measured-move target lines and its 'BO▲ target' label."""
+    name: str
+    direction: Literal["bullish", "bearish"]
+    time: int
+    time_end: int
+    price: float
+    target: float
+
+
+class KimiPoint(BaseModel):
+    label: Literal["X", "A", "B", "C", "D"]
+    time: int
+    price: float
+
+
+class KimiHarmonic(BaseModel):
+    """An XABCD harmonic pattern with its PRZ box and TP1/TP2 projections."""
+    name: str = Field(..., description="Gartley, Bat, Butterfly, Crab, Deep Crab, Alt Bat, Shark, 5-0, Three Drives, AB=CD")
+    text: str = Field(..., description="The chart label: 'Gart ▲ ★2', then ⚠ / ✕ / ⋯ / ✓")
+    direction: Literal["bullish", "bearish"]
+    time: int = Field(..., description="The candle D confirmed on")
+    state: Literal["active", "failed", "tp1", "expired", "compromised"]
+    points: list[KimiPoint]
+    prz_low: float
+    prz_high: float
+    prz_shown: bool = Field(..., description="The PRZ box stays while the pattern is active or compromised")
+    time_end: int = Field(..., description="Right end of the PRZ box and TP lines")
+    tp1: float
+    tp2: float
+    tp_basis: str
+    invalidation: float
+    prz_tier: int = Field(..., description="PRZ cross-confluence: S/R, golden pocket, divergence at D (0-3)")
+    end_time: Optional[int] = None
+    ratios: dict[str, Optional[float]] = Field(default_factory=dict)
+
+
 class KimiResponse(BaseModel):
     symbol: str
     interval: str
@@ -507,6 +711,9 @@ class KimiResponse(BaseModel):
     fib: Optional[KimiFib] = None
     signals: list[KimiSignal] = Field(..., description="The labels on the chart, oldest first")
     forecast: Optional[KimiForecast] = None
+    patterns: list[KimiPattern] = Field(default_factory=list, description="Chart patterns on the chart, oldest first")
+    breakouts: list[KimiBreakout] = Field(default_factory=list, description="Pattern break-out targets, oldest first")
+    harmonics: list[KimiHarmonic] = Field(default_factory=list, description="Harmonic patterns, oldest first")
     verify: list[KimiRow]
     stats: list[KimiRow]
     notes: list[str] = Field(default_factory=list)

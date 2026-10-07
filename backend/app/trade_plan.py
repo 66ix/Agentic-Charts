@@ -27,6 +27,8 @@ class Level:
     high: float
     label: str
     score: float = 0.5
+    tests: int | None = None  # supply/demand: returns to the zone since it formed (0 = fresh); None = not tracked
+    htf: tuple[str, ...] = ()  # higher timeframes with an overlapping zone ("D1", "W1")
 
     @property
     def mid(self) -> float:
@@ -66,6 +68,8 @@ def build_plan(direction: Literal["long", "short", "auto"], last: float, atr: fl
         entry = min(last, zone.high) if long else max(last, zone.low)
         stop = zone.low - 0.25 * atr if long else zone.high + 0.25 * atr
         basis = f"{zone.label} {_fmt(zone.low)}–{_fmt(zone.high)}"
+        zone_info: dict = {"zone_kind": zone.kind, "zone_fresh": None if zone.tests is None else zone.tests == 0,
+                           "zone_htf": list(zone.htf)}
     else:
         swings = [p for p in swing_lows if p < last] if long else [p for p in swing_highs if p > last]
         if not swings:
@@ -75,6 +79,7 @@ def build_plan(direction: Literal["long", "short", "auto"], last: float, atr: fl
         stop = ref - 0.25 * atr if long else ref + 0.25 * atr
         basis = f"last swing {'low' if long else 'high'} {_fmt(ref)}"
         notes.append("No zone close by, so the entry is at market with the stop beyond the last swing.")
+        zone_info = {"zone_kind": "swing"}
     risk = (entry - stop) * sign
     if risk <= 0:
         return None
@@ -110,7 +115,9 @@ def build_plan(direction: Literal["long", "short", "auto"], last: float, atr: fl
         notes.append("This is against the current trend.")
     return TradePlan(direction=side, entry=float(f"{entry:.6g}"), stop=float(f"{stop:.6g}"),
                      targets=[t.model_copy(update={"price": float(f"{t.price:.6g}")}) for t in targets], basis=basis,
-                     risk_pct=round(risk / entry * 100, 2), notes=notes)
+                     risk_pct=round(risk / entry * 100, 2), notes=notes, **zone_info,
+                     zone_low=float(f"{zone.low:.6g}") if zone else None,
+                     zone_high=float(f"{zone.high:.6g}") if zone else None)
 
 
 def plan_overlays(plan: TradePlan, time_start: int) -> list:

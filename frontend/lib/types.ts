@@ -1,5 +1,7 @@
 // Mirrors backend/app/schemas.py. Keep the two in sync.
 
+import type { GridPlan } from "./gridbot";
+
 export const TIMEFRAMES = [
   { value: "1m", label: "1m" },
   { value: "5m", label: "5m" },
@@ -46,6 +48,8 @@ interface OverlayBase {
   color: string;
   kind?: string | null;
   strength?: number | null;
+  /** Widen the price scale to keep this in view (default true). Off for wide reference sets such as grid bot ranges. */
+  autoscale?: boolean;
 }
 
 export interface HorizontalLineOverlay extends OverlayBase {
@@ -110,9 +114,14 @@ export interface AnalysisIntent {
   switch_chart: boolean;
   scan_watchlist: boolean;
   scan_filter: string;
+  /** Scan the top coins by volume for the best setups (the Scanner tab). */
+  scan_market?: boolean;
   trade_plan: "long" | "short" | "auto" | null;
   indicators_on: string[];
   indicators_off: string[];
+  /** "Alert me when 1m shows a CHoCH inside the 4h demand". */
+  zone_trigger?: ZoneTriggerIntent | null;
+  grid_plan?: boolean;
 }
 
 export interface Navigate {
@@ -134,6 +143,90 @@ export interface TradePlan {
   targets: PlanTarget[];
   basis: string;
   risk_pct: number;
+  notes: string[];
+  /** What the entry zone is ("demand", "support", ..., "swing"), whether it is untested, and HTF confluence. */
+  zone_kind?: string | null;
+  zone_fresh?: boolean | null;
+  zone_htf?: string[];
+  /** The zone the entry is built on, when there is one. */
+  zone_low?: number | null;
+  zone_high?: number | null;
+  /** How the matching backtest setup did on this coin and timeframe. */
+  track_record?: TrackRecord | null;
+}
+
+/** How a plan's setup type did in the backtest on that coin and timeframe. Mirrors TrackRecord in schemas.py. */
+export interface TrackRecord {
+  /** Backtest setup id (BacktestSetup in lib/backtest.ts); null when nothing matches the plan's basis. */
+  setup: string | null;
+  /** "fresh 4h demand longs on INJ" */
+  label: string;
+  symbol: string;
+  interval: Interval;
+  status: "ok" | "small_sample" | "too_few_trades" | "short_history" | "no_match" | "unavailable";
+  trades: number;
+  wins: number;
+  win_rate: number | null;
+  avg_r: number | null;
+  total_r: number | null;
+  profit_factor: number | null;
+  max_drawdown_r: number | null;
+  /** Candles backtested (the Backtest tab's "Candles"). */
+  bars: number;
+  from_time: number | null;
+  to_time: number | null;
+  /** "last 1 year" */
+  period: string;
+  /** Exit rule (the Backtest tab's "Exit at"). */
+  target: string;
+  data_source: string;
+  /** One line for the plan card. */
+  summary: string;
+  notes: string[];
+}
+
+/** One setup from the market-wide scanner. Mirrors MarketSetup in schemas.py. */
+export interface MarketSetup {
+  symbol: string;
+  interval: Interval;
+  direction: "long" | "short";
+  last_price: number;
+  change_pct: number | null;
+  quote_volume: number | null;
+  entry: number;
+  stop: number;
+  /** T1 */
+  target: number;
+  /** Reward-to-risk at T1. */
+  rr: number;
+  risk_pct: number;
+  /** Entry distance from price, % (0 = at market). */
+  distance_pct: number;
+  distance_atr: number;
+  basis: string;
+  /** Trend per timeframe against the setup's direction; a range counts half. */
+  agreement: { frames: Partial<Record<Interval, "up" | "down" | "range">>; aligned: number; total: number };
+  track_record: TrackRecord | null;
+  score: number;
+  plan: TradePlan;
+  /** The plan as chart overlays. */
+  overlays: Overlay[];
+  data_source: string;
+}
+
+/** One market scan of one timeframe. Mirrors MarketScanResult in backend/app/market_scanner.py. */
+export interface MarketScanResult {
+  interval: Interval;
+  /** ms */
+  generated_at: number;
+  seconds: number;
+  trigger: "manual" | "timer" | "agent";
+  universe: number;
+  scanned: number;
+  universe_source: "binance" | "fallback";
+  data_source: string;
+  longs: MarketSetup[];
+  shorts: MarketSetup[];
   notes: string[];
 }
 
@@ -180,6 +273,44 @@ export interface AlertSpec {
   note?: string;
 }
 
+// Zone trigger alerts: a lower-timeframe confirmation inside a higher-timeframe zone. Mirrors schemas.py.
+export type TriggerInterval = "1m" | "5m" | "15m";
+export type Confirmation = "choch" | "sweep" | "engulfing" | "any";
+export type TriggerZoneKind = "demand" | "supply" | "support" | "resistance" | "any";
+
+/** Fixed prices (a zone picked on the chart, a plan's zone), or the nearest `kind` the detectors find on
+ *  `timeframe`, looked up again whenever that timeframe closes. */
+export interface TriggerZone {
+  source: "fixed" | "detected";
+  price_low?: number | null;
+  price_high?: number | null;
+  /** The way the confirmation must point; a fixed zone without one takes it from where price is. */
+  direction?: "long" | "short" | null;
+  timeframe?: Interval | null;
+  kind?: TriggerZoneKind;
+  /** Detected demand/supply: skip zones tested more than once (default true). */
+  fresh_only?: boolean;
+  label?: string;
+}
+
+export interface ZoneTriggerSpec {
+  symbol: string;
+  interval: TriggerInterval;
+  zone: TriggerZone;
+  confirm?: Confirmation;
+  /** At most one fire per this many minutes (default 60). */
+  cooldown_min?: number;
+  repeat?: boolean;
+  note?: string;
+}
+
+export interface ZoneTriggerIntent {
+  timeframe: TriggerInterval;
+  confirm: Confirmation;
+  zone_kind: TriggerZoneKind;
+  zone_timeframe: Interval | null;
+}
+
 /** A price alert stored and evaluated by the backend. Mirrors PriceAlert in schemas.py. */
 export interface PriceAlert extends AlertSpec {
   id: string;
@@ -224,7 +355,13 @@ export interface AnalyzeResponse {
   indicators: Record<string, boolean>;
   scan: ScanResult[];
   plan: TradePlan | null;
+  /** Market-wide scanner results ("best 5m setups right now"). */
+  setups?: MarketSetup[];
+  /** "Plan a grid bot on INJ": the grid planner's suggestion (lib/gridbot.ts). */
+  grid_plan?: GridPlan | null;
   steps: string[];
+  /** Zone trigger alerts the client should arm (POST /api/zone-triggers). */
+  trigger_alerts?: ZoneTriggerSpec[];
   generated_at: string;
 }
 
@@ -305,6 +442,27 @@ export interface IndicatorSettings {
   atr: { length: number };
   stochRsi: { rsiLength: number; stochLength: number; k: number; d: number };
   vwapColor: string;
+  /** Session and period levels (lib/sessionLevels.ts). */
+  sessions: SessionLevelSettings;
+}
+
+/** Which session and period levels to draw; the backend computes them (backend/app/session_levels.py). */
+export interface SessionLevelSettings {
+  asia: boolean;
+  london: boolean;
+  ny: boolean;
+  /** The previous session's high and low too, not only the latest session's. */
+  previous: boolean;
+  /** Shade each session's range. */
+  boxes: boolean;
+  day: boolean;
+  week: boolean;
+  month: boolean;
+  /** Levels price has already traded through: drawn up to where they were taken, or left out. */
+  showTaken: boolean;
+  openingRange: "off" | "day" | "sessions";
+  /** Opening-range length in minutes (multiples of 5). */
+  orMinutes: number;
 }
 
 export const DEFAULT_INDICATOR_SETTINGS: IndicatorSettings = {
@@ -316,6 +474,19 @@ export const DEFAULT_INDICATOR_SETTINGS: IndicatorSettings = {
   atr: { length: 14 },
   stochRsi: { rsiLength: 14, stochLength: 14, k: 3, d: 3 },
   vwapColor: "#22d3ee",
+  sessions: {
+    asia: true,
+    london: true,
+    ny: true,
+    previous: true,
+    boxes: true,
+    day: true,
+    week: true,
+    month: true,
+    showTaken: true,
+    openingRange: "day",
+    orMinutes: 30,
+  },
 };
 
 export interface IndicatorState {
@@ -336,6 +507,10 @@ export interface IndicatorState {
   cvd?: boolean;
   /** Volume profile of the visible range, drawn on the right edge. */
   vprofile?: boolean;
+  /** Asia / London / New York session levels, previous day / week / month and the opening range. */
+  sessions?: boolean;
+  /** Order-book heatmap behind the candles. */
+  heatmap?: boolean;
 }
 
 /** One chart in the multi-chart grid. */
@@ -423,6 +598,68 @@ export interface KimiForecast {
   next_candle: { direction: "up" | "down"; right_pct: number | null; calls: number } | null;
 }
 
+/** One line of a Kimi pattern drawing; times past the last candle are future candles on the chart's grid. */
+export interface KimiSegment {
+  time_start: number;
+  price_start: number;
+  time_end: number;
+  price_end: number;
+  width: number;
+  style: "solid" | "dashed" | "dotted";
+}
+
+export interface KimiPattern {
+  /** Triple Top, Head & Shoulders, Double Bottom, Falling Wedge, Bull Flag, ... */
+  name: string;
+  /** The chart label: "2B", "2B ▲" after a break-out, "2B ✕" once invalidated. */
+  text: string;
+  direction: "bullish" | "bearish";
+  time: number;
+  /** watching = tracked for a break-out; formed = drawn but never tracked. */
+  state: "watching" | "breakout" | "failed" | "formed";
+  label_time: number;
+  label_price: number;
+  lines: KimiSegment[];
+  breakout_level: number | null;
+  invalidation: number | null;
+  end_time: number | null;
+  breakout_price: number | null;
+  target: number | null;
+}
+
+/** A pattern break-out: its level and measured-move target lines. */
+export interface KimiBreakout {
+  name: string;
+  direction: "bullish" | "bearish";
+  time: number;
+  time_end: number;
+  price: number;
+  target: number;
+}
+
+export interface KimiHarmonic {
+  /** Gartley, Bat, Butterfly, Crab, Deep Crab, Alt Bat, Shark, 5-0, Three Drives, AB=CD */
+  name: string;
+  /** The chart label: "Gart ▲ ★2", then ⚠ / ✕ / ⋯ / ✓. */
+  text: string;
+  direction: "bullish" | "bearish";
+  time: number;
+  state: "active" | "failed" | "tp1" | "expired" | "compromised";
+  points: { label: "X" | "A" | "B" | "C" | "D"; time: number; price: number }[];
+  prz_low: number;
+  prz_high: number;
+  prz_shown: boolean;
+  /** Right end of the PRZ box and the TP lines. */
+  time_end: number;
+  tp1: number;
+  tp2: number;
+  tp_basis: string;
+  invalidation: number;
+  prz_tier: number;
+  end_time: number | null;
+  ratios: Record<string, number | null>;
+}
+
 export interface KimiRow {
   label: string;
   value: string;
@@ -440,6 +677,9 @@ export interface KimiResult {
   fib: KimiFib | null;
   signals: KimiSignal[];
   forecast: KimiForecast | null;
+  patterns: KimiPattern[];
+  breakouts: KimiBreakout[];
+  harmonics: KimiHarmonic[];
   verify: KimiRow[];
   stats: KimiRow[];
   notes: string[];

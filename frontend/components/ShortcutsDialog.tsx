@@ -44,11 +44,13 @@ export const SHORTCUTS: Array<{ group: string; keys: Array<[string, string]> }> 
       ["W", "Watchlist"],
       ["A", "Alerts"],
       ["L", "Layers"],
+      ["Q", "Live trades (trade manager)"],
       ["J", "Trade journal"],
       ["X", "Backtest a setup"],
       ["B", "Grid bots"],
       ["E", "Calendar and news"],
       ["O", "Market data"],
+      ["U", "Market scanner"],
     ],
   },
 ];

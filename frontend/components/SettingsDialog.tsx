@@ -7,7 +7,9 @@ import { readStored, storedKeys, usePersistentState, writeStored } from "@/hooks
 import { DEFAULT_SIZING, type SizingSettings } from "@/lib/sizing";
 import type { LayoutState } from "@/lib/types";
 
+import { BinanceKeySettings } from "./AccountPanel";
 import Dialog, { NumberInput, Row, Section, Toggle } from "./Dialog";
+import ModelSettings from "./ModelSettings";
 
 /** Timezones offered for the chart's time axis; "local" follows the browser. */
 const ZONES = [
@@ -110,6 +112,8 @@ export default function SettingsDialog(p: Props) {
         </Row>
       </Section>
 
+      <ModelSettings />
+
       <Section title="Position sizing">
         <p className="pb-1 text-[11px] text-mute">Used on trade plans to work out the size, risk and fees of a trade.</p>
         <Row label="Account size">
@@ -125,6 +129,10 @@ export default function SettingsDialog(p: Props) {
           <NumberInput value={sizing.maxLeverage} min={1} max={125} step={1} onChange={(v) => setSizing({ ...sizing, maxLeverage: v })} suffix="×" />
         </Row>
       </Section>
+
+      <div className="border-b border-line py-2">
+        <BinanceKeySettings />
+      </div>
 
       <Section title="Backup">
         <p className="pb-2 text-[11px] text-mute">

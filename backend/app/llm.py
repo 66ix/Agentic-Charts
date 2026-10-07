@@ -29,14 +29,18 @@ from .config import Settings, get_settings
 from .pricefmt import round_facts
 from .schemas import (
     ALL_FEATURES,
+    CONFIRMATIONS,
     FULL_FEATURES,
     INDICATORS,
     INTERVALS,
     SCAN_FILTERS,
     TARGETS,
+    TRIGGER_INTERVALS,
+    TRIGGER_ZONE_KINDS,
     AnalysisIntent,
     ChatTurn,
     CustomLevel,
+    ZoneTriggerIntent,
 )
 from .symbols import find_symbol
 
@@ -49,7 +53,8 @@ INTENT_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["features", "timeframe", "window_timeframes", "max_zones", "answer_hint", "custom_levels",
                  "remove", "keep_existing", "alert_prices", "alert_targets", "symbol", "switch_chart",
-                 "scan_watchlist", "scan_filter", "trade_plan", "indicators_on", "indicators_off"],
+                 "scan_watchlist", "scan_filter", "scan_market", "trade_plan", "grid_plan", "indicators_on",
+                 "indicators_off", "zone_trigger"],
     "properties": {
         "features": {
             "type": "array",
@@ -133,18 +138,55 @@ INTENT_SCHEMA: dict[str, Any] = {
                            "'scan my watchlist', 'anything oversold?'.",
         },
         "scan_filter": {"type": "string", "enum": list(SCAN_FILTERS),
-                        "description": "What the scan ranks by; 'any' when it is not a scan."},
+                        "description": "What the scan ranks by; 'any' when it is not a scan. For a market scan: "
+                                       "bullish for longs only, bearish for shorts only, any for both."},
+        "scan_market": {
+            "type": "boolean",
+            "description": "true for the best trade setups across the whole market (the top coins by volume), not "
+                           "just the watchlist: 'best 5m setups right now', 'scan the market for longs', 'top short "
+                           "setups on the 1h'. The timeframe is the scan's. false for 'my coins' or 'my watchlist'.",
+        },
         "trade_plan": {
             "type": ["string", "null"],
             "enum": ["long", "short", "auto", None],
             "description": "Build an entry/stop/targets plan from the detected zones ('give me a long setup' → long, "
-                           "'what's the trade here?' → auto). null otherwise.",
+                           "'what's the trade here?' → auto). null for a market scan. null otherwise.",
+        },
+        "grid_plan": {
+            "type": "boolean",
+            "description": "true when the user wants a Spot Grid bot planned ('plan a grid bot on INJ', 'what grid "
+                           "settings for SOL?'): the app suggests the range, number of grids and grid type.",
         },
         "indicators_on": {"type": "array", "items": {"type": "string", "enum": list(INDICATORS)},
                           "description": "Chart indicators to show ('add RSI' → rsi; 'show my Kimi' or 'turn on "
                                          "Kimi Cooked' → kimi, the user's own indicator)."},
         "indicators_off": {"type": "array", "items": {"type": "string", "enum": list(INDICATORS)},
                            "description": "Chart indicators to hide."},
+        "zone_trigger": {
+            "anyOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["timeframe", "confirm", "zone_kind", "zone_timeframe"],
+                    "properties": {
+                        "timeframe": {"type": "string", "enum": list(TRIGGER_INTERVALS),
+                                      "description": "The lower timeframe that must confirm (M1 → 1m)."},
+                        "confirm": {"type": "string", "enum": list(CONFIRMATIONS),
+                                    "description": "choch = change of character or break of structure (CHoCH, "
+                                                   "BOS, MSS); sweep = liquidity sweep of the low/high that closes "
+                                                   "back; engulfing = engulfing candle; any = 'a confirmation'."},
+                        "zone_kind": {"type": "string", "enum": list(TRIGGER_ZONE_KINDS),
+                                      "description": "Which zone; any when the user just says 'the zone'."},
+                        "zone_timeframe": {"type": ["string", "null"], "enum": [*INTERVALS, None],
+                                           "description": "The zone's timeframe (4h demand → 4h); null if unsaid."},
+                    },
+                },
+                {"type": "null"},
+            ],
+            "description": "A trigger alert on a lower-timeframe confirmation inside a zone: 'alert me when 1m shows "
+                           "a CHoCH inside the 4h demand' → {timeframe 1m, confirm choch, zone_kind demand, "
+                           "zone_timeframe 4h}. null for every other request, including plain price alerts.",
+        },
     },
 }
 
@@ -161,7 +203,13 @@ INTENT_SYSTEM = (
     "overlays, sets alerts, switches the chart, toggles indicators or scans the watchlist, features may be empty. "
     "'Kimi' or 'Kimi Cooked' is the user's own indicator: 'show Kimi' → indicators_on kimi; a question about what "
     "Kimi says needs no detectors (its facts are read separately) and keeps the chart as it is (keep_existing true). "
+    "'Best setups right now' or 'scan the market' is scan_market (the whole market, not the watchlist) with no "
+    "features and keep_existing true. "
     "Keep what is on the chart (keep_existing true) whenever the request doesn't ask for a new analysis. "
+    "An alert on a lower-timeframe confirmation inside a zone ('alert me when 1m shows a CHoCH inside the 4h "
+    "demand', 'ping me on a 5m confirmation in the H4 supply') is zone_trigger, not alert_targets: features empty, "
+    "keep_existing true. "
+    "'Grid bot' or 'grid trading' means grid_plan (a Binance Spot Grid bot), not a trade plan. "
     "Respond with JSON only."
 )
 
@@ -174,14 +222,21 @@ NARRATE_SYSTEM = (
     "If FACTS lists actions (levels you drew, overlays removed, alerts set, chart switched), confirm them briefly. "
     "Lead with what matters for a decision: where price sits relative to the nearest zones (distance in ATR), "
     "higher-timeframe confluence, structure breaks, divergences, sweeps, and funding/open interest when given. "
-    "For a trade plan give entry, stop, targets and reward-to-risk. For a scan name the best few coins and why. "
+    "For a trade plan give entry, stop, targets and reward-to-risk, and its track record (FACTS.plan.track_record: "
+    "how this setup type did on this coin and timeframe in the backtest) in one short clause; when its status is "
+    "too_few_trades, short_history, no_match or unavailable say that instead of a win rate, and mention demo data. "
+    "For a scan name the best few coins and why. FACTS.market_scan ranks setups across the top coins by volume: "
+    "name the best two or three with direction, entry, reward-to-risk and their track record. "
     "FACTS.kimi is the user's own indicator, Kimi Cooked: name it, and give its levels with odds_pct (the chance "
     "price reaches that level within the forecast window), its latest signals and its forecast when they answer "
-    "the question. "
+    "the question; mention its chart_patterns (a watching pattern's break-out level and invalidation, a break-out's "
+    "target) and harmonics (PRZ, TP1/TP2, invalidation) when it has any. "
     "FACTS.futures_context has funding, open interest, the long/short ratio, 24h spot CVD, the nearest order-book "
     "walls and estimated liquidation clusters (call them estimates); use what the question needs. "
     "FACTS.upcoming_events lists high-impact economic events by hours from now: with a trade plan, warn about any "
     "inside it; an empty list means nothing high-impact is scheduled. FACTS.headlines are recent news titles. "
+    "FACTS.grid_plan is a Spot Grid bot plan: give its range and what it is built on, the grids and grid type and "
+    "the profit per grid after fees, and say it can be tested on history in the Grid bots tab. "
     "No disclaimers, no markdown."
 )
 
@@ -244,6 +299,51 @@ _PLAN = (r"\b(?:trade plan|trade idea|(?:long|short|trade) setup|setup|plan (?:a
          r"where (?:should|would|do|can) i (?:buy|enter|long|short|sell|get in)|should i (?:long|short|buy|sell)|"
          r"(?:long|short) (?:entry|idea|trade|position)|give me (?:a|an) (?:long|short|entry|trade)|"
          r"what(?:'s| is) the trade)\b")
+# The whole market (market_scanner.py), unless the request is about "my" coins, this chart or a named coin.
+_MARKET_SCAN = (r"\b(?:(?:scan|screen|search|sweep|check) (?:the |across the )?(?:whole |entire |crypto |broader )?market|"
+                r"market[- ]wide|across the (?:whole |entire )?market|(?:any|good|best|top)(?: \d+)?(?: \w+){0,2} setups|"
+                r"best(?: \w+){0,2} (?:setups?|trades?) (?:right now|now|today|out there))\b")
+_NOT_MARKET = r"\b(?:my|watch ?list|here|this (?:chart|coin|pair|one))\b"
+
+
+_ALERT_VERB = r"\b(?:alert|notify|ping|tell me|let me know)\b"
+_LTF = r"\b(?:(1|5|15)\s*-?\s*m(?:in(?:ute)?s?)?|m(1|5|15))\b|\b(?:lower[ -]time ?frame|ltf)\b"
+_CONFIRM_WORDS: list[tuple[str, str]] = [
+    (r"\b(?:choch|change of character|bos|break of structure|structure break|mss|market structure shift)\b", "choch"),
+    (r"\b(?:sweep(?:s|ing)?|liquidity grab|stop hunt|takes? out the (?:low|high))\b", "sweep"),
+    (r"\bengulf(?:s|ing)?\b", "engulfing"),
+    (r"\b(?:confirm(?:s|ed|ation)?|trigger|entry signal|reaction)\b", "any"),
+]
+_TRIGGER_ZONE = r"\b(demand|supply|support|resistance|zone|poi|area|box)\b"
+
+
+def _zone_trigger(p: str) -> tuple[ZoneTriggerIntent | None, tuple[int, int]]:
+    """'alert me when 1m shows a CHoCH inside the 4h demand' → (the trigger, the span of its sentence). Needs an
+    alert verb, a lower timeframe, a confirmation and a zone in the same sentence."""
+    verb = re.search(_ALERT_VERB, p)
+    if not verb:
+        return None, (0, 0)
+    end = re.compile(r"[.;!?]|$").search(p, verb.end())
+    stop = end.start() if end else len(p)
+    clause = p[verb.start():stop]
+    ltf = re.search(_LTF, clause)
+    zone = re.search(_TRIGGER_ZONE, clause)
+    confirm = next((c for pat, c in _CONFIRM_WORDS if re.search(pat, clause)), None)
+    if not (ltf and zone and confirm):
+        return None, (0, 0)
+    num = ltf.group(1) or ltf.group(2)
+    tf = f"{num}m" if num else "5m"
+    rest = clause[:ltf.start()] + " " + clause[ltf.end():]
+    higher = [t for pat, t in _TF_PATTERNS if re.search(pat, rest) and INTERVALS.index(t) > INTERVALS.index(tf)]
+    kind = zone.group(1) if zone.group(1) in ("demand", "supply", "support", "resistance") else "any"
+    return (ZoneTriggerIntent(timeframe=tf, confirm=confirm, zone_kind=kind,  # type: ignore[arg-type]
+                              zone_timeframe=higher[0] if higher else None), (verb.start(), stop))
+
+# "plan a grid bot on INJ", "grid trading settings for SOL", "suggest a grid": a Spot Grid bot plan (not grid lines).
+_GRID = (r"\bgrid[ -]?(?:bots?|trading|strateg(?:y|ies))\b(?:\s+(?:setup|settings?|plan|range))?|"
+         r"\bgrid (?:setup|settings?|parameters|params)\b|"
+         r"\b(?:plan|set ?up|suggest|design|build|make|create|recommend)\b[^.?!]{0,20}?\bgrids?\b(?! ?lines?)"
+         r"(?:\s+(?:setup|settings?|plan|range))?")
 
 
 def _num(token: str) -> float:
@@ -325,6 +425,11 @@ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases
         symbol = None
 
     indicators_on, indicators_off, p_ind = _indicator_toggles(p)
+    # A trigger alert ("alert me when 1m shows a CHoCH inside the 4h demand"): its sentence is spent, so its
+    # timeframes and zone words neither move the analysis nor become a price alert.
+    zone_trigger, (t0, t1) = _zone_trigger(p_ind)
+    if zone_trigger:
+        p, p_ind = (s[:t0] + " " * (t1 - t0) + s[t1:] for s in (p, p_ind))
 
     # Removals: the clause after the verb names what to take off ("remove the trendline and ...").
     remove: list[str] = []
@@ -371,14 +476,21 @@ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases
     for span in spans:  # "support at 24.1" is a drawing, not a request for the S/R detector
         scan = scan.replace(span, " ")
 
+    scan_market = symbol is None and bool(re.search(_MARKET_SCAN, scan)) and not re.search(_NOT_MARKET, scan)
+    if scan_market:
+        scan = re.sub(_MARKET_SCAN, " ", scan)
+    grid_plan = bool(re.search(_GRID, scan))
+    if grid_plan:
+        scan = re.sub(_GRID, " ", scan)
+
     trade_plan = None
-    if re.search(_PLAN, scan):
+    if re.search(_PLAN, scan) and not scan_market:
         trade_plan = ("long" if re.search(r"\b(?:long|buy|bull)", scan)
                       else "short" if re.search(r"\b(?:short|sell|bear)", scan) else "auto")
         scan = re.sub(_PLAN, " ", scan)
 
-    scan_watchlist = bool(re.search(_SCAN, scan))
-    scan_filter = _scan_filter(scan) if scan_watchlist else "any"
+    scan_watchlist = bool(re.search(_SCAN, scan)) and not scan_market
+    scan_filter = _scan_filter(scan) if scan_watchlist else _scan_filter(p_ind) if scan_market else "any"
     if scan_watchlist:
         scan = re.sub(_SCAN, " ", scan)
 
@@ -405,7 +517,7 @@ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases
         feats.append("patterns")
     if re.search(r"volume profile|\bpoc\b|value area|\bvpvr\b|\bvah\b|\bval\b", scan):
         feats.append("volume_profile")
-    if scan_watchlist and not re.search(r"\b(?:this|the) chart\b|\bhere\b", scan):
+    if (scan_watchlist and not re.search(r"\b(?:this|the) chart\b|\bhere\b", scan)) or scan_market:
         feats = []  # "which coins are near demand" ranks the scan; it doesn't ask for zones on this chart
     if alert_targets == ["new"] and not feats and not custom and not trade_plan:
         alert_targets = ["all"]
@@ -418,10 +530,10 @@ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases
     single = bool(re.search(r"\b(the|current|nearest|key)\b.*\b(zone|level|high|low)\b(?!s)", scan))
     max_zones = 1 if single else 2
     switch_chart = bool(re.search(_SWITCH, p)) or (timeframe is not None and bool(
-        re.search(r"\b(?:chart|timeframe|tf)\b", p)) and not feats)
+        re.search(r"\b(?:chart|timeframe|tf)\b", p)) and not feats and not scan_market)
 
     acting = bool(custom or remove or alert_prices or alert_targets or indicators_on or indicators_off
-                  or scan_watchlist or trade_plan)
+                  or scan_watchlist or scan_market or trade_plan or grid_plan or zone_trigger)
     navigating = symbol is not None or switch_chart
     # "What does Kimi say?" is read from Kimi's own facts: no detectors, and the chart stays as it is.
     asks_kimi = not feats and bool(re.search(r"\bkimi\b", p))
@@ -443,8 +555,8 @@ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases
                           answer_hint=prompt.strip()[:200], custom_levels=custom, remove=remove,
                           keep_existing=keep, alert_prices=alert_prices[:10], alert_targets=alert_targets,
                           symbol=symbol, switch_chart=switch_chart, scan_watchlist=scan_watchlist,
-                          scan_filter=scan_filter, trade_plan=trade_plan, indicators_on=indicators_on,
-                          indicators_off=indicators_off)
+                          scan_filter=scan_filter, scan_market=scan_market, trade_plan=trade_plan, grid_plan=grid_plan,
+                          indicators_on=indicators_on, indicators_off=indicators_off, zone_trigger=zone_trigger)
 
 
 _FEATURE_GROUPS: dict[str, list[str]] = {
@@ -511,6 +623,8 @@ class LLMClient:
         self.s = settings or get_settings()
         self._client = httpx.AsyncClient(timeout=httpx.Timeout(self.s.llm_timeout, connect=3.0))
         self._down_until = 0.0  # circuit breaker: skip the LLM briefly after a connection failure
+        # Provider and model picked in the app's settings (model_choice.py); None = the .env ones.
+        self.choice: tuple[str, str] | None = None
 
     def _available(self) -> bool:
         return self.provider != "none" and time.monotonic() >= self._down_until
@@ -522,9 +636,14 @@ class LLMClient:
     async def close(self) -> None:
         await self._client.aclose()
 
+    def use(self, provider: str | None, model: str | None) -> None:
+        """Switch provider and model at runtime; None (or an empty model) goes back to the .env settings."""
+        self.choice = (provider, model) if provider and model else None
+        self._down_until = 0.0
+
     @property
     def provider(self) -> str:
-        p = self.s.llm_provider
+        p = self.choice[0] if self.choice else self.s.llm_provider
         if p == "openai" and not self.s.openai_api_key and "api.openai.com" in self.s.openai_base_url:
             return "none"
         if p == "anthropic" and not self.s.anthropic_api_key:
@@ -533,6 +652,8 @@ class LLMClient:
 
     @property
     def model(self) -> str:
+        if self.choice and self.choice[0] == self.provider:
+            return self.choice[1]
         return {"ollama": self.s.ollama_model, "openai": self.s.openai_model,
                 "anthropic": self.s.anthropic_model}.get(self.provider, "")
 
@@ -571,7 +692,7 @@ class LLMClient:
                 "type": "auto"}
             r = await self._client.post("https://api.anthropic.com/v1/messages", headers=self._anthropic_headers(),
                                         json={
-                "model": self.s.anthropic_model, "max_tokens": 1024, "system": system,
+                "model": self.model, "max_tokens": 1024, "system": system,
                 "tools": [{"name": t["name"], "description": t["description"], "input_schema": t["parameters"]}
                           for t in tools],
                 "tool_choice": choice, "messages": _to_anthropic(messages),
@@ -587,7 +708,7 @@ class LLMClient:
                            else "required" if force else "auto")
             r = await self._client.post(f"{self.s.openai_base_url}/chat/completions", headers=self._openai_headers(),
                                         json={
-                "model": self.s.openai_model, "temperature": 0, "tool_choice": choice,
+                "model": self.model, "temperature": 0, "tool_choice": choice,
                 "tools": [{"type": "function", "function": {"name": t["name"], "description": t["description"],
                                                             "parameters": t["parameters"], "strict": True}}
                           for t in tools],
@@ -601,7 +722,7 @@ class LLMClient:
 
         if self.provider == "ollama":
             r = await self._client.post(f"{self.s.ollama_url}/api/chat", json={
-                "model": self.s.ollama_model, "stream": False, "options": self._ollama_options(0),
+                "model": self.model, "stream": False, "options": self._ollama_options(0),
                 "tools": [{"type": "function", "function": {"name": t["name"], "description": t["description"],
                                                             "parameters": t["parameters"]}} for t in tools],
                 "messages": [{"role": "system", "content": system}, *_to_ollama(messages)],
@@ -619,6 +740,19 @@ class LLMClient:
 
     def note_failure(self, exc: Exception) -> None:
         self._trip(exc)
+
+    async def write(self, system: str, user: str) -> tuple[str, str] | None:
+        """Free text from the model → (text, "provider:model"), or None when no model is available or it failed.
+        Callers check the text against their facts (e.g. post-mortems keep their template otherwise)."""
+        if not self._available():
+            return None
+        try:
+            text = (await self._text(system, user)).strip()
+            return (text, f"{self.provider}:{self.model}") if text else None
+        except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+            log.warning("LLM text failed (%s: %s)", type(exc).__name__, exc)
+            self._trip(exc)
+            return None
 
     async def narrate(self, prompt: str, facts: dict, fallback: str,
                       history: list[ChatTurn] | None = None) -> tuple[str, str]:
@@ -646,7 +780,7 @@ class LLMClient:
     async def _structured(self, system: str, user: str, schema: dict, name: str) -> dict:
         if self.provider == "ollama":
             r = await self._client.post(f"{self.s.ollama_url}/api/chat", json={
-                "model": self.s.ollama_model, "stream": False, "format": schema,
+                "model": self.model, "stream": False, "format": schema,
                 "options": self._ollama_options(0),
                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
             })
@@ -656,7 +790,7 @@ class LLMClient:
         if self.provider == "openai":
             r = await self._client.post(f"{self.s.openai_base_url}/chat/completions", headers=self._openai_headers(),
                                         json={
-                "model": self.s.openai_model, "temperature": 0,
+                "model": self.model, "temperature": 0,
                 "response_format": {"type": "json_schema",
                                     "json_schema": {"name": name, "schema": schema, "strict": True}},
                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
@@ -667,7 +801,7 @@ class LLMClient:
         if self.provider == "anthropic":
             r = await self._client.post("https://api.anthropic.com/v1/messages", headers=self._anthropic_headers(),
                                         json={
-                "model": self.s.anthropic_model, "max_tokens": 512, "system": system,
+                "model": self.model, "max_tokens": 512, "system": system,
                 "tools": [{"name": name, "description": "Return the analysis plan.", "input_schema": schema}],
                 "tool_choice": {"type": "tool", "name": name},
                 "messages": [{"role": "user", "content": user}],
@@ -683,7 +817,7 @@ class LLMClient:
     async def _text(self, system: str, user: str) -> str:
         if self.provider == "ollama":
             r = await self._client.post(f"{self.s.ollama_url}/api/chat", json={
-                "model": self.s.ollama_model, "stream": False, "options": self._ollama_options(0.2),
+                "model": self.model, "stream": False, "options": self._ollama_options(0.2),
                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
             })
             r.raise_for_status()
@@ -691,7 +825,7 @@ class LLMClient:
         if self.provider == "openai":
             r = await self._client.post(f"{self.s.openai_base_url}/chat/completions", headers=self._openai_headers(),
                                         json={
-                "model": self.s.openai_model, "temperature": 0.2,
+                "model": self.model, "temperature": 0.2,
                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
             })
             r.raise_for_status()
@@ -699,7 +833,7 @@ class LLMClient:
         if self.provider == "anthropic":
             r = await self._client.post("https://api.anthropic.com/v1/messages", headers=self._anthropic_headers(),
                                         json={
-                "model": self.s.anthropic_model, "max_tokens": 400, "system": system,
+                "model": self.model, "max_tokens": 400, "system": system,
                 "messages": [{"role": "user", "content": user}],
             })
             r.raise_for_status()

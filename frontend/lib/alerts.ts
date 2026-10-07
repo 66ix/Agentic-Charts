@@ -1,6 +1,16 @@
 import { apiRequest } from "./api";
 import { formatPrice } from "./format";
-import type { AlertSpec, Drawing, Interval, Overlay, PriceAlert } from "./types";
+import type {
+  AlertSpec,
+  Confirmation,
+  Drawing,
+  Interval,
+  Overlay,
+  PriceAlert,
+  TriggerInterval,
+  TriggerZone,
+  ZoneTriggerSpec,
+} from "./types";
 
 export const ALERT_COLOR = "#fbbf24";
 
@@ -119,7 +129,8 @@ export type SignalId =
   | "bos_bull"
   | "bos_bear"
   | "rsi_overbought"
-  | "rsi_oversold";
+  | "rsi_oversold"
+  | "zone_trigger";
 
 /** Plain-English names, in the order the picker lists them. Mirrors SIGNALS in backend/app/signal_alerts.py. */
 export const SIGNAL_OPTIONS: { id: SignalId; name: string; hint: string }[] = [
@@ -139,6 +150,7 @@ export const SIGNAL_OPTIONS: { id: SignalId; name: string; hint: string }[] = [
 ];
 
 export function signalName(id: string): string {
+  if (id === "zone_trigger") return "Zone trigger";
   return SIGNAL_OPTIONS.find((s) => s.id === id)?.name ?? id;
 }
 
@@ -159,6 +171,10 @@ export interface SignalAlert {
   last_bar: number | null;
   last_text: string;
   last_price: number | null;
+  /** Signal "zone_trigger" only: the zone and the confirmation. */
+  trigger?: ZoneTrigger | null;
+  /** Zone triggers: the suggested stop of the last fire. */
+  last_stop?: number | null;
 }
 
 export interface SignalAlertPatch {
@@ -222,9 +238,110 @@ export function previewSignalAlert(symbol: string, interval: Interval, signal: S
   return apiRequest<SignalPreview>(`/api/signal-alerts/preview?${q}`, { signal: abort, timeoutMs: 90_000 });
 }
 
+// ------------------------------------------------------- zone trigger alerts --
+
+/** A zone trigger's settings, plus the zone it currently watches. Mirrors ZoneTrigger in backend/app/zone_triggers.py. */
+export interface ZoneTrigger {
+  zone: TriggerZone;
+  confirm: Confirmation;
+  cooldown_min: number;
+  /** The watched zone right now (detected zones move as the timeframe closes); null = none found yet. */
+  zone_low: number | null;
+  zone_high: number | null;
+  zone_label: string;
+}
+
+export const TRIGGER_INTERVALS: TriggerInterval[] = ["1m", "5m", "15m"];
+
+export const CONFIRM_OPTIONS: { id: Confirmation; name: string; hint: string }[] = [
+  { id: "any", name: "Any confirmation", hint: "A CHoCH / BOS, a sweep or an engulfing close, whichever comes first" },
+  { id: "choch", name: "CHoCH / BOS", hint: "A candle closes beyond the last lower-timeframe swing, in the zone's direction" },
+  { id: "sweep", name: "Liquidity sweep", hint: "A wick takes out a lower-timeframe low (high) and the candle closes back" },
+  { id: "engulfing", name: "Engulfing close", hint: "A strong candle engulfs the previous one, in the zone's direction" },
+];
+
+export interface TriggerPreview {
+  symbol: string;
+  interval: TriggerInterval;
+  name: string;
+  bars: number;
+  /** The zone the preview used; null when none was found. */
+  zone: { low: number; high: number; label: string; direction: "long" | "short" } | null;
+  data_source: string;
+  /** Newest first. `time` is the candle's open time (UNIX s). */
+  hits: { time: number; price: number; text: string; stop: number | null }[];
+  note?: string;
+}
+
+/** Creates (or re-arms the same) zone trigger alert. */
+export function createZoneTrigger(spec: ZoneTriggerSpec) {
+  return apiRequest<{ alert: SignalAlert }>("/api/zone-triggers", { method: "POST", body: JSON.stringify(spec) });
+}
+
+/** When the trigger would have fired on the last `bars` closed lower-timeframe candles. */
+export function previewZoneTrigger(spec: ZoneTriggerSpec, bars = 300, abort?: AbortSignal) {
+  return apiRequest<TriggerPreview>(`/api/zone-triggers/preview?bars=${bars}`, {
+    method: "POST",
+    body: JSON.stringify(spec),
+    signal: abort,
+    timeoutMs: 90_000,
+  });
+}
+
+/** "CHoCH / BOS in H4 demand 98.8–100.2" for an alert row. */
+export function describeTrigger(a: SignalAlert): string {
+  const t = a.trigger;
+  if (!t) return signalName(a.signal);
+  const confirm = CONFIRM_OPTIONS.find((c) => c.id === t.confirm)?.name ?? t.confirm;
+  const where =
+    t.zone_low != null && t.zone_high != null
+      ? `${t.zone_label || "zone"} ${formatPrice(t.zone_low)}–${formatPrice(t.zone_high)}`
+      : `the nearest ${t.zone.fresh_only !== false && (t.zone.kind === "demand" || t.zone.kind === "supply") ? "fresh " : ""}` +
+        `${t.zone.timeframe ?? ""} ${t.zone.kind && t.zone.kind !== "any" ? t.zone.kind : "zone"} (none found yet)`;
+  return `${confirm} in ${where}`;
+}
+
+/** A zone on the chart a trigger can watch: an AI zone or a rectangle the user drew. */
+export interface ChartZone {
+  key: string;
+  label: string;
+  low: number;
+  high: number;
+  direction: "long" | "short" | null;
+}
+
+const ZONE_KINDS = /^(support|resistance|supply|demand|ob_|fvg_|custom_zone)/;
+
+/** Zones on the chart, the selected drawing first: AI boxes (S/R, supply, demand, order blocks, FVGs) and
+ *  rectangles the user drew. Direction comes from the zone's kind where it has one. */
+export function chartZones(overlays: Overlay[], drawings: Drawing[], selectedId?: string | null): ChartZone[] {
+  const out: ChartZone[] = [];
+  const seen = new Set<string>();
+  const push = (z: ChartZone) => {
+    const k = `${z.low}:${z.high}`;
+    if (seen.has(k) || !(z.high > z.low)) return;
+    seen.add(k);
+    out.push(z);
+  };
+  const ordered = [...drawings].sort((a, b) => Number(b.id === selectedId) - Number(a.id === selectedId));
+  for (const d of ordered) {
+    if (d.type !== "rect" || d.points.length < 2) continue;
+    const lo = Math.min(d.points[0].price, d.points[1].price);
+    const hi = Math.max(d.points[0].price, d.points[1].price);
+    push({ key: `drawing:${d.id}`, label: d.text || `Box ${formatPrice(lo)}–${formatPrice(hi)}`, low: lo, high: hi, direction: null });
+  }
+  for (const o of overlays) {
+    if (o.type !== "box" || !ZONE_KINDS.test(o.kind ?? "")) continue;
+    const kind = o.kind ?? "";
+    const direction = /^(support|demand)|_bull/.test(kind) ? "long" : /^(resistance|supply)|_bear/.test(kind) ? "short" : null;
+    push({ key: `overlay:${o.id ?? `${kind}:${o.price_low}`}`, label: o.label, low: o.price_low, high: o.price_high, direction });
+  }
+  return out;
+}
+
 // ------------------------------------------------------------------- history --
 
-export type AlertHistoryKind = "price" | "signal" | "brief";
+export type AlertHistoryKind = "price" | "signal" | "brief" | "trade";
 
 /** One fire. Mirrors AlertHistory items in backend/app/alerts.py. */
 export interface AlertHistoryItem {

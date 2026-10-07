@@ -46,6 +46,7 @@ from .schemas import (
     MarkerOverlay,
     TrendlineOverlay,
 )
+from .session_levels import level_lines
 from .trade_plan import Level
 
 TF_LABEL = {
@@ -478,7 +479,7 @@ def analyze(
                 color=rgba(color, 0.22), border_color=rgba(color, 0.7), time_start=z.first_time,
                 strength=round(min(z.score, 1.0), 2),
             ))
-            levels.append(Level(z.kind, z.price_low, z.price_high, label, z.score))
+            levels.append(Level(z.kind, z.price_low, z.price_high, label, z.score, htf=tuple(z.meta.get("htf") or ())))
         facts["resistance"] = sorted([_zone_fact(z, last, atr_v, "touches", z.touches) for z in sr_zones
                                       if z.kind == "resistance"], key=lambda f: f["low"])
         facts["support"] = sorted([_zone_fact(z, last, atr_v, "touches", z.touches) for z in sr_zones
@@ -496,7 +497,8 @@ def analyze(
                 label=label, kind=z.kind, price_high=z.price_high, price_low=z.price_low, color=rgba(color, 0.18),
                 border_color=rgba(color, 0.65), time_start=z.first_time, strength=round(min(z.score, 1.0), 2),
             ))
-            levels.append(Level(z.kind, z.price_low, z.price_high, label, z.score))
+            levels.append(Level(z.kind, z.price_low, z.price_high, label, z.score, tests=z.tests,
+                                htf=tuple(z.meta.get("htf") or ())))
         facts["supply"] = sorted([_zone_fact(z, last, atr_v, "tests", z.tests) for z in sd if z.kind == "supply"],
                                  key=lambda f: f["low"])
         facts["demand"] = sorted([_zone_fact(z, last, atr_v, "tests", z.tests) for z in sd if z.kind == "demand"],
@@ -672,6 +674,29 @@ def _kimi_lines(k: dict) -> list[str]:
         s = k["recent_signals"][-1]
         out.append(f"Last signal {s['label']} ({s['direction']}) at {_fmt(s['price'])}, {s['bars_ago']} bars ago, "
                    f"{s['result']}.")
+    out += _kimi_pattern_lines(k)
+    return out
+
+
+def _kimi_pattern_lines(k: dict) -> list[str]:
+    """Kimi's chart patterns still in play (or just broken out) and its newest harmonic."""
+    out = []
+    for p in reversed(k.get("chart_patterns", [])):
+        if p["state"] == "watching":
+            side = "above" if p["direction"] == "bullish" else "below"
+            out.append(f"{p['pattern']} ({p['direction']}, formed {p['formed_bars_ago']} bars ago): breaks out on a "
+                       f"close {side} {_fmt(p['breakout_level'])}, invalid past {_fmt(p['invalidation'])}.")
+        elif p["state"] == "breakout" and p.get("target") is not None:
+            out.append(f"{p['pattern']} broke out at {_fmt(p['broke_out_at'])}, measured-move target "
+                       f"{_fmt(p['target'])}.")
+        if len(out) == 2:
+            break
+    if k.get("harmonics"):
+        h = k["harmonics"][-1]
+        out.append(f"Harmonic: {h['direction']} {h['pattern']} ({h['state']}), D {_fmt(h['d'])} "
+                   f"{h['completed_bars_ago']} bars ago, PRZ {_fmt(h['prz'][0])}–{_fmt(h['prz'][1])} "
+                   f"(confluence {h['prz_confluence']}), TP1 {_fmt(h['tp1'])}, TP2 {_fmt(h['tp2'])}, "
+                   f"invalid past {_fmt(h['invalidation'])}.")
     return out
 
 
@@ -757,6 +782,8 @@ def describe(facts: dict, symbol: str) -> str:
             lines.append("Futures: " + ", ".join(bits) + ".")
     if facts.get("futures_context"):
         lines += _futures_lines(facts["futures_context"])
+    if facts.get("session_levels"):
+        lines += level_lines(facts["session_levels"])
     if facts.get("upcoming_events"):
         ev = facts["upcoming_events"]
         lines.append("Coming up: " + "; ".join(f"{e['country']} {e['title']} in {e['in_hours']:.0f}h" for e in ev[:3])
@@ -771,6 +798,8 @@ def describe(facts: dict, symbol: str) -> str:
         lines.append(f"{p['direction'].title()} plan from {p['basis']}: entry {_fmt(p['entry'])}, "
                      f"stop {_fmt(p['stop'])}, targets {tgts}.")
         lines += p.get("notes", [])
+        if (p.get("track_record") or {}).get("summary"):
+            lines.append(f"Track record: {p['track_record']['summary']}.")
     elif "plan" in facts:
         lines.append("No clean trade plan here: no zone or swing to put a stop behind.")
     if facts.get("scan"):
@@ -779,6 +808,16 @@ def describe(facts: dict, symbol: str) -> str:
                                                for r in best) + ".")
     elif "scan" in facts:
         lines.append("Couldn't scan the watchlist.")
+    if "market_scan" in facts:
+        ms = facts["market_scan"]
+        if ms.get("setups"):
+            demo = " (demo data)" if ms.get("data_source") == "synthetic" else ""
+            lines.append(f"Best {ms['timeframe']} setups across {ms['coins']} coins{demo}: " + "; ".join(
+                f"{s['direction']} {s['symbol']} entry {_fmt(s['entry'])}, stop {_fmt(s['stop'])}, T1 "
+                f"{_fmt(s['target'])} ({s['rr']}R, {s['distance_pct']}% away)"
+                + (f", {s['track_record']}" if s.get("track_record") else "") for s in ms["setups"][:3]) + ".")
+        else:
+            lines.append(ms.get("note") or f"No {ms['timeframe']} setups across the market right now.")
     if facts.get("kimi"):
         lines += _kimi_lines(facts["kimi"])
     lines += facts.get("actions", [])

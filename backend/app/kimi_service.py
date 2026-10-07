@@ -22,8 +22,9 @@ from .alerts import fmt_price
 from .config import get_settings
 from .kimi import Inputs, KimiCooked, Result, __version__
 from .market_data import DERIVED_INTERVALS, INTERVAL_SECONDS, MarketData
-from .schemas import (Candle, KimiFib, KimiFibLevel, KimiForecast, KimiLevel, KimiNextCandle, KimiResponse, KimiRow,
-                      KimiSignal)
+from .kimi.patterns_v574 import HARM_NAMES, HARM_SHORT, HARM_STATES
+from .schemas import (Candle, KimiBreakout, KimiFib, KimiFibLevel, KimiForecast, KimiHarmonic, KimiLevel,
+                      KimiNextCandle, KimiPattern, KimiPoint, KimiResponse, KimiRow, KimiSegment, KimiSignal)
 
 log = logging.getLogger(__name__)
 
@@ -31,13 +32,15 @@ MAX_LABELS = 15        # the script's "Max Divergence Labels on Chart" default; 
 FIB_EXTEND = 25        # "Right Extension (bars)"
 HISTORY_DAYS = 1000    # daily candles fed to the higher-timeframe requests of intraday charts
 NOTES = [
-    "Not in the Python port yet: chart patterns and harmonics (no Pat BO or Harmonics rows), the HTF divergence "
-    "factor and session filters. Confluence scores run a little lower than on TradingView, so Conf top/rest, Long "
-    "and Short can differ; DIV, U/Dn, Early and Random are unaffected.",
+    "Not in the Python port yet: the HTF divergence confluence factor. Confluence scores run a little lower than "
+    "on TradingView, so Conf top/rest can differ; the signals themselves are unaffected.",
     "Stats cover the candles loaded here. TradingView's depend on how many candles your chart loaded.",
 ]
-TYPE_NAMES = {0: "DIV", 1: "U/Dn", 2: "Early"}
-LABELS = {(0, 1): "B+", (0, -1): "B-", (1, 1): "U", (1, -1): "Dn", (2, 1): "B+?", (2, -1): "B-?"}
+TYPE_NAMES = {0: "DIV", 1: "U/Dn", 2: "Early", 3: "Pat BO", **{5 + k: nm for k, nm in enumerate(HARM_NAMES)}}
+LABELS = {(0, 1): "B+", (0, -1): "B-", (1, 1): "U", (1, -1): "Dn", (2, 1): "B+?", (2, -1): "B-?",
+          (3, 1): "BO▲", (3, -1): "BO▼",
+          **{(5 + k, d): f"{sh} {'▲' if d > 0 else '▼'}" for k, sh in enumerate(HARM_SHORT) for d in (1, -1)}}
+DIRECTION = {1: "bullish", -1: "bearish"}
 
 
 def kimi_inputs() -> Inputs:
@@ -144,7 +147,7 @@ def _fib(res: Result, fc: dict, times: np.ndarray, step: int) -> KimiFib | None:
 
 
 def _signals(res: Result, times: np.ndarray) -> list[KimiSignal]:
-    sigs = [s for s in res.signals if s.typ < 15]
+    sigs = [s for s in res.signals if s.typ < 3]   # pattern break-outs and harmonics are drawn as patterns
     keep = [s for s in sigs if s.typ < 2][-MAX_LABELS:] + [s for s in sigs if s.typ == 2][-MAX_LABELS:]
     keep.sort(key=lambda s: (s.pivot_bar, s.bar))
     return [KimiSignal(type=TYPE_NAMES[s.typ], direction="long" if s.dir > 0 else "short",
@@ -153,6 +156,46 @@ def _signals(res: Result, times: np.ndarray) -> list[KimiSignal]:
                        tier={1: "top", 0: "rest", -1: "warm-up"}[s.tier],
                        result={0: "open", 1: "win", 2: "loss", 3: "expiry"}[s.result],
                        r=None if math.isnan(s.r) else round(float(s.r), 2)) for s in keep]
+
+
+def _bar_time(times: np.ndarray, step: int):
+    """Candle index -> open time; indices past the last candle continue on the chart's grid (the script's
+    drawings extend patExtend / harmExtend bars to the right)."""
+    last = len(times) - 1
+    return lambda k: int(times[k]) if k <= last else int(times[-1]) + (int(k) - last) * step
+
+
+def _patterns(res: Result, times: np.ndarray, step: int) -> tuple[list[KimiPattern], list[KimiBreakout]]:
+    F, at, last = res.final, _bar_time(times, step), len(times) - 1
+    pats = []
+    for x in F.get("patterns", []):
+        watching = x.state == "watching"
+        pats.append(KimiPattern(
+            name=x.name, text=x.text, direction=DIRECTION[x.dir], time=at(x.bar), state=x.state,
+            label_time=at(x.label_bar), label_price=x.label_y,
+            lines=[KimiSegment(time_start=at(s.x1), price_start=float(s.y1), time_end=at(s.x2), price_end=float(s.y2),
+                               width=s.width, style=s.style) for s in x.lines],
+            breakout_level=float(x.brk_a * last + x.brk_b) if watching else None,
+            invalidation=float(x.inv_lvl + x.inv_sl * (last - x.bar)) if watching else None,
+            end_time=at(x.end_bar) if x.end_bar >= 0 else None,
+            breakout_price=x.breakout["price"] if x.breakout else None,
+            target=x.breakout["target"] if x.breakout else None))
+    bos = [KimiBreakout(name=b["name"], direction=DIRECTION[b["dir"]], time=at(b["bar"]), time_end=at(b["end_bar"]),
+                        price=b["price"], target=b["target"]) for b in F.get("breakouts", [])]
+    return pats, bos
+
+
+def _harmonics(res: Result, times: np.ndarray, step: int) -> list[KimiHarmonic]:
+    at = _bar_time(times, step)
+    out = []
+    for s in res.final.get("harmonics", []):
+        out.append(KimiHarmonic(
+            name=s.name, text=s.text, direction=DIRECTION[s.dir], time=at(s.bar), state=HARM_STATES[s.state],
+            points=[KimiPoint(label=lb, time=at(b), price=px) for lb, (b, px) in zip("XABCD", s.points)],
+            prz_low=s.prz_low, prz_high=s.prz_high, prz_shown=s.box, time_end=at(s.end_x), tp1=s.tp1, tp2=s.tp2,
+            tp_basis=s.tp_basis, invalidation=s.inv, prz_tier=s.tier, end_time=at(s.end_bar) if s.end_bar >= 0 else None,
+            ratios={k: (None if math.isnan(v) else round(float(v), 3)) for k, v in s.ratios.items()}))
+    return out
 
 
 def _forecast(res: Result, fc: dict, times: np.ndarray, c: np.ndarray, step: int) -> KimiForecast:
@@ -203,11 +246,13 @@ def compute(symbol: str, interval: str, candles: list[Candle], source: str,
     times = t // 1000
     fc = res.last_forecast()
     odds = {px: pct for _, px, pct in fc["level_odds"]} if fc else {}
+    patterns, breakouts = _patterns(res, times, step)
     return KimiResponse(
         symbol=symbol, interval=interval, version=__version__, data_source=source, bars=len(candles),
         last_closed=int(times[-1]), levels=_levels(res, times, odds),
         fib=_fib(res, fc, times, step) if fc else None, signals=_signals(res, times),
         forecast=_forecast(res, fc, times, c, step) if fc else None,
+        patterns=patterns, breakouts=breakouts, harmonics=_harmonics(res, times, step),
         verify=verify_rows(res), stats=stats_rows(res), notes=NOTES,
         seconds=round(time.perf_counter() - started, 2))
 
@@ -231,8 +276,22 @@ def summarize(k: KimiResponse) -> dict:
                            **({"next_candle": f.next_candle.direction} if f.next_candle else {})}
     if k.fib:
         out["fib"] = [{"ratio": x.ratio, "price": x.price, "odds_pct": x.odds} for x in k.fib.levels]
+    ago = lambda t: round((k.last_closed - t) / INTERVAL_SECONDS[k.interval])  # noqa: E731
+    if k.patterns:
+        out["chart_patterns"] = [{
+            "pattern": p.name, "direction": p.direction, "state": p.state, "formed_bars_ago": ago(p.time),
+            **({"breakout_level": p.breakout_level, "invalidation": p.invalidation} if p.state == "watching" else {}),
+            **({"broke_out_at": p.breakout_price, "target": p.target} if p.state == "breakout" else {}),
+        } for p in k.patterns]
+    if k.harmonics:
+        out["harmonics"] = [{
+            "pattern": h.name, "direction": h.direction, "state": h.state, "d": h.points[-1].price,
+            "completed_bars_ago": ago(h.time), "prz": [h.prz_low, h.prz_high], "tp1": h.tp1, "tp2": h.tp2,
+            "invalidation": h.invalidation, "prz_confluence": f"{h.prz_tier}/3",
+        } for h in k.harmonics]
     stats = {r.label: r.value for r in k.stats}
-    out["signal_stats"] = {key: stats[key] for key in ("DIV +/-", "U / Dn", "Early ?", "Random") if key in stats}
+    out["signal_stats"] = {key: stats[key] for key in ("DIV +/-", "U / Dn", "Early ?", "Pat BO", "Harmonics", "Random")
+                           if key in stats}
     return out
 
 
