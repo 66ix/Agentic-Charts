@@ -35,6 +35,24 @@ export interface NewJournalEntry {
   manage?: "breakeven_after_t1" | "none";
   /** UNIX seconds; default now. */
   taken_at?: number | null;
+  /** The zone the trade was taken from (a plan's entry zone), for its post-mortem. */
+  zone_low?: number | null;
+  zone_high?: number | null;
+}
+
+/** The review written when a trade closes. Mirrors PostMortem in journal.py; numbers come from `facts`. */
+export interface PostMortem {
+  generated_at: number; // UNIX s
+  /** "template", or "provider:model" when the LLM wrote the text. */
+  engine: string;
+  summary: string;
+  lessons: string[];
+  lesson_codes: string[];
+  facts: Record<string, unknown>;
+  /** The result it was written for; a different result gets a new one. */
+  closed_at: number | null;
+  realized_r: number;
+  data_source: string;
 }
 
 export interface JournalExit {
@@ -88,6 +106,8 @@ export interface JournalEntry extends Required<Omit<NewJournalEntry, "taken_at" 
   created_at: number;
   updated_at: number;
   evaluation: JournalEvaluation;
+  /** Closed trades: written in the background shortly after the close. */
+  postmortem?: PostMortem | null;
 }
 
 /** What PATCH /api/journal/{id} takes; only the fields given change. */
@@ -179,6 +199,100 @@ export async function deleteJournalEntry(id: string): Promise<void> {
   changed();
 }
 
+/** (Re)writes a closed trade's post-mortem now. */
+export async function regeneratePostmortem(id: string): Promise<JournalEntry> {
+  const res = await apiRequest<{ entry: JournalEntry }>(`/api/journal/${encodeURIComponent(id)}/postmortem`, {
+    method: "POST",
+    timeoutMs: 120_000,
+  });
+  changed();
+  return res.entry;
+}
+
+/** True while a closed trade waits for its post-mortem (none yet, or one written for an earlier result). */
+export function postmortemPending(e: JournalEntry): boolean {
+  const ev = e.evaluation;
+  if (ev.status !== "closed") return false;
+  const pm = e.postmortem;
+  return !pm || pm.closed_at !== ev.closed_at || Math.abs(pm.realized_r - ev.realized_r) > 1e-6;
+}
+
+// ----------------------------------------------------------- weekly review --
+
+/** GET /api/journal/review: the closed trades of the last `days` days. Mirrors weekly_review in postmortem.py. */
+export interface WeeklyReview {
+  from: number;
+  to: number;
+  days: number;
+  closed: number;
+  wins: number;
+  losses: number;
+  breakeven: number;
+  win_rate: number | null;
+  avg_r: number | null;
+  total_r: number;
+  best_r: number | null;
+  worst_r: number | null;
+  best_setup: JournalGroupStats | null;
+  worst_setup: JournalGroupStats | null;
+  best_symbol: JournalGroupStats | null;
+  worst_symbol: JournalGroupStats | null;
+  /** Lessons that came up in two or more post-mortems. */
+  recurring: { code: string; name: string; count: number; example: string }[];
+  trades: {
+    id: string;
+    symbol: string;
+    setup: string;
+    direction: JournalDirection;
+    realized_r: number;
+    outcome: "win" | "loss" | "breakeven" | null;
+    closed_at: number | null;
+    lesson: string | null;
+  }[];
+  missing_postmortems: number;
+  open: number;
+  data_source: string;
+  /** The message the schedule sends. */
+  text: string;
+}
+
+/** Mirrors ReviewSettings in postmortem.py. */
+export interface ReviewSettings {
+  enabled: boolean;
+  /** 0 = Monday … 6 = Sunday. */
+  weekday: number;
+  /** Local send time, "HH:MM". */
+  time: string;
+  timezone: string;
+  days: number;
+}
+
+export interface ReviewStatus {
+  settings: ReviewSettings;
+  channels: { telegram: boolean; discord: boolean };
+  last_sent_at: number | null; // ms
+}
+
+export function fetchWeeklyReview(days?: number, signal?: AbortSignal) {
+  return apiRequest<WeeklyReview>(`/api/journal/review${days ? `?days=${days}` : ""}`, { signal, timeoutMs: 45_000 });
+}
+
+export function fetchReviewSettings(signal?: AbortSignal) {
+  return apiRequest<ReviewStatus>("/api/journal/review/settings", { signal });
+}
+
+export function saveReviewSettings(settings: ReviewSettings) {
+  return apiRequest<ReviewStatus>("/api/journal/review/settings", { method: "PUT", body: JSON.stringify(settings) });
+}
+
+/** Sends the review to Telegram / Discord now. Rejects (400) when no channel is configured. */
+export function sendWeeklyReview(days?: number) {
+  return apiRequest<WeeklyReview & { results: Record<string, boolean> }>(
+    `/api/journal/review/send${days ? `?days=${days}` : ""}`,
+    { method: "POST", timeoutMs: 45_000 },
+  );
+}
+
 export function fetchJournalStats(filter: JournalStatsFilter = {}, signal?: AbortSignal) {
   const q = new URLSearchParams();
   for (const [k, v] of Object.entries(filter)) if (v) q.set(k, v);
@@ -216,6 +330,8 @@ export function planToJournalEntry(
     source: "agent_plan",
     notes: plan.basis ? `From ${plan.basis}` : "",
     entry_type: "limit",
+    zone_low: plan.zone_low ?? null,
+    zone_high: plan.zone_high ?? null,
     ...extra,
   };
 }

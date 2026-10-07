@@ -691,6 +691,19 @@ class LLMClient:
     def note_failure(self, exc: Exception) -> None:
         self._trip(exc)
 
+    async def write(self, system: str, user: str) -> tuple[str, str] | None:
+        """Free text from the model → (text, "provider:model"), or None when no model is available or it failed.
+        Callers check the text against their facts (e.g. post-mortems keep their template otherwise)."""
+        if not self._available():
+            return None
+        try:
+            text = (await self._text(system, user)).strip()
+            return (text, f"{self.provider}:{self.model}") if text else None
+        except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+            log.warning("LLM text failed (%s: %s)", type(exc).__name__, exc)
+            self._trip(exc)
+            return None
+
     async def narrate(self, prompt: str, facts: dict, fallback: str,
                       history: list[ChatTurn] | None = None) -> tuple[str, str]:
         if not self._available() or not prompt.strip():
