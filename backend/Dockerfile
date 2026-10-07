@@ -5,6 +5,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 COPY app ./app
+# The prompt eval set: Settings → AI model scores models with it.
+COPY evals ./evals
 
 # Candle cache, liquidation history and alerts live here; mount a volume to keep them across deploys.
 RUN mkdir -p /app/.cache && useradd --create-home appuser && chown -R appuser /app

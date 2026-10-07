@@ -63,6 +63,9 @@ class Settings:
     anthropic_model: str = field(default_factory=lambda: _env("ANTHROPIC_MODEL", "claude-sonnet-5-5"))
     # "tools": the model may look at other timeframes/coins before planning (agent_loop.py);
     # "plan": one structured call, faster and better suited to small local models.
+    # The model picked in Settings → AI model, and its eval runs (model_choice.py); memory = not kept.
+    llm_choice_store: str = field(default_factory=lambda: _env(
+        "LLM_CHOICE_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "llm_choice.json")))
     agent_mode: str = field(default_factory=lambda: _env("AGENT_MODE", "tools").lower())
     agent_max_steps: int = field(default_factory=lambda: int(_env("AGENT_MAX_STEPS", "4")))
     # Rate limits per client ("N/second|minute|hour|day", or 0 to disable) and a global daily agent cap.

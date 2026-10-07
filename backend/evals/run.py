@@ -59,19 +59,21 @@ def run_rules() -> list[tuple[dict, list[str]]]:
             for c in load_cases() if not c.get("llm_only")]
 
 
+async def eval_case(llm: LLMClient, case: dict) -> list[str]:
+    """One case against an LLM client; a fall-back to the rule parser counts as a failure."""
+    intent, engine = await llm.parse_intent(case["prompt"], [], [], previous(case), CHART)
+    errs = check(intent, case["expect"])
+    if engine == "rules":
+        errs.insert(0, "LLM unavailable: answered by the rule parser")
+    return errs
+
+
 async def run_llm() -> list[tuple[dict, list[str]]]:
     llm = LLMClient()
-    out = []
     try:
-        for c in load_cases():
-            intent, engine = await llm.parse_intent(c["prompt"], [], [], previous(c), CHART)
-            errs = check(intent, c["expect"])
-            if engine == "rules":
-                errs.insert(0, "LLM unavailable: answered by the rule parser")
-            out.append((c, errs))
+        return [(c, await eval_case(llm, c)) for c in load_cases()]
     finally:
         await llm.close()
-    return out
 
 
 def main() -> None:

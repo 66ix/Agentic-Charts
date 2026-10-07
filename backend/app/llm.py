@@ -511,6 +511,8 @@ class LLMClient:
         self.s = settings or get_settings()
         self._client = httpx.AsyncClient(timeout=httpx.Timeout(self.s.llm_timeout, connect=3.0))
         self._down_until = 0.0  # circuit breaker: skip the LLM briefly after a connection failure
+        # Provider and model picked in the app's settings (model_choice.py); None = the .env ones.
+        self.choice: tuple[str, str] | None = None
 
     def _available(self) -> bool:
         return self.provider != "none" and time.monotonic() >= self._down_until
@@ -522,9 +524,14 @@ class LLMClient:
     async def close(self) -> None:
         await self._client.aclose()
 
+    def use(self, provider: str | None, model: str | None) -> None:
+        """Switch provider and model at runtime; None (or an empty model) goes back to the .env settings."""
+        self.choice = (provider, model) if provider and model else None
+        self._down_until = 0.0
+
     @property
     def provider(self) -> str:
-        p = self.s.llm_provider
+        p = self.choice[0] if self.choice else self.s.llm_provider
         if p == "openai" and not self.s.openai_api_key and "api.openai.com" in self.s.openai_base_url:
             return "none"
         if p == "anthropic" and not self.s.anthropic_api_key:
@@ -533,6 +540,8 @@ class LLMClient:
 
     @property
     def model(self) -> str:
+        if self.choice and self.choice[0] == self.provider:
+            return self.choice[1]
         return {"ollama": self.s.ollama_model, "openai": self.s.openai_model,
                 "anthropic": self.s.anthropic_model}.get(self.provider, "")
 
@@ -571,7 +580,7 @@ class LLMClient:
                 "type": "auto"}
             r = await self._client.post("https://api.anthropic.com/v1/messages", headers=self._anthropic_headers(),
                                         json={
-                "model": self.s.anthropic_model, "max_tokens": 1024, "system": system,
+                "model": self.model, "max_tokens": 1024, "system": system,
                 "tools": [{"name": t["name"], "description": t["description"], "input_schema": t["parameters"]}
                           for t in tools],
                 "tool_choice": choice, "messages": _to_anthropic(messages),
@@ -587,7 +596,7 @@ class LLMClient:
                            else "required" if force else "auto")
             r = await self._client.post(f"{self.s.openai_base_url}/chat/completions", headers=self._openai_headers(),
                                         json={
-                "model": self.s.openai_model, "temperature": 0, "tool_choice": choice,
+                "model": self.model, "temperature": 0, "tool_choice": choice,
                 "tools": [{"type": "function", "function": {"name": t["name"], "description": t["description"],
                                                             "parameters": t["parameters"], "strict": True}}
                           for t in tools],
@@ -601,7 +610,7 @@ class LLMClient:
 
         if self.provider == "ollama":
             r = await self._client.post(f"{self.s.ollama_url}/api/chat", json={
-                "model": self.s.ollama_model, "stream": False, "options": self._ollama_options(0),
+                "model": self.model, "stream": False, "options": self._ollama_options(0),
                 "tools": [{"type": "function", "function": {"name": t["name"], "description": t["description"],
                                                             "parameters": t["parameters"]}} for t in tools],
                 "messages": [{"role": "system", "content": system}, *_to_ollama(messages)],
@@ -646,7 +655,7 @@ class LLMClient:
     async def _structured(self, system: str, user: str, schema: dict, name: str) -> dict:
         if self.provider == "ollama":
             r = await self._client.post(f"{self.s.ollama_url}/api/chat", json={
-                "model": self.s.ollama_model, "stream": False, "format": schema,
+                "model": self.model, "stream": False, "format": schema,
                 "options": self._ollama_options(0),
                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
             })
@@ -656,7 +665,7 @@ class LLMClient:
         if self.provider == "openai":
             r = await self._client.post(f"{self.s.openai_base_url}/chat/completions", headers=self._openai_headers(),
                                         json={
-                "model": self.s.openai_model, "temperature": 0,
+                "model": self.model, "temperature": 0,
                 "response_format": {"type": "json_schema",
                                     "json_schema": {"name": name, "schema": schema, "strict": True}},
                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
@@ -667,7 +676,7 @@ class LLMClient:
         if self.provider == "anthropic":
             r = await self._client.post("https://api.anthropic.com/v1/messages", headers=self._anthropic_headers(),
                                         json={
-                "model": self.s.anthropic_model, "max_tokens": 512, "system": system,
+                "model": self.model, "max_tokens": 512, "system": system,
                 "tools": [{"name": name, "description": "Return the analysis plan.", "input_schema": schema}],
                 "tool_choice": {"type": "tool", "name": name},
                 "messages": [{"role": "user", "content": user}],
@@ -683,7 +692,7 @@ class LLMClient:
     async def _text(self, system: str, user: str) -> str:
         if self.provider == "ollama":
             r = await self._client.post(f"{self.s.ollama_url}/api/chat", json={
-                "model": self.s.ollama_model, "stream": False, "options": self._ollama_options(0.2),
+                "model": self.model, "stream": False, "options": self._ollama_options(0.2),
                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
             })
             r.raise_for_status()
@@ -691,7 +700,7 @@ class LLMClient:
         if self.provider == "openai":
             r = await self._client.post(f"{self.s.openai_base_url}/chat/completions", headers=self._openai_headers(),
                                         json={
-                "model": self.s.openai_model, "temperature": 0.2,
+                "model": self.model, "temperature": 0.2,
                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
             })
             r.raise_for_status()
@@ -699,7 +708,7 @@ class LLMClient:
         if self.provider == "anthropic":
             r = await self._client.post("https://api.anthropic.com/v1/messages", headers=self._anthropic_headers(),
                                         json={
-                "model": self.s.anthropic_model, "max_tokens": 400, "system": system,
+                "model": self.model, "max_tokens": 400, "system": system,
                 "messages": [{"role": "user", "content": user}],
             })
             r.raise_for_status()

@@ -42,6 +42,7 @@ from .llm import LLMClient
 from .market_data import MarketData, MarketDataError
 from .market_index import MarketIndexService
 from .market_metrics import MarketMetricsService
+from .model_choice import ModelChoice, ModelChooser
 from .ratelimit import RateLimitMiddleware
 from .scanner import WatchlistCache, tickers
 from .schemas import (INTERVALS, AnalyzeRequest, AnalyzeResponse, CreateAlertsRequest, KimiResponse, MarketMetrics,
@@ -58,6 +59,7 @@ async def lifespan(app: FastAPI):
     market = MarketData()
     app.state.market = market
     app.state.llm = LLMClient()
+    app.state.models = ModelChooser(app.state.llm)  # model picked in the app's settings, and model evals
     app.state.derivatives = DerivativesService()
     app.state.derivatives.start()
     app.state.metrics = MarketMetricsService(app.state.derivatives)
@@ -83,6 +85,7 @@ async def lifespan(app: FastAPI):
              app.state.llm.provider, app.state.llm.model)
     yield
     await app.state.brief.close()
+    await app.state.models.close()
     await app.state.signal_alerts.close()
     await asyncio.gather(app.state.futures.close(), app.state.events.close(), app.state.indexes.close())
     await app.state.alerts.close()
@@ -399,6 +402,50 @@ async def gridbot_simulate(request: Request, body: dict = Body(...)) -> dict:
     req: GridSimulateRequest = _gridbot_body(GridSimulateRequest, body)
     result = await _gridbot_run(request.app.state.gridbots.simulate(req, req.binance))
     return result.model_dump()
+
+
+# ------------------------------------------------------------------ AI model (Settings → AI model)
+
+
+@app.get("/api/llm/models")
+async def llm_models(request: Request) -> dict:
+    models = request.app.state.models
+    return {**models.current(), "ollama": await models.ollama_models()}
+
+
+@app.put("/api/llm/model")
+async def llm_choose(request: Request, body: dict = Body(...)) -> dict:
+    """{"provider", "model"} switches the agent's model; {"provider": null} goes back to the .env one."""
+    try:
+        choice = ModelChoice.model_validate(body) if body.get("provider") else None
+        return request.app.state.models.choose(choice)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.get("/api/llm/evals")
+async def llm_evals(request: Request) -> dict:
+    return {"runs": [r.model_dump(exclude={"cases"}) for r in request.app.state.models.runs()]}
+
+
+@app.post("/api/llm/evals")
+async def llm_eval_start(request: Request, body: dict = Body(...)) -> dict:
+    try:
+        limit = body.pop("limit", None)
+        run = request.app.state.models.start_eval(ModelChoice.model_validate(body), limit)
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return run.model_dump()
+
+
+@app.get("/api/llm/evals/{run_id}")
+async def llm_eval_get(run_id: str, request: Request) -> dict:
+    run = request.app.state.models.run(run_id)
+    if run is None:
+        raise HTTPException(404, "Eval run not found")
+    return run.model_dump()
 
 
 @app.get("/api/gridbots")

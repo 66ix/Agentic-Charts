@@ -162,6 +162,14 @@ the plan in one call. If the model is unreachable, has no tool support or return
 backend logs a warning, falls back to the single-call plan and then the rule parser, and skips the LLM
 for 30 seconds.
 
+**Picking and comparing models in the app:** Settings → AI model lists the Ollama models you have
+installed (size, quantisation) and switches the agent to another one, or another provider with a key
+in `.env`, without a restart; "Use the default" goes back to `.env`. "Test it" runs the prompt eval set
+(`backend/evals/intents.jsonl`) against a model and shows how many plans it got right, the time per
+answer and, for Ollama, whether the model fitted in GPU memory or spilled onto the CPU. The pick and the
+scores are kept in `LLM_CHOICE_STORE` (default `.cache/llm_choice.json`). The same from the command line:
+`python -m evals.run --llm` scores the `.env` model.
+
 ## Configuration
 
 | Variable | Default | Notes |

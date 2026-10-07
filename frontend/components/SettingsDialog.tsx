@@ -8,6 +8,7 @@ import { DEFAULT_SIZING, type SizingSettings } from "@/lib/sizing";
 import type { LayoutState } from "@/lib/types";
 
 import Dialog, { NumberInput, Row, Section, Toggle } from "./Dialog";
+import ModelSettings from "./ModelSettings";
 
 /** Timezones offered for the chart's time axis; "local" follows the browser. */
 const ZONES = [
@@ -109,6 +110,8 @@ export default function SettingsDialog(p: Props) {
           <Toggle checked={p.layout.autoLevels} onChange={(v) => p.onLayout({ ...p.layout, autoLevels: v })} />
         </Row>
       </Section>
+
+      <ModelSettings />
 
       <Section title="Position sizing">
         <p className="pb-1 text-[11px] text-mute">Used on trade plans to work out the size, risk and fees of a trade.</p>
