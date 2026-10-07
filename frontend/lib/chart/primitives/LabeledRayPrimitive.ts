@@ -42,7 +42,8 @@ export class LabeledRayPrimitive extends PrimitiveBase {
     return this.line.axis_label === false ? [] : this.axis;
   }
 
-  autoscaleInfo(): AutoscaleInfo {
+  autoscaleInfo(): AutoscaleInfo | null {
+    if (this.line.autoscale === false) return null;
     return { priceRange: { minValue: this.line.price, maxValue: this.line.price } };
   }
 

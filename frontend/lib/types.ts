@@ -46,6 +46,8 @@ interface OverlayBase {
   color: string;
   kind?: string | null;
   strength?: number | null;
+  /** Widen the price scale to keep this in view (default true). Off for wide reference sets such as grid bot ranges. */
+  autoscale?: boolean;
 }
 
 export interface HorizontalLineOverlay extends OverlayBase {
