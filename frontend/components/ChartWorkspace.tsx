@@ -359,8 +359,10 @@ export default function ChartWorkspace() {
       kimiFib: kimi,
       kimiForecast: kimi,
       kimiSignals: kimi,
+      sessions: indicators.sessions && !isCustom(symbol) ? 1 : 0,
+      heatmap: indicators.heatmap && !isCustom(symbol) ? 1 : 0,
     };
-  }, [composed.counts, drawings.length, compare.length, indicators.kimi, symbol]);
+  }, [composed.counts, drawings.length, compare.length, indicators.kimi, indicators.sessions, indicators.heatmap, symbol]);
 
   // ------------------------------------------------------------------ the chart agent
   const [messages, setStoredMessages] = usePersistentState<AgentMessage[]>("ac:chat", []);

@@ -26,7 +26,9 @@ export type LayerId =
   | "liqs"
   | "events"
   | "compare"
-  | "panels";
+  | "panels"
+  | "sessions"
+  | "heatmap";
 
 export interface LayerInfo {
   id: LayerId;
@@ -56,6 +58,8 @@ export const LAYERS: LayerInfo[] = [
   { id: "liqs", label: "Liquidation levels", group: "Tools and data" },
   { id: "events", label: "Events and news", group: "Tools and data" },
   { id: "compare", label: "Compared symbols", group: "Tools and data" },
+  { id: "sessions", label: "Session and period levels", group: "Tools and data" },
+  { id: "heatmap", label: "Order-book heatmap", group: "Tools and data" },
   { id: "panels", label: "Other panels", group: "Tools and data" },
 ];
 

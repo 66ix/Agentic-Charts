@@ -305,6 +305,27 @@ export interface IndicatorSettings {
   atr: { length: number };
   stochRsi: { rsiLength: number; stochLength: number; k: number; d: number };
   vwapColor: string;
+  /** Session and period levels (lib/sessionLevels.ts). */
+  sessions: SessionLevelSettings;
+}
+
+/** Which session and period levels to draw; the backend computes them (backend/app/session_levels.py). */
+export interface SessionLevelSettings {
+  asia: boolean;
+  london: boolean;
+  ny: boolean;
+  /** The previous session's high and low too, not only the latest session's. */
+  previous: boolean;
+  /** Shade each session's range. */
+  boxes: boolean;
+  day: boolean;
+  week: boolean;
+  month: boolean;
+  /** Levels price has already traded through: drawn up to where they were taken, or left out. */
+  showTaken: boolean;
+  openingRange: "off" | "day" | "sessions";
+  /** Opening-range length in minutes (multiples of 5). */
+  orMinutes: number;
 }
 
 export const DEFAULT_INDICATOR_SETTINGS: IndicatorSettings = {
@@ -316,6 +337,19 @@ export const DEFAULT_INDICATOR_SETTINGS: IndicatorSettings = {
   atr: { length: 14 },
   stochRsi: { rsiLength: 14, stochLength: 14, k: 3, d: 3 },
   vwapColor: "#22d3ee",
+  sessions: {
+    asia: true,
+    london: true,
+    ny: true,
+    previous: true,
+    boxes: true,
+    day: true,
+    week: true,
+    month: true,
+    showTaken: true,
+    openingRange: "day",
+    orMinutes: 30,
+  },
 };
 
 export interface IndicatorState {
@@ -336,6 +370,10 @@ export interface IndicatorState {
   cvd?: boolean;
   /** Volume profile of the visible range, drawn on the right edge. */
   vprofile?: boolean;
+  /** Asia / London / New York session levels, previous day / week / month and the opening range. */
+  sessions?: boolean;
+  /** Order-book heatmap behind the candles. */
+  heatmap?: boolean;
 }
 
 /** One chart in the multi-chart grid. */
