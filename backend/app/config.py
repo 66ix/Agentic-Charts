@@ -110,6 +110,9 @@ class Settings:
     # Trade journal (journal.py): logged trades. JOURNAL_STORE=memory keeps them in memory only (lost on restart).
     journal_store: str = field(default_factory=lambda: _env(
         "JOURNAL_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "journal.json")))
+    # Weekly trade review schedule (postmortem.py); `memory` keeps it in memory only.
+    journal_review_store: str = field(default_factory=lambda: _env(
+        "JOURNAL_REVIEW_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "journal_review.json")))
 
     # ---- Economic calendar and crypto news (events.py) ----
     # Forex Factory-format JSON feeds; next week's is often published late in the week, until then it is skipped.

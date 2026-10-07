@@ -79,7 +79,7 @@ const KIND_LAYER: Array<[RegExp, LayerId]> = [
   [/^(poc|vah|val)$/, "volume"],
   [/^custom_/, "custom"],
   [/^plan_/, "plan"],
-  [/^alert$/, "alerts"],
+  [/^(alert|trigger_zone)$/, "alerts"],
 ];
 
 /** Layer of an agent overlay, by its `kind`. */

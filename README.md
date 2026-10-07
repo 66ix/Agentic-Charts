@@ -202,6 +202,7 @@ scores are kept in `LLM_CHOICE_STORE` (default `.cache/llm_choice.json`). The sa
 | `ALERT_HISTORY_STORE` / `SIGNAL_ALERTS_STORE` / `BRIEF_STORE` | `backend/.cache/*.json` | Alert history, signal alerts and brief settings; `memory` = not saved |
 | `GRIDBOTS_STORE` | `backend/.cache/gridbots.json` | Saved grid bots; `memory` = not saved |
 | `JOURNAL_STORE` | `backend/.cache/journal.json` | Trade journal; `memory` = not saved |
+| `JOURNAL_REVIEW_STORE` | `backend/.cache/journal_review.json` | Weekly trade review schedule; `memory` = not saved |
 | `CALENDAR_URLS` | Forex Factory this week + next week | Economic calendar feeds (JSON, Forex Factory format) |
 | `CALENDAR_COUNTRIES` | `USD` | Currencies kept from the calendar, or `ALL` |
 | `NEWS_FEEDS` | CoinDesk, Cointelegraph RSS | News feeds (RSS or Atom), comma-separated |
@@ -260,6 +261,19 @@ everything that fired. The **Brief** sends a market summary to Telegram or Disco
 (price and change since the last brief per coin, trend, RSI, the nearest zone, Kimi's latest signal and
 forecast, funding and open interest, key levels and the day's high-impact economic events); **Preview**
 shows it in the app without sending.
+
+**Trigger alerts** wait for a lower-timeframe confirmation inside a higher-timeframe zone, e.g. "a 5m
+CHoCH inside the 4h demand". The zone is either fixed (an AI zone or a rectangle on the chart, a plan's
+entry zone, or two prices) or detected: the nearest (fresh) demand, supply, support or resistance on the
+timeframe you pick, looked up again each time that timeframe closes. On every 1m, 5m or 15m close the
+server checks for a CHoCH / BOS in the zone's direction, a sweep of a low (high) that closes back, or an
+engulfing close, while price is in the zone or just reacting from it. A trigger fires at most once per
+touch of the zone and once per cooldown (60 minutes by default), through the same toast, Telegram and
+Discord channels, with the zone, the trigger, the price and a suggested stop just beyond the
+lower-timeframe swing, e.g. `M5 bullish CHoCH (closed above the swing high 103.00) after touching H4 demand
+98.80–100.20, close 103.40. Suggested stop 98.87, under the M5 swing low 99.00.` Create one in the
+**Triggers** tab of Alerts (with **Preview**), with **Alert on 5m confirmation** on a trade plan card, or by
+asking the agent ("alert me when 1m shows a CHoCH inside the 4h demand").
 
 **Telegram**
 
@@ -335,6 +349,8 @@ order book**. It has a layer in the Layers tab, like the session levels.
 | GET/POST | `/api/signal-alerts` | Signal alerts and the list of signals; POST `{symbols, interval, signal, repeat, note}` |
 | PATCH/DELETE | `/api/signal-alerts/{id}` | Arm or disarm, repeat, note; delete |
 | GET | `/api/signal-alerts/preview?symbol=&interval=&signal=` | Where the signal fired on past candles |
+| POST | `/api/zone-triggers` | Trigger alert `{symbol, interval: 1m/5m/15m, zone: {source: fixed/detected, …}, confirm, cooldown_min, repeat, note}`; listed, edited and deleted as a signal alert |
+| POST | `/api/zone-triggers/preview?bars=300` | Where a trigger would have fired on past candles, and the zone it used |
 | GET/PUT | `/api/brief/settings` | Brief schedule, time zone, coins, timeframe and sections |
 | GET | `/api/brief/preview` | The brief as it would be sent now |
 | POST | `/api/brief/send` | Send the brief now |
@@ -347,6 +363,10 @@ order book**. It has a layer in the Layers tab, like the session levels.
 | GET/POST | `/api/journal` | Logged trades with their evaluation; POST a trade `{symbol, interval, direction, entry, stop, targets, …}` |
 | PATCH/DELETE | `/api/journal/{id}` | Notes, tags, setup, cancel or close a trade; delete it |
 | GET | `/api/journal/stats?symbol=&setup=&direction=` | Win rate, R, expectancy, profit factor, breakdowns, equity curve |
+| POST | `/api/journal/{id}/postmortem` | Write (or rewrite) a closed trade's post-mortem now |
+| GET | `/api/journal/review?days=7` | Weekly review: win rate, average R, best and worst setups and coins, recurring lessons, the message text |
+| GET/PUT | `/api/journal/review/settings` | Weekly review schedule `{enabled, weekday, time, timezone, days}` |
+| POST | `/api/journal/review/send` | Send the weekly review to Telegram / Discord now |
 | POST | `/api/backtest` | `{symbol, interval, setup, bars, target, max_hold_bars, fee_pct}` → trades, stats, equity curve |
 | GET | `/api/market-scan?interval=4h` | The last market scan of that timeframe (`result`: longs and shorts with entry, stop, T1, R:R, distance, timeframe agreement, track record, plan and overlays), plus `running`, `schedule`, `next_run` |
 | POST | `/api/market-scan/run?interval=4h&top=` | Scan now (or join the scan already running) → the same shape |
@@ -412,6 +432,7 @@ Overlay types: `box`, `horizontal_line`, `trendline`, `marker` (see `backend/app
 - **Layers:** the layers tab lists what is drawn on the chart by group (agent zones, window levels, structure, trade plan, pinned answers, each part of Kimi Cooked, your drawings, alerts, journal trades, grid bots, …) with an eye toggle each, plus the pinned answers and your drawings. Labels that would overlap move apart.
 - **Grid bots** (`B`): track a Binance Spot Grid bot you already run. Copy its settings from Bot details on Binance: pair, lower and upper price, number of grids, arithmetic or geometric, investment and how long it has been running ("3d 4h 12m", or the start time). The app replays the bot on Binance's 1-minute candles from that moment and shows what the bot card shows: total PnL, grid profit, floating PnL, matched trades (all and last 24h), grid and total APR, plus its open orders, recent fills and matched trades per day. Its grid is drawn on the chart. To check it against Binance, type Binance's matched trades, grid profit and total PnL in the form and the bot shows both side by side. **More settings** covers fees (and the BNB discount), trigger price, take profit, stop loss, sell on stop and Binance's "Qty per order". The numbers can differ a little from Binance's: several fills inside one minute are not all seen, and Binance keeps a small fee reserve (enter its qty per order to remove that difference).
 - **Trade journal** (`J`): **Log trade** on a plan card tracks that plan, sized from your position-sizing settings, and **Add trade** logs your own. Each trade is followed on 1-minute candles: pending until the entry fills, then partial exits at each target (the stop moves to entry after the first), with R, PnL after fees, best and worst excursion. **Stats** shows win rate, average R, expectancy, profit factor, an equity curve and results by setup, coin and direction. Trades show on the chart; close or cancel them by hand when you exit early.
+- **Post-mortems and the weekly review:** when a journal trade closes (stop, target, breakeven or by hand) the backend writes a short review onto it: where the fill sat in its zone (the plan's zone, else the agent's nearest one), the best and worst excursion in R and which came first, what happened at each target (hit, missed by how much, reached after the exit), what the agent's levels and Kimi Cooked said when the trade was taken, and one or two concrete lessons (e.g. "stopped, then T1 was reached 2h later: the stop sat inside the noise"). The numbers are computed in Python from the candles; the configured LLM only rewrites the text, and its answer is dropped for the template when it contains a number that is not in the facts. **Regenerate** on the trade writes it again. The **Review** tab sums up the last 7, 14 or 30 days (win rate, average R, best and worst setup types and coins, lessons that keep coming back) and can send that summary to Telegram / Discord every week at a time you pick, next to the brief.
 - **Backtest** (`X`): pick a setup (first touch of fresh demand or supply, support or resistance holds, sweeps, Kimi Cooked signals, …), an exit (1.5R, 2R, 3R or the next level), a max hold and fees, and it replays the setup over the last 100–5,000 candles of the chart, with no look-ahead. It shows win rate, average and total R, profit factor, max drawdown, an equity curve and every trade; click a trade to see it on the chart.
 - **Track record on trade plans:** every long or short plan carries how the same kind of setup did on that coin and timeframe, from the backtest engine: "fresh 4h demand longs on INJ: 14 trades, 57% win, +0.60R avg, last 1 year". The plan's basis picks the setup (fresh demand or supply, support, resistance; a plan on an already-tested zone or with higher-timeframe confluence is compared with every such zone, and the card says so). It runs on about a year of closed candles (500–3,000), exits at the next opposing level like the plan's T1, and is cached per coin, timeframe and setup for 30 minutes to 6 hours. Under 8 trades, or under 300 candles of history, it says so instead of quoting a win rate; under 20 trades it is marked a small sample. Order blocks, your own zones and market entries beyond a swing have no matching backtest yet. Click the line on the plan card for the numbers and caveats, or the flask to open the same backtest, with every trade, in the Backtest tab. The agent quotes it in its answer.
 - **Scanner** (`U`): the best long and short setups across the top 100 USDT pairs by 24h volume (stablecoin and fiat pairs and leveraged tokens left out) on the timeframe you pick. Each coin gets a long and a short plan from the agent's own zones; plans entered at a zone with at least 1R to T1 are ranked by reward-to-risk, how far the entry is from price, how many timeframes trend its way (the scan's and the next two up; a range counts half) and the track record (computed for the best 8 per side). Rows show entry, stop, T1, R:R, distance, agreement and track record; click one to open that chart with the plan drawn. The agent uses it too: "best 5m setups right now", "scan the market for longs", "top short setups on the 1h". Scans load at most `MARKET_SCAN_CONCURRENCY` coins at once through the candle cache, one scan at a time, and the last one per timeframe is kept. `MARKET_SCAN_SCHEDULE` runs them on a timer and `MARKET_SCAN_NOTIFY_TOP` sends the best setups of each timed scan to Telegram / Discord. Without Binance it scans the fallback coin list on demo data and says so.

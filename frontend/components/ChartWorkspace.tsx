@@ -1,18 +1,44 @@
 "use client";
 
 import clsx from "clsx";
-import { Bell, Bot, CandlestickChart, Layers as LayersIcon, List, Loader2, MessageSquare, Pencil, SendHorizontal, X } from "lucide-react";
+import {
+  Bell,
+  Bot,
+  CandlestickChart,
+  Layers as LayersIcon,
+  List,
+  Loader2,
+  MessageSquare,
+  Pencil,
+  SendHorizontal,
+  X,
+} from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { useAlerts, type FiredAlert, type SignalFired } from "@/hooks/useAlerts";
+import {
+  useAlerts,
+  type FiredAlert,
+  type SignalFired,
+} from "@/hooks/useAlerts";
 import { useIsMobile } from "@/hooks/useMediaQuery";
-import { readStored, usePersistentState, writeStored } from "@/hooks/usePersistentState";
+import {
+  readStored,
+  usePersistentState,
+  writeStored,
+} from "@/hooks/usePersistentState";
 import { useUndo } from "@/hooks/useUndo";
-import { alertFromDrawing, alertOverlays } from "@/lib/alerts";
+import { alertFromDrawing, alertOverlays, chartZones } from "@/lib/alerts";
 import { analyze } from "@/lib/api";
 import { DEFAULT_INTERVAL, DEFAULT_SYMBOL } from "@/lib/config";
 import { isCustom } from "@/lib/customSymbols";
-import { CHAT_ID_KEY, CHATS_KEY, toSession, upsertSession, worthKeeping, type ChatSession } from "@/lib/chatHistory";
+import {
+  CHAT_ID_KEY,
+  CHATS_KEY,
+  toSession,
+  upsertSession,
+  worthKeeping,
+  type ChatSession,
+} from "@/lib/chatHistory";
 import { createJournalEntry, planToJournalEntry } from "@/lib/journal";
 import { DEFAULT_SIZING, sizePlan, type SizingSettings } from "@/lib/sizing";
 import { OPEN_PANEL_EVENT, type DockPanelProps } from "@/lib/dock";
@@ -25,7 +51,11 @@ import {
   type PanelOverlays,
   type PinnedAnswer,
 } from "@/lib/layers";
-import { DEFAULT_INDICATOR_SETTINGS, INTERVAL_SECONDS, TIMEFRAMES } from "@/lib/types";
+import {
+  DEFAULT_INDICATOR_SETTINGS,
+  INTERVAL_SECONDS,
+  TIMEFRAMES,
+} from "@/lib/types";
 import type {
   AnalysisIntent,
   AnalyzeResponse,
@@ -41,11 +71,25 @@ import type {
   MarketSetup,
   Overlay,
   ToolId,
+  TriggerInterval,
 } from "@/lib/types";
-import { CURRENT_WORKSPACE_KEY, saveWorkspace, WORKSPACES_KEY, type SavedWorkspace } from "@/lib/workspaces";
+import {
+  CURRENT_WORKSPACE_KEY,
+  saveWorkspace,
+  WORKSPACES_KEY,
+  type SavedWorkspace,
+} from "@/lib/workspaces";
 
-import AgentPanel, { type AgentMessage, type AgentPanelHandle } from "./AgentPanel";
-import { type AgenticChartHandle, type CompareLine, type FeedInfo, type KimiVisibility } from "./AgenticChart";
+import AgentPanel, {
+  type AgentMessage,
+  type AgentPanelHandle,
+} from "./AgentPanel";
+import {
+  type AgenticChartHandle,
+  type CompareLine,
+  type FeedInfo,
+  type KimiVisibility,
+} from "./AgenticChart";
 import AlertsPanel from "./AlertsPanel";
 import AlertToasts, { signalToast, type Toast } from "./AlertToasts";
 import ChartCell from "./ChartCell";
@@ -70,8 +114,19 @@ const DEFAULT_CELLS: Cell[] = [
   { symbol: "ETHUSDT", interval: "4h" },
   { symbol: "SOLUSDT", interval: "4h" },
 ];
-const DEFAULT_WATCHLIST = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "INJUSDT", "DOGEUSDT", "LINKUSDT"];
-const DEFAULT_LISTS: WatchlistList[] = [{ id: "main", name: "Main", symbols: DEFAULT_WATCHLIST }];
+const DEFAULT_WATCHLIST = [
+  "BTCUSDT",
+  "ETHUSDT",
+  "SOLUSDT",
+  "BNBUSDT",
+  "XRPUSDT",
+  "INJUSDT",
+  "DOGEUSDT",
+  "LINKUSDT",
+];
+const DEFAULT_LISTS: WatchlistList[] = [
+  { id: "main", name: "Main", symbols: DEFAULT_WATCHLIST },
+];
 const DEFAULT_INDICATORS: IndicatorState = {
   ema20: true,
   ema50: false,
@@ -82,8 +137,16 @@ const DEFAULT_INDICATORS: IndicatorState = {
   vwap: false,
   kimi: false,
 };
-const DEFAULT_LAYOUT: LayoutState = { logScale: false, grid: true, autoLevels: true };
-const GRID_CLASS: Record<GridMode, string> = { 1: "grid-cols-1", 2: "grid-cols-2", 4: "grid-cols-2 grid-rows-2" };
+const DEFAULT_LAYOUT: LayoutState = {
+  logScale: false,
+  grid: true,
+  autoLevels: true,
+};
+const GRID_CLASS: Record<GridMode, string> = {
+  1: "grid-cols-1",
+  2: "grid-cols-2",
+  4: "grid-cols-2 grid-rows-2",
+};
 const NEXT_GRID: Record<GridMode, GridMode> = { 1: 2, 2: 4, 4: 1 };
 
 interface DockState {
@@ -101,16 +164,26 @@ const SEARCH_TITLES: Record<SearchMode, string | undefined> = {
 };
 
 function engineNote(r: AnalyzeResponse): string {
-  const tf = TIMEFRAMES.find((t) => t.value === r.analysis_interval)?.label ?? r.analysis_interval;
-  const llm = r.engine.intent === "rules" || r.engine.intent === "default" ? "rule parser" : r.engine.intent;
-  return `${tf} · ${r.overlays.length} overlays · intent: ${llm} · detector: ${r.engine.detector}` +
-    (r.data_source === "synthetic" ? " · demo data" : "");
+  const tf =
+    TIMEFRAMES.find((t) => t.value === r.analysis_interval)?.label ??
+    r.analysis_interval;
+  const llm =
+    r.engine.intent === "rules" || r.engine.intent === "default"
+      ? "rule parser"
+      : r.engine.intent;
+  return (
+    `${tf} · ${r.overlays.length} overlays · intent: ${llm} · detector: ${r.engine.detector}` +
+    (r.data_source === "synthetic" ? " · demo data" : "")
+  );
 }
 
 /** What a change to the drawings list did, for the undo button's tooltip. */
 function drawingChange(before: Drawing[], after: Drawing[]): string {
   if (after.length > before.length) return "new drawing";
-  if (after.length < before.length) return before.length - after.length > 1 ? "delete drawings" : "delete drawing";
+  if (after.length < before.length)
+    return before.length - after.length > 1
+      ? "delete drawings"
+      : "delete drawing";
   return "drawing edit";
 }
 
@@ -120,17 +193,34 @@ export default function ChartWorkspace() {
   const agentRef = useRef<AgentPanelHandle>(null);
 
   // ------------------------------------------------------------------ charts in the grid
-  const [cells, setCells, cellsLoaded] = usePersistentState<Cell[]>("ac:cells", DEFAULT_CELLS);
+  const [cells, setCells, cellsLoaded] = usePersistentState<Cell[]>(
+    "ac:cells",
+    DEFAULT_CELLS,
+  );
   const [storedGrid, setGridMode] = usePersistentState<GridMode>("ac:grid", 1);
   const gridMode: GridMode = mobile ? 1 : storedGrid;
-  const [storedActive, setActive] = usePersistentState<number>("ac:active-cell", 0);
-  const active = Math.min(Math.max(0, storedActive), gridMode === 1 ? 3 : gridMode - 1);
+  const [storedActive, setActive] = usePersistentState<number>(
+    "ac:active-cell",
+    0,
+  );
+  const active = Math.min(
+    Math.max(0, storedActive),
+    gridMode === 1 ? 3 : gridMode - 1,
+  );
   const cell = cells[active] ?? DEFAULT_CELLS[0];
   const symbol = cell.symbol;
-  const interval: Interval = VALID_INTERVALS.has(cell.interval) ? cell.interval : DEFAULT_INTERVAL;
-  const [layout, setLayout] = usePersistentState<LayoutState>("ac:layout", DEFAULT_LAYOUT);
+  const interval: Interval = VALID_INTERVALS.has(cell.interval)
+    ? cell.interval
+    : DEFAULT_INTERVAL;
+  const [layout, setLayout] = usePersistentState<LayoutState>(
+    "ac:layout",
+    DEFAULT_LAYOUT,
+  );
   const linked = !!layout.linkSymbol;
-  const activeChart = useCallback(() => cellRefs.current[active] ?? null, [active]);
+  const activeChart = useCallback(
+    () => cellRefs.current[active] ?? null,
+    [active],
+  );
 
   const setCell = useCallback(
     (patch: Partial<Cell>) =>
@@ -138,14 +228,26 @@ export default function ChartWorkspace() {
         const next = [...cs, ...DEFAULT_CELLS.slice(cs.length)];
         next[active] = { ...next[active], ...patch };
         // "Every chart follows the same coin": the others take the symbol and keep their timeframe.
-        if (patch.symbol && linked) for (let i = 0; i < next.length; i++) next[i] = { ...next[i], symbol: patch.symbol };
+        if (patch.symbol && linked)
+          for (let i = 0; i < next.length; i++)
+            next[i] = { ...next[i], symbol: patch.symbol };
         return next;
       }),
     [setCells, active, linked],
   );
-  const setSymbol = useCallback((s: string) => setCell({ symbol: s }), [setCell]);
-  const setInterval = useCallback((i: Interval) => setCell({ interval: i }), [setCell]);
-  const pickSymbol = useCallback((s: string, i?: Interval) => setCell(i ? { symbol: s, interval: i } : { symbol: s }), [setCell]);
+  const setSymbol = useCallback(
+    (s: string) => setCell({ symbol: s }),
+    [setCell],
+  );
+  const setInterval = useCallback(
+    (i: Interval) => setCell({ interval: i }),
+    [setCell],
+  );
+  const pickSymbol = useCallback(
+    (s: string, i?: Interval) =>
+      setCell(i ? { symbol: s, interval: i } : { symbol: s }),
+    [setCell],
+  );
 
   useEffect(() => {
     if (linked) setCell({ symbol });
@@ -159,8 +261,16 @@ export default function ChartWorkspace() {
     try {
       const legacy = window.localStorage.getItem("ac:symbol");
       if (legacy && window.localStorage.getItem("ac:cells-migrated") !== "1") {
-        const iv = JSON.parse(window.localStorage.getItem("ac:interval") ?? "null");
-        setCells((cs) => [{ symbol: JSON.parse(legacy), interval: VALID_INTERVALS.has(iv) ? iv : DEFAULT_INTERVAL }, ...cs.slice(1)]);
+        const iv = JSON.parse(
+          window.localStorage.getItem("ac:interval") ?? "null",
+        );
+        setCells((cs) => [
+          {
+            symbol: JSON.parse(legacy),
+            interval: VALID_INTERVALS.has(iv) ? iv : DEFAULT_INTERVAL,
+          },
+          ...cs.slice(1),
+        ]);
       }
       window.localStorage.setItem("ac:cells-migrated", "1");
     } catch {
@@ -169,10 +279,20 @@ export default function ChartWorkspace() {
   }, [cellsLoaded, setCells]);
 
   // ------------------------------------------------------------------ watchlists
-  const [lists, setLists, listsLoaded] = usePersistentState<WatchlistList[]>("ac:watchlists", DEFAULT_LISTS);
-  const [activeListId, setActiveList] = usePersistentState<string>("ac:watchlist-list", "main");
-  const [sort, setSort] = usePersistentState<WatchlistSort>("ac:watchlist-sort", "manual");
-  const currentList = lists.find((l) => l.id === activeListId) ?? lists[0] ?? DEFAULT_LISTS[0];
+  const [lists, setLists, listsLoaded] = usePersistentState<WatchlistList[]>(
+    "ac:watchlists",
+    DEFAULT_LISTS,
+  );
+  const [activeListId, setActiveList] = usePersistentState<string>(
+    "ac:watchlist-list",
+    "main",
+  );
+  const [sort, setSort] = usePersistentState<WatchlistSort>(
+    "ac:watchlist-sort",
+    "manual",
+  );
+  const currentList =
+    lists.find((l) => l.id === activeListId) ?? lists[0] ?? DEFAULT_LISTS[0];
   const watchlist = currentList.symbols;
 
   // One-time move from the single watchlist (ac:watchlist) to named lists.
@@ -181,7 +301,8 @@ export default function ChartWorkspace() {
     try {
       if (window.localStorage.getItem("ac:watchlists-migrated") === "1") return;
       const legacy = readStored<string[] | null>("ac:watchlist", null);
-      if (Array.isArray(legacy) && legacy.length) setLists([{ id: "main", name: "Main", symbols: legacy }]);
+      if (Array.isArray(legacy) && legacy.length)
+        setLists([{ id: "main", name: "Main", symbols: legacy }]);
       window.localStorage.setItem("ac:watchlists-migrated", "1");
     } catch {
       /* storage unavailable */
@@ -191,22 +312,47 @@ export default function ChartWorkspace() {
   const addToWatchlist = useCallback(
     (s: string) =>
       setLists((ls) =>
-        ls.map((l) => (l.id === currentList.id && !l.symbols.includes(s) ? { ...l, symbols: [...l.symbols, s].slice(-60) } : l)),
+        ls.map((l) =>
+          l.id === currentList.id && !l.symbols.includes(s)
+            ? { ...l, symbols: [...l.symbols, s].slice(-60) }
+            : l,
+        ),
       ),
     [setLists, currentList.id],
   );
 
   // ------------------------------------------------------------------ indicators, layers, side panel
-  const [indicators, setIndicators] = usePersistentState<IndicatorState>("ac:indicators", DEFAULT_INDICATORS);
-  const [storedSettings, setIndicatorSettings] = usePersistentState<IndicatorSettings>("ac:indicator-settings", DEFAULT_INDICATOR_SETTINGS);
-  const indicatorSettings = useMemo(() => ({ ...DEFAULT_INDICATOR_SETTINGS, ...storedSettings }), [storedSettings]);
-  const [visibility, setVisibility] = usePersistentState<LayerVisibility>("ac:layers", {});
-  const [dock, setDock] = usePersistentState<DockState>("ac:dock", DEFAULT_DOCK);
+  const [indicators, setIndicators] = usePersistentState<IndicatorState>(
+    "ac:indicators",
+    DEFAULT_INDICATORS,
+  );
+  const [storedSettings, setIndicatorSettings] =
+    usePersistentState<IndicatorSettings>(
+      "ac:indicator-settings",
+      DEFAULT_INDICATOR_SETTINGS,
+    );
+  const indicatorSettings = useMemo(
+    () => ({ ...DEFAULT_INDICATOR_SETTINGS, ...storedSettings }),
+    [storedSettings],
+  );
+  const [visibility, setVisibility] = usePersistentState<LayerVisibility>(
+    "ac:layers",
+    {},
+  );
+  const [dock, setDock] = usePersistentState<DockState>(
+    "ac:dock",
+    DEFAULT_DOCK,
+  );
   // Phones: the side panel covers the chart, so it starts closed and isn't saved.
   const [mobileTab, setMobileTab] = useState<string | null>(null);
   const [mobileDraw, setMobileDraw] = useState(false);
-  const [compareStore, setCompareStore] = usePersistentState<Record<string, CompareLine[]>>("ac:compare", {});
-  const [panels, setPanels] = usePersistentState<PanelOverlays>("ac:panel-overlays", {});
+  const [compareStore, setCompareStore] = usePersistentState<
+    Record<string, CompareLine[]>
+  >("ac:compare", {});
+  const [panels, setPanels] = usePersistentState<PanelOverlays>(
+    "ac:panel-overlays",
+    {},
+  );
   const [quickbar, setQuickbar] = usePersistentState("ac:quickbar", true);
 
   const kimiParts = useMemo<KimiVisibility>(
@@ -221,22 +367,39 @@ export default function ChartWorkspace() {
     [visibility],
   );
   const compareFor = useCallback(
-    (s: string) => (isVisible(visibility, "compare") ? (compareStore[s] ?? []) : []),
+    (s: string) =>
+      isVisible(visibility, "compare") ? (compareStore[s] ?? []) : [],
     [compareStore, visibility],
   );
   const compare = compareStore[symbol] ?? [];
   const setCompare = useCallback(
-    (next: CompareLine[]) => setCompareStore((m) => ({ ...m, [symbol]: next.slice(0, COMPARE_COLORS.length) })),
+    (next: CompareLine[]) =>
+      setCompareStore((m) => ({
+        ...m,
+        [symbol]: next.slice(0, COMPARE_COLORS.length),
+      })),
     [setCompareStore, symbol],
   );
 
   // ------------------------------------------------------------------ drawings, AI levels, pins, undo
   const drawingsKey = `ac:drawings:${symbol}`;
   const overlaysKey = `ac:overlays:${symbol}:${interval}`;
-  const [drawings, setDrawings] = usePersistentState<Drawing[]>(drawingsKey, []);
-  const [overlays, , overlaysLoaded] = usePersistentState<Overlay[]>(overlaysKey, []);
-  const [pins] = usePersistentState<Record<string, PinnedAnswer>>(pinsKey(symbol, interval), {});
-  const [pinIndex, setPinIndex] = usePersistentState<string[]>("ac:pins-index", []);
+  const [drawings, setDrawings] = usePersistentState<Drawing[]>(
+    drawingsKey,
+    [],
+  );
+  const [overlays, , overlaysLoaded] = usePersistentState<Overlay[]>(
+    overlaysKey,
+    [],
+  );
+  const [pins] = usePersistentState<Record<string, PinnedAnswer>>(
+    pinsKey(symbol, interval),
+    {},
+  );
+  const [pinIndex, setPinIndex] = usePersistentState<string[]>(
+    "ac:pins-index",
+    [],
+  );
   const { record, undo, redo, undoLabel, redoLabel } = useUndo();
   const [undoNote, setUndoNote] = useState<string | null>(null);
 
@@ -248,7 +411,8 @@ export default function ChartWorkspace() {
   const drawingsRef = useRef(drawings);
   drawingsRef.current = drawings;
   const shownDrawings = useMemo(
-    () => (isVisible(visibility, "drawings") ? drawingsFor(drawings, interval) : []),
+    () =>
+      isVisible(visibility, "drawings") ? drawingsFor(drawings, interval) : [],
     [drawings, interval, visibility],
   );
   const shownRef = useRef(shownDrawings);
@@ -256,7 +420,12 @@ export default function ChartWorkspace() {
 
   const changeDrawings = useCallback(
     (next: Drawing[], label?: string) => {
-      record(drawingsKey, drawingsRef.current, next, label ?? drawingChange(drawingsRef.current, next));
+      record(
+        drawingsKey,
+        drawingsRef.current,
+        next,
+        label ?? drawingChange(drawingsRef.current, next),
+      );
       setDrawings(next);
     },
     [record, drawingsKey, setDrawings],
@@ -267,7 +436,9 @@ export default function ChartWorkspace() {
     (next: Drawing[]) => {
       const shownIds = new Set(shownRef.current.map((d) => d.id));
       const byId = new Map(next.map((d) => [d.id, d]));
-      const merged = drawingsRef.current.flatMap((d) => (!shownIds.has(d.id) ? [d] : byId.has(d.id) ? [byId.get(d.id)!] : []));
+      const merged = drawingsRef.current.flatMap((d) =>
+        !shownIds.has(d.id) ? [d] : byId.has(d.id) ? [byId.get(d.id)!] : [],
+      );
       const known = new Set(drawingsRef.current.map((d) => d.id));
       changeDrawings([...merged, ...next.filter((d) => !known.has(d.id))]);
     },
@@ -309,8 +480,13 @@ export default function ChartWorkspace() {
         setPinIndex((ix) => ix.filter((x) => x !== m.id));
       } else {
         const label = (m.prompt || m.text).slice(0, 80);
-        writeStored(key, { ...cur, [m.id]: { label, overlays: m.overlays ?? [], at: Date.now() } });
-        setPinIndex((ix) => [...ix.filter((x) => x !== m.id), m.id].slice(-200));
+        writeStored(key, {
+          ...cur,
+          [m.id]: { label, overlays: m.overlays ?? [], at: Date.now() },
+        });
+        setPinIndex((ix) =>
+          [...ix.filter((x) => x !== m.id), m.id].slice(-200),
+        );
       }
     },
     [setPinIndex],
@@ -341,16 +517,36 @@ export default function ChartWorkspace() {
   // ------------------------------------------------------------------ alerts
   const [toasts, setToasts] = useState<Toast[]>([]);
   const onAlertsFired = useCallback((fired: FiredAlert[]) => {
-    setToasts((t) => [...t, ...fired.map((f) => ({ id: uid(), alert: f.alert, price: f.price }))].slice(-4));
+    setToasts((t) =>
+      [
+        ...t,
+        ...fired.map((f) => ({ id: uid(), alert: f.alert, price: f.price })),
+      ].slice(-4),
+    );
   }, []);
-  const onSignalFired = useCallback((f: SignalFired) => setToasts((t) => [...t, signalToast(uid(), f)].slice(-4)), []);
+  const onSignalFired = useCallback(
+    (f: SignalFired) =>
+      setToasts((t) => [...t, signalToast(uid(), f)].slice(-4)),
+    [],
+  );
   const alertsApi = useAlerts(onAlertsFired, onSignalFired);
-  const { alerts, add: addAlerts, update: updateAlert } = alertsApi;
+  const { alerts, add: addAlerts, update: updateAlert, addTrigger } = alertsApi;
   const armedAlerts = alerts.filter((a) => a.armed).length;
-  const alertOverlaysFor = useCallback((s: string) => alertOverlays(alerts, s), [alerts]);
+  const alertOverlaysFor = useCallback(
+    (s: string) => alertOverlays(alerts, s),
+    [alerts],
+  );
 
   const composed = useMemo(
-    () => composeOverlays({ symbol, overlays, pins, panels, alerts: alertOverlaysFor(symbol), visibility }),
+    () =>
+      composeOverlays({
+        symbol,
+        overlays,
+        pins,
+        panels,
+        alerts: alertOverlaysFor(symbol),
+        visibility,
+      }),
     [symbol, overlays, pins, panels, alertOverlaysFor, visibility],
   );
   const layerCounts = useMemo(() => {
@@ -368,28 +564,52 @@ export default function ChartWorkspace() {
       kimiPatterns: kimi,
       kimiHarmonics: kimi,
     };
-  }, [composed.counts, drawings.length, compare.length, indicators.kimi, indicators.sessions, indicators.heatmap, symbol]);
+  }, [
+    composed.counts,
+    drawings.length,
+    compare.length,
+    indicators.kimi,
+    indicators.sessions,
+    indicators.heatmap,
+    symbol,
+  ]);
 
   // ------------------------------------------------------------------ the chart agent
-  const [messages, setStoredMessages] = usePersistentState<AgentMessage[]>("ac:chat", []);
-  const [lastIntent, setLastIntent] = usePersistentState<AnalysisIntent | null>("ac:intent", null);
+  const [messages, setStoredMessages] = usePersistentState<AgentMessage[]>(
+    "ac:chat",
+    [],
+  );
+  const [lastIntent, setLastIntent] = usePersistentState<AnalysisIntent | null>(
+    "ac:intent",
+    null,
+  );
   const setMessages = useCallback(
-    (fn: (m: AgentMessage[]) => AgentMessage[]) => setStoredMessages((m) => fn(m).slice(-MAX_MESSAGES)),
+    (fn: (m: AgentMessage[]) => AgentMessage[]) =>
+      setStoredMessages((m) => fn(m).slice(-MAX_MESSAGES)),
     [setStoredMessages],
   );
   const [busy, setBusy] = useState(false);
   const [quickAnswer, setQuickAnswer] = useState<AgentMessage | null>(null);
   const [searchMode, setSearchMode] = useState<SearchMode | null>(null);
-  const [feed, setFeed] = useState<FeedInfo>({ price: NaN, open24: null, source: "connecting" });
+  const [feed, setFeed] = useState<FeedInfo>({
+    price: NaN,
+    open24: null,
+    source: "connecting",
+  });
   const [error, setError] = useState<string | null>(null);
-  const [dialog, setDialog] = useState<"settings" | "indicators" | "shortcuts" | null>(null);
+  const [dialog, setDialog] = useState<
+    "settings" | "indicators" | "shortcuts" | null
+  >(null);
   const analysisCtrl = useRef<AbortController | null>(null);
 
   // Past conversations: "New chat" files the current one here, and opening one brings it back to continue.
   const [chats, setChats] = usePersistentState<ChatSession[]>(CHATS_KEY, []);
   const [chatId, setChatId] = usePersistentState<string>(CHAT_ID_KEY, "");
   const archiveChat = useCallback(() => {
-    if (worthKeeping(messages)) setChats((list) => upsertSession(list, toSession(chatId || uid(), messages, lastIntent)));
+    if (worthKeeping(messages))
+      setChats((list) =>
+        upsertSession(list, toSession(chatId || uid(), messages, lastIntent)),
+      );
   }, [messages, lastIntent, chatId, setChats]);
   const stopAnswer = useCallback(() => {
     // An answer still on its way belongs to the conversation it was asked in, not the next one.
@@ -415,9 +635,20 @@ export default function ChartWorkspace() {
       setLastIntent(chat.intent);
       setChatId(chat.id);
     },
-    [chats, stopAnswer, archiveChat, setChats, setMessages, setLastIntent, setChatId],
+    [
+      chats,
+      stopAnswer,
+      archiveChat,
+      setChats,
+      setMessages,
+      setLastIntent,
+      setChatId,
+    ],
   );
-  const deleteChat = useCallback((id: string) => setChats((list) => list.filter((c) => c.id !== id)), [setChats]);
+  const deleteChat = useCallback(
+    (id: string) => setChats((list) => list.filter((c) => c.id !== id)),
+    [setChats],
+  );
 
   // Latest conversation state for the request, without re-creating runAnalysis on every message.
   const convoRef = useRef({ messages, overlays, lastIntent, watchlist });
@@ -436,7 +667,8 @@ export default function ChartWorkspace() {
       const ctrl = new AbortController();
       analysisCtrl.current = ctrl;
       const convo = convoRef.current;
-      if (!opts.silent) setMessages((m) => [...m, { id: uid(), role: "user", text: prompt }]);
+      if (!opts.silent)
+        setMessages((m) => [...m, { id: uid(), role: "user", text: prompt }]);
       setBusy(true);
       try {
         const candles: Candle[] = activeChart()?.getCandles() ?? [];
@@ -460,18 +692,32 @@ export default function ChartWorkspace() {
         if (ctrl.signal.aborted) return;
         const target = res.navigate ?? { symbol, interval };
         // Saved under the chart the answer belongs to; when the agent moves the chart, that chart loads them.
-        changeOverlays(`ac:overlays:${target.symbol}:${target.interval}`, res.overlays, opts.silent ? "auto levels" : "agent answer");
-        if (res.navigate) setCell({ symbol: res.navigate.symbol, interval: res.navigate.interval });
-        if (Object.keys(res.indicators ?? {}).length) setIndicators((ind) => ({ ...ind, ...res.indicators }));
+        changeOverlays(
+          `ac:overlays:${target.symbol}:${target.interval}`,
+          res.overlays,
+          opts.silent ? "auto levels" : "agent answer",
+        );
+        if (res.navigate)
+          setCell({
+            symbol: res.navigate.symbol,
+            interval: res.navigate.interval,
+          });
+        if (Object.keys(res.indicators ?? {}).length)
+          setIndicators((ind) => ({ ...ind, ...res.indicators }));
         if (prompt) setLastIntent(res.intent);
         addAlerts(res.alerts ?? [], res.symbol);
+        for (const t of res.trigger_alerts ?? []) void addTrigger(t);
         const answer: AgentMessage = {
           id: uid(),
           role: "agent",
-          text: opts.silent ? `Auto-detected levels. ${res.summary}` : res.summary,
+          text: opts.silent
+            ? `Auto-detected levels. ${res.summary}`
+            : res.summary,
           overlays: res.overlays,
           meta: engineNote(res),
-          alerts: res.alerts?.length || undefined,
+          alerts:
+            (res.alerts?.length ?? 0) + (res.trigger_alerts?.length ?? 0) ||
+            undefined,
           plan: res.plan ?? undefined,
           scan: res.scan?.length ? res.scan : undefined,
           setups: res.setups?.length ? res.setups : undefined,
@@ -485,32 +731,60 @@ export default function ChartWorkspace() {
         if (!opts.silent) setQuickAnswer(answer);
       } catch (err) {
         if ((err as Error).name === "AbortError") return;
-        const msg: AgentMessage = { id: uid(), role: "error", text: (err as Error).message };
+        const msg: AgentMessage = {
+          id: uid(),
+          role: "error",
+          text: (err as Error).message,
+        };
         setMessages((m) => [...m, msg]);
         if (!opts.silent) setQuickAnswer(msg);
       } finally {
         if (analysisCtrl.current === ctrl) setBusy(false);
       }
     },
-    [symbol, interval, activeChart, setMessages, changeOverlays, setLastIntent, addAlerts, setCell, setIndicators],
+    [
+      symbol,
+      interval,
+      activeChart,
+      setMessages,
+      changeOverlays,
+      setLastIntent,
+      addAlerts,
+      addTrigger,
+      setCell,
+      setIndicators,
+    ],
   );
 
   // Auto-detect levels on load, unless this chart already has saved AI overlays.
   const onDataReady = useCallback(() => {
-    if (layout.autoLevels && overlaysLoaded && convoRef.current.overlays.length === 0) void runAnalysis("", { silent: true });
+    if (
+      layout.autoLevels &&
+      overlaysLoaded &&
+      convoRef.current.overlays.length === 0
+    )
+      void runAnalysis("", { silent: true });
   }, [layout.autoLevels, overlaysLoaded, runAnalysis]);
 
   // ------------------------------------------------------------------ drawing actions
   const selectedDrawing = drawings.find((d) => d.id === selectedId);
   // Alerts watch a Binance pair, so ratio and index charts can't have them.
-  const selectedAlert = selectedDrawing && !isCustom(symbol) ? alertFromDrawing(selectedDrawing) : null;
+  const selectedAlert =
+    selectedDrawing && !isCustom(symbol)
+      ? alertFromDrawing(selectedDrawing)
+      : null;
 
   const deleteSelected = useCallback(() => {
     if (locked) return;
     if (selectedId) {
       changeDrawings(drawingsRef.current.filter((d) => d.id !== selectedId));
       setSelectedId(null);
-    } else if (drawingsRef.current.length && window.confirm(`Delete all ${drawingsRef.current.length} drawings on ${symbol}? (Ctrl+Z brings them back)`)) {
+    } else if (
+      drawingsRef.current.length &&
+      window.confirm(
+        `Delete all ${drawingsRef.current.length} drawings on ${symbol}? (Ctrl+Z brings them back)`,
+      )
+    ) {
       changeDrawings([]);
     }
   }, [locked, selectedId, symbol, changeDrawings]);
@@ -519,7 +793,11 @@ export default function ChartWorkspace() {
     const d = drawingsRef.current.find((x) => x.id === selectedId);
     if (!d || locked) return;
     const shift = 5 * INTERVAL_SECONDS[interval];
-    const copy: Drawing = { ...d, id: uid(), points: d.points.map((pt) => ({ ...pt, time: pt.time + shift })) };
+    const copy: Drawing = {
+      ...d,
+      id: uid(),
+      points: d.points.map((pt) => ({ ...pt, time: pt.time + shift })),
+    };
     changeDrawings([...drawingsRef.current, copy], "duplicate drawing");
     setSelectedId(copy.id);
   }, [selectedId, locked, interval, changeDrawings]);
@@ -544,11 +822,18 @@ export default function ChartWorkspace() {
   }, [symbol, interval, activeChart]);
 
   // ------------------------------------------------------------------ side panel
-  const agentVisible = mobile ? mobileTab === "agent" : dock.open && dock.tab === "agent";
+  const agentVisible = mobile
+    ? mobileTab === "agent"
+    : dock.open && dock.tab === "agent";
   const openTab = useCallback(
     (id: string, toggle = false) => {
       if (mobile) setMobileTab((t) => (toggle && t === id ? null : id));
-      else setDock((d) => (toggle && d.open && d.tab === id ? { ...d, open: false } : { ...d, open: true, tab: id }));
+      else
+        setDock((d) =>
+          toggle && d.open && d.tab === id
+            ? { ...d, open: false }
+            : { ...d, open: true, tab: id },
+        );
     },
     [mobile, setDock],
   );
@@ -558,7 +843,11 @@ export default function ChartWorkspace() {
     window.addEventListener(OPEN_PANEL_EVENT, onOpen);
     return () => window.removeEventListener(OPEN_PANEL_EVENT, onOpen);
   }, [openTab]);
-  const closeDock = useCallback(() => (mobile ? setMobileTab(null) : setDock((d) => ({ ...d, open: false }))), [mobile, setDock]);
+  const closeDock = useCallback(
+    () =>
+      mobile ? setMobileTab(null) : setDock((d) => ({ ...d, open: false })),
+    [mobile, setDock],
+  );
   const focusAgent = useCallback(() => {
     openTab("agent");
     setTimeout(() => agentRef.current?.focus(), 30);
@@ -578,7 +867,10 @@ export default function ChartWorkspace() {
       writeStored(WORKSPACES_KEY, saveWorkspace(list, { id: cur }));
       setUndoNote(`Saved layout “${list.find((w) => w.id === cur)?.name}”`);
     } else {
-      const name = window.prompt("Name this layout", `Layout ${list.length + 1}`);
+      const name = window.prompt(
+        "Name this layout",
+        `Layout ${list.length + 1}`,
+      );
       if (name === null) return;
       writeStored(WORKSPACES_KEY, saveWorkspace(list, { name }));
       setUndoNote("Layout saved");
@@ -589,12 +881,22 @@ export default function ChartWorkspace() {
   const stepWatchlist = (dir: 1 | -1) => {
     if (!watchlist.length) return;
     const i = watchlist.indexOf(symbol);
-    setSymbol(watchlist[dir === 1 ? (i + 1) % watchlist.length : (i <= 0 ? watchlist.length : i) - 1]);
+    setSymbol(
+      watchlist[
+        dir === 1
+          ? (i + 1) % watchlist.length
+          : (i <= 0 ? watchlist.length : i) - 1
+      ],
+    );
   };
   const keyHandler = useRef<(e: KeyboardEvent) => void>(() => undefined);
   keyHandler.current = (e: KeyboardEvent) => {
     const el = e.target as HTMLElement;
-    const typing = el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable;
+    const typing =
+      el.tagName === "INPUT" ||
+      el.tagName === "TEXTAREA" ||
+      el.tagName === "SELECT" ||
+      el.isContentEditable;
     const key = e.key.toLowerCase();
     if (e.ctrlKey || e.metaKey) {
       if (e.altKey) return;
@@ -630,7 +932,10 @@ export default function ChartWorkspace() {
       } else if (e.code === "KeyL") {
         e.preventDefault();
         setLayout((l) => ({ ...l, logScale: !l.logScale }));
-      } else if ((e.key === "ArrowUp" || e.key === "ArrowDown") && watchlist.length) {
+      } else if (
+        (e.key === "ArrowUp" || e.key === "ArrowDown") &&
+        watchlist.length
+      ) {
         e.preventDefault();
         stepWatchlist(e.key === "ArrowDown" ? 1 : -1);
       }
@@ -670,13 +975,21 @@ export default function ChartWorkspace() {
       setSearchMode("chart");
       return;
     }
-    const panelKeys: Record<string, string> = { w: "watchlist", a: "alerts", l: "layers" };
+    const panelKeys: Record<string, string> = {
+      w: "watchlist",
+      a: "alerts",
+      l: "layers",
+    };
     for (const p of EXTRA_PANELS) if (p.hotkey) panelKeys[p.hotkey] = p.id;
     if (panelKeys[key]) return openTab(panelKeys[key], true);
-    if (key === "d") return mobile ? setMobileTab(null) : setDock((d) => ({ ...d, open: !d.open }));
+    if (key === "d")
+      return mobile
+        ? setMobileTab(null)
+        : setDock((d) => ({ ...d, open: !d.open }));
     if (key === "s") return setSearchMode("chart");
     if (key === "g" && !mobile) return setGridMode(NEXT_GRID[gridMode]);
-    if (key === "k") return setIndicators((ind) => ({ ...ind, kimi: !ind.kimi }));
+    if (key === "k")
+      return setIndicators((ind) => ({ ...ind, kimi: !ind.kimi }));
     if (key === "i") return setDialog("indicators");
     if (TOOL_HOTKEYS[key] && !locked) setTool(TOOL_HOTKEYS[key]);
   };
@@ -690,21 +1003,35 @@ export default function ChartWorkspace() {
   const onCrosshairTime = useCallback(
     (from: number, time: number | null) => {
       if (gridMode === 1 || layout.syncCrosshair === false) return;
-      for (let i = 0; i < gridMode; i++) if (i !== from) cellRefs.current[i]?.setCrosshairTime(time);
+      for (let i = 0; i < gridMode; i++)
+        if (i !== from) cellRefs.current[i]?.setCrosshairTime(time);
     },
     [gridMode, layout.syncCrosshair],
   );
 
-  const change24 = feed.open24 && Number.isFinite(feed.price) ? ((feed.price - feed.open24) / feed.open24) * 100 : null;
+  const change24 =
+    feed.open24 && Number.isFinite(feed.price)
+      ? ((feed.price - feed.open24) / feed.open24) * 100
+      : null;
   const price = Number.isFinite(feed.price) ? feed.price : null;
 
   // ------------------------------------------------------------------ side-panel tabs
   /** "Log trade" on a plan card: track it in the journal, sized with the user's position-sizing settings. */
   const logTrade = useCallback(async (m: AgentMessage) => {
     if (!m.plan || !m.symbol || !m.interval) return false;
-    const sized = sizePlan(m.plan, { ...DEFAULT_SIZING, ...readStored<Partial<SizingSettings>>("ac:sizing", {}) });
+    const sized = sizePlan(m.plan, {
+      ...DEFAULT_SIZING,
+      ...readStored<Partial<SizingSettings>>("ac:sizing", {}),
+    });
     try {
-      await createJournalEntry(planToJournalEntry(m.plan, m.symbol, m.interval, sized ? { size_qty: sized.qty, risk_usd: sized.riskUsd } : {}));
+      await createJournalEntry(
+        planToJournalEntry(
+          m.plan,
+          m.symbol,
+          m.interval,
+          sized ? { size_qty: sized.qty, risk_usd: sized.riskUsd } : {},
+        ),
+      );
       return true;
     } catch {
       return false;
@@ -720,8 +1047,41 @@ export default function ChartWorkspace() {
     },
     [pickSymbol, onChartOverlays, mobile],
   );
+  /** "Alert on 5m confirmation" on a plan card: a trigger alert on the plan's entry zone. */
+  const planTrigger = useCallback(
+    async (m: AgentMessage, tf: TriggerInterval) => {
+      const plan = m.plan;
+      if (!plan || !m.symbol || plan.zone_low == null || plan.zone_high == null)
+        return false;
+      const made = await addTrigger({
+        symbol: m.symbol,
+        interval: tf,
+        zone: {
+          source: "fixed",
+          price_low: plan.zone_low,
+          price_high: plan.zone_high,
+          direction: plan.direction,
+          label: plan.basis.slice(0, 120),
+        },
+        confirm: "any",
+      });
+      return made != null;
+    },
+    [addTrigger],
+  );
+  const triggerZones = useMemo(
+    () => chartZones(overlays, drawings, selectedId),
+    [overlays, drawings, selectedId],
+  );
 
-  const dockProps: DockPanelProps = { symbol, interval, price, watchlist, onPickSymbol: pickSymbol, onChartOverlays };
+  const dockProps: DockPanelProps = {
+    symbol,
+    interval,
+    price,
+    watchlist,
+    onPickSymbol: pickSymbol,
+    onChartOverlays,
+  };
   const tabs: DockTab[] = [
     {
       id: "agent",
@@ -735,7 +1095,9 @@ export default function ChartWorkspace() {
           overlayCount={overlays.length}
           pinned={pinnedSet}
           onSubmit={(p) => void runAnalysis(p)}
-          onClearOverlays={() => changeOverlays(overlaysKey, [], "clear AI levels")}
+          onClearOverlays={() =>
+            changeOverlays(overlaysKey, [], "clear AI levels")
+          }
           onNewChat={newChat}
           chats={chats}
           onOpenChat={openChat}
@@ -744,6 +1106,7 @@ export default function ChartWorkspace() {
           onOpenSetup={openSetup}
           onTogglePin={togglePin}
           onLogTrade={logTrade}
+          onPlanTrigger={planTrigger}
         />
       ),
     },
@@ -776,7 +1139,9 @@ export default function ChartWorkspace() {
             setActive(i);
           }}
           onAdd={() => setSearchMode("watchlist")}
-          onScan={() => askAgent("Scan my watchlist: which coins are near a zone?")}
+          onScan={() =>
+            askAgent("Scan my watchlist: which coins are near a zone?")
+          }
         />
       ),
     },
@@ -786,7 +1151,7 @@ export default function ChartWorkspace() {
       icon: Bell,
       badge: armedAlerts,
       render: () => (
-        <AlertsPanel {...dockProps} api={alertsApi} />
+        <AlertsPanel {...dockProps} api={alertsApi} zones={triggerZones} />
       ),
     },
     {
@@ -798,17 +1163,27 @@ export default function ChartWorkspace() {
           symbol={symbol}
           visibility={visibility}
           counts={layerCounts}
-          pins={Object.entries(pins).map(([id, p]) => ({ id, label: p.label, count: p.overlays.length }))}
+          pins={Object.entries(pins).map(([id, p]) => ({
+            id,
+            label: p.label,
+            count: p.overlays.length,
+          }))}
           drawings={drawings}
           selectedId={selectedId}
           onVisibility={setVisibility}
           onUnpin={unpin}
           onSelectDrawing={(id) => {
             const d = drawings.find((x) => x.id === id);
-            if (d?.style?.timeframes?.length && !d.style.timeframes.includes(interval)) setInterval(d.style.timeframes[0]);
+            if (
+              d?.style?.timeframes?.length &&
+              !d.style.timeframes.includes(interval)
+            )
+              setInterval(d.style.timeframes[0]);
             setSelectedId(id);
           }}
-          onDeleteDrawing={(id) => changeDrawings(drawings.filter((d) => d.id !== id))}
+          onDeleteDrawing={(id) =>
+            changeDrawings(drawings.filter((d) => d.id !== id))
+          }
         />
       ),
     },
@@ -820,7 +1195,8 @@ export default function ChartWorkspace() {
     })),
   ];
 
-  const cellList = gridMode === 1 ? [active] : Array.from({ length: gridMode }, (_, i) => i);
+  const cellList =
+    gridMode === 1 ? [active] : Array.from({ length: gridMode }, (_, i) => i);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -876,7 +1252,9 @@ export default function ChartWorkspace() {
           />
         )}
         <main className="relative min-w-0 flex-1">
-          <div className={`grid h-full w-full gap-px bg-line ${GRID_CLASS[gridMode]}`}>
+          <div
+            className={`grid h-full w-full gap-px bg-line ${GRID_CLASS[gridMode]}`}
+          >
             {cellList.map((i) => {
               const c = cells[i] ?? DEFAULT_CELLS[i];
               return (
@@ -912,7 +1290,8 @@ export default function ChartWorkspace() {
                           onFeed: setFeed,
                           onDataReady,
                           onError: setError,
-                          onAlertMove: (id, patch) => void updateAlert(id, patch),
+                          onAlertMove: (id, patch) =>
+                            void updateAlert(id, patch),
                         }
                       : null
                   }
@@ -925,7 +1304,12 @@ export default function ChartWorkspace() {
               drawing={selectedDrawing}
               interval={interval}
               canAlert={!!selectedAlert}
-              onChange={(next) => changeDrawings(drawings.map((d) => (d.id === next.id ? next : d)), "style change")}
+              onChange={(next) =>
+                changeDrawings(
+                  drawings.map((d) => (d.id === next.id ? next : d)),
+                  "style change",
+                )
+              }
               onDuplicate={duplicateSelected}
               onDelete={deleteSelected}
               onAlert={alertOnSelected}
@@ -985,11 +1369,37 @@ export default function ChartWorkspace() {
         />
       )}
       {mobile && (
-        <nav aria-label="Sections" className="flex h-14 shrink-0 items-stretch overflow-x-auto border-t border-line bg-panel scrollbar-none">
-          <MobileTab label="Chart" icon={CandlestickChart} on={mobileTab === null && !mobileDraw} onClick={() => { setMobileTab(null); setMobileDraw(false); }} />
-          <MobileTab label="Draw" icon={Pencil} on={mobileTab === null && mobileDraw} onClick={() => { setMobileTab(null); setMobileDraw((v) => !v); }} />
+        <nav
+          aria-label="Sections"
+          className="flex h-14 shrink-0 items-stretch overflow-x-auto border-t border-line bg-panel scrollbar-none"
+        >
+          <MobileTab
+            label="Chart"
+            icon={CandlestickChart}
+            on={mobileTab === null && !mobileDraw}
+            onClick={() => {
+              setMobileTab(null);
+              setMobileDraw(false);
+            }}
+          />
+          <MobileTab
+            label="Draw"
+            icon={Pencil}
+            on={mobileTab === null && mobileDraw}
+            onClick={() => {
+              setMobileTab(null);
+              setMobileDraw((v) => !v);
+            }}
+          />
           {tabs.map((t) => (
-            <MobileTab key={t.id} label={t.label.replace("Chart agent", "Agent")} icon={t.icon} badge={t.badge} on={mobileTab === t.id} onClick={() => openTab(t.id)} />
+            <MobileTab
+              key={t.id}
+              label={t.label.replace("Chart agent", "Agent")}
+              icon={t.icon}
+              badge={t.badge}
+              on={mobileTab === t.id}
+              onClick={() => openTab(t.id)}
+            />
           ))}
         </nav>
       )}
@@ -1003,25 +1413,50 @@ export default function ChartWorkspace() {
           else if (searchMode === "compare") {
             if (s !== symbol && !compare.some((c) => c.symbol === s)) {
               const used = new Set(compare.map((c) => c.color));
-              setCompare([...compare, { symbol: s, color: COMPARE_COLORS.find((c) => !used.has(c)) ?? COMPARE_COLORS[0] }]);
+              setCompare([
+                ...compare,
+                {
+                  symbol: s,
+                  color:
+                    COMPARE_COLORS.find((c) => !used.has(c)) ??
+                    COMPARE_COLORS[0],
+                },
+              ]);
             }
           } else setSymbol(s);
         }}
       />
-      <SettingsDialog open={dialog === "settings"} layout={layout} onLayout={setLayout} onClose={() => setDialog(null)} />
+      <SettingsDialog
+        open={dialog === "settings"}
+        layout={layout}
+        onLayout={setLayout}
+        onClose={() => setDialog(null)}
+      />
       <IndicatorSettingsDialog
         open={dialog === "indicators"}
         settings={indicatorSettings}
         onChange={setIndicatorSettings}
         onClose={() => setDialog(null)}
       />
-      <ShortcutsDialog open={dialog === "shortcuts"} onClose={() => setDialog(null)} />
-      <AlertToasts toasts={toasts} onDismiss={(id) => setToasts((t) => t.filter((x) => x.id !== id))} />
+      <ShortcutsDialog
+        open={dialog === "shortcuts"}
+        onClose={() => setDialog(null)}
+      />
+      <AlertToasts
+        toasts={toasts}
+        onDismiss={(id) => setToasts((t) => t.filter((x) => x.id !== id))}
+      />
     </div>
   );
 }
 
-function MobileTab({ label, icon: Icon, on, badge, onClick }: {
+function MobileTab({
+  label,
+  icon: Icon,
+  on,
+  badge,
+  onClick,
+}: {
   label: string;
   icon: typeof Bot;
   on: boolean;
@@ -1033,7 +1468,10 @@ function MobileTab({ label, icon: Icon, on, badge, onClick }: {
       type="button"
       onClick={onClick}
       aria-pressed={on}
-      className={clsx("relative flex min-w-16 flex-1 flex-col items-center justify-center gap-0.5 px-2 text-[10px]", on ? "text-accent" : "text-mute")}
+      className={clsx(
+        "relative flex min-w-16 flex-1 flex-col items-center justify-center gap-0.5 px-2 text-[10px]",
+        on ? "text-accent" : "text-mute",
+      )}
     >
       <Icon className="h-5 w-5" />
       <span className="whitespace-nowrap">{label}</span>
@@ -1069,7 +1507,11 @@ function QuickPrompt(p: {
         aria-label="Show the agent prompt"
         className="absolute bottom-9 right-16 z-20 grid h-9 w-9 place-items-center rounded-full border border-line bg-panel/95 text-accent shadow-xl hover:border-accent"
       >
-        {p.busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Bot className="h-4 w-4" />}
+        {p.busy ? (
+          <Loader2 className="h-4 w-4 animate-spin" />
+        ) : (
+          <Bot className="h-4 w-4" />
+        )}
       </button>
     );
   }
@@ -1084,18 +1526,40 @@ function QuickPrompt(p: {
       {p.answer && !p.busy && (
         <div className="mb-1.5 rounded-lg border border-line bg-panel/95 px-3 py-2 text-[12px] leading-relaxed text-ink shadow-xl backdrop-blur">
           <div className="flex items-start gap-2">
-            <p className={clsx("line-clamp-4 min-w-0 flex-1 whitespace-pre-line", p.answer.role === "error" && "text-down")}>{p.answer.text}</p>
-            <button type="button" className="btn-ghost h-5 w-5 shrink-0 p-0" aria-label="Dismiss answer" onClick={p.onDismissAnswer}>
+            <p
+              className={clsx(
+                "line-clamp-4 min-w-0 flex-1 whitespace-pre-line",
+                p.answer.role === "error" && "text-down",
+              )}
+            >
+              {p.answer.text}
+            </p>
+            <button
+              type="button"
+              className="btn-ghost h-5 w-5 shrink-0 p-0"
+              aria-label="Dismiss answer"
+              onClick={p.onDismissAnswer}
+            >
               <X className="h-3.5 w-3.5" />
             </button>
           </div>
-          <button type="button" className="mt-1 text-[11px] text-accent hover:underline" onClick={p.onOpen}>
+          <button
+            type="button"
+            className="mt-1 text-[11px] text-accent hover:underline"
+            onClick={p.onOpen}
+          >
             Open the conversation
           </button>
         </div>
       )}
       <div className="flex items-center gap-1.5 rounded-lg border border-line bg-panel/95 px-2 shadow-xl backdrop-blur focus-within:border-accent">
-        <button type="button" className="btn-ghost h-7 w-7 shrink-0 p-0" title="Open the chart agent (/)" aria-label="Open the chart agent" onClick={p.onOpen}>
+        <button
+          type="button"
+          className="btn-ghost h-7 w-7 shrink-0 p-0"
+          title="Open the chart agent (/)"
+          aria-label="Open the chart agent"
+          onClick={p.onOpen}
+        >
           <MessageSquare className="h-4 w-4" />
         </button>
         <input
@@ -1111,11 +1575,23 @@ function QuickPrompt(p: {
         {p.busy ? (
           <Loader2 className="h-4 w-4 shrink-0 animate-spin text-accent" />
         ) : (
-          <button type="button" className="btn-ghost h-7 w-7 shrink-0 p-0" aria-label="Send" disabled={!value.trim()} onClick={submit}>
+          <button
+            type="button"
+            className="btn-ghost h-7 w-7 shrink-0 p-0"
+            aria-label="Send"
+            disabled={!value.trim()}
+            onClick={submit}
+          >
             <SendHorizontal className="h-4 w-4" />
           </button>
         )}
-        <button type="button" className="btn-ghost h-7 w-7 shrink-0 p-0" title="Shrink to a button" aria-label="Hide prompt bar" onClick={() => p.onExpanded(false)}>
+        <button
+          type="button"
+          className="btn-ghost h-7 w-7 shrink-0 p-0"
+          title="Shrink to a button"
+          aria-label="Hide prompt bar"
+          onClick={() => p.onExpanded(false)}
+        >
           <X className="h-3.5 w-3.5" />
         </button>
       </div>

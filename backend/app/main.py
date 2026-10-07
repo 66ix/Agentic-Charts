@@ -42,6 +42,7 @@ from .events import EventsService
 from .futures_data import FUTURES_PERIODS, FuturesDataService
 from .kimi_service import KimiService
 from .llm import LLMClient
+from .postmortem import PostMortemService, ReviewSettings
 from .market_data import MarketData, MarketDataError
 from .market_index import MarketIndexService
 from .market_metrics import MarketMetricsService
@@ -52,7 +53,7 @@ from .ratelimit import RateLimitMiddleware
 from .scanner import WatchlistCache, tickers
 from .session_levels import SessionLevelsService
 from .schemas import (INTERVALS, AnalyzeRequest, AnalyzeResponse, CreateAlertsRequest, KimiResponse, MarketMetrics,
-                      ScanResult)
+                      ScanResult, ZoneTriggerSpec)
 from .signal_alerts import SIGNALS, CreateSignalAlertsRequest, SignalAlertPatch, SignalAlertService
 from .stream_hub import StreamHub
 from .trade_manager import NewManagedTrade, TradeManager, TradePatch, from_journal
@@ -98,9 +99,14 @@ async def lifespan(app: FastAPI):
     # Session/period levels (session_levels.py) and the order-book heatmap (orderbook_heatmap.py).
     app.state.session_levels = SessionLevelsService(market)
     app.state.heatmap = OrderbookHeatmapService(market, app.state.hub)
+    # Post-mortems of closed journal trades and the weekly trade review (postmortem.py).
+    app.state.postmortems = PostMortemService(app.state.journal, market, app.state.llm, app.state.alerts,
+                                              kimi=app.state.kimi)
+    app.state.postmortems.start()
     log.info("Data source: %s | LLM provider: %s %s", market.settings.data_source,
              app.state.llm.provider, app.state.llm.model)
     yield
+    await app.state.postmortems.close()
     await app.state.market_scanner.close()
     await app.state.brief.close()
     await app.state.models.close()
@@ -279,6 +285,34 @@ async def preview_signal_alert(request: Request, symbol: str = Query(...), inter
     try:
         return await request.app.state.signal_alerts.preview(_norm_symbol(symbol), _check_interval(interval),
                                                              signal, bars)
+    except MarketDataError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+# Zone trigger alerts (zone_triggers.py) are signal alerts with signal "zone_trigger": listed, edited and deleted
+# with the routes above.
+#   POST   /api/zone-triggers             ZoneTriggerSpec → {alert}
+#   POST   /api/zone-triggers/preview     ZoneTriggerSpec, ?bars= → {zone, hits: [{time, price, text, stop}], note?}
+
+
+@app.post("/api/zone-triggers")
+async def create_zone_trigger(spec: ZoneTriggerSpec, request: Request) -> dict:
+    try:
+        alert = await request.app.state.signal_alerts.add_trigger(spec)
+    except MarketDataError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"alert": alert.model_dump()}
+
+
+@app.post("/api/zone-triggers/preview")
+async def preview_zone_trigger(spec: ZoneTriggerSpec, request: Request,
+                               bars: int = Query(300, ge=10, le=1000)) -> dict:
+    try:
+        return await request.app.state.signal_alerts.preview_trigger(spec, bars)
     except MarketDataError as exc:
         raise HTTPException(502, str(exc)) from exc
     except ValueError as exc:
@@ -618,13 +652,19 @@ async def ws_klines(ws: WebSocket, symbol: str = "INJUSDT", interval: str = "4h"
 #   POST   /api/journal                   NewJournalEntry → {entry}
 #   PATCH  /api/journal/{id}              {notes?, tags?, setup?, cancel?, close?: {price?, time?}} → {entry}
 #   DELETE /api/journal/{id}
+#   POST   /api/journal/{id}/postmortem   (re)writes a closed trade's post-mortem → {entry}
+#   GET    /api/journal/review?days=7     weekly review: stats, best/worst setups and coins, recurring lessons, text
+#   GET/PUT /api/journal/review/settings  weekly review schedule {enabled, weekday, time, timezone, days}
+#   POST   /api/journal/review/send       sends the review now; 400 without a channel
 #   POST   /api/backtest                  BacktestRequest → trades, stats, equity, notes
 
 
 @app.get("/api/journal")
 async def list_journal(request: Request) -> dict:
     service: JournalService = request.app.state.journal
-    return {"entries": [entry_json(e, ev) for e, ev in await service.rows()]}
+    rows = await service.rows()
+    request.app.state.postmortems.schedule_missing(rows)  # closed trades without a review get one in the background
+    return {"entries": [entry_json(e, ev) for e, ev in rows]}
 
 
 @app.get("/api/journal/stats")
@@ -640,6 +680,7 @@ async def create_journal_entry(req: NewJournalEntry, request: Request) -> dict:
         entry, ev = await request.app.state.journal.add(req)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+    request.app.state.postmortems.schedule_missing([(entry, ev)])
     return {"entry": entry_json(entry, ev)}
 
 
@@ -651,7 +692,46 @@ async def update_journal_entry(entry_id: str, patch: JournalPatch, request: Requ
         raise HTTPException(409, str(exc)) from exc
     if res is None:
         raise HTTPException(404, "Trade not found")
+    request.app.state.postmortems.schedule_missing([res])
     return {"entry": entry_json(*res)}
+
+
+@app.post("/api/journal/{entry_id}/postmortem")
+async def journal_postmortem(entry_id: str, request: Request) -> dict:
+    journal: JournalService = request.app.state.journal
+    try:
+        entry = await request.app.state.postmortems.generate(entry_id)
+    except MarketDataError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if entry is None:
+        raise HTTPException(404, "Trade not found")
+    return {"entry": entry_json(entry, await journal.evaluate(entry))}
+
+
+@app.get("/api/journal/review")
+async def journal_review(request: Request, days: int | None = Query(None, ge=1, le=31)) -> dict:
+    return await request.app.state.postmortems.weekly(days)
+
+
+@app.get("/api/journal/review/settings")
+async def journal_review_settings(request: Request) -> dict:
+    return request.app.state.postmortems.status()
+
+
+@app.put("/api/journal/review/settings")
+async def save_journal_review_settings(settings_in: ReviewSettings, request: Request) -> dict:
+    request.app.state.postmortems.update_settings(settings_in)
+    return request.app.state.postmortems.status()
+
+
+@app.post("/api/journal/review/send")
+async def send_journal_review(request: Request, days: int | None = Query(None, ge=1, le=31)) -> dict:
+    try:
+        return await request.app.state.postmortems.send_weekly(days)
+    except NoChannelError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @app.delete("/api/journal/{entry_id}")

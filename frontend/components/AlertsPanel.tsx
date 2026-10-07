@@ -25,10 +25,13 @@ import { requestNotificationPermission, type AlertsApi, type ChannelTestResult }
 import { usePersistentState } from "@/hooks/usePersistentState";
 import {
   BRIEF_SECTION_NAMES,
+  CONFIRM_OPTIONS,
   EXPIRY_OPTIONS,
   SIGNAL_OPTIONS,
+  TRIGGER_INTERVALS,
   browserTimeZone,
   describeAlert,
+  describeTrigger,
   expiryLabel,
   formatWhen,
   signalName,
@@ -41,24 +44,39 @@ import {
   type BriefSections,
   type BriefSettings,
   type BriefStatus,
+  type ChartZone,
   type SignalAlert,
   type SignalId,
   type SignalPreview,
+  type TriggerPreview,
 } from "@/lib/alerts";
 import type { DockPanelProps } from "@/lib/dock";
 import { displaySymbol, formatPrice } from "@/lib/format";
-import { TIMEFRAMES, type AlertChannels, type AlertSpec, type Interval, type Overlay, type PriceAlert } from "@/lib/types";
+import {
+  TIMEFRAMES,
+  type AlertChannels,
+  type AlertSpec,
+  type Confirmation,
+  type Interval,
+  type Overlay,
+  type PriceAlert,
+  type TriggerInterval,
+  type TriggerZoneKind,
+  type ZoneTriggerSpec,
+} from "@/lib/types";
 
 const CHANNEL_NAMES: Record<keyof AlertChannels, string> = { telegram: "Telegram", discord: "Discord" };
 const INPUT =
   "h-7 min-w-0 rounded border border-line bg-panel2 px-2 text-[12px] text-ink outline-none focus:border-accent";
 const LABEL = "text-[10px] font-semibold uppercase tracking-wide text-mute";
 const PREVIEW_KEY = "alerts:signal-preview";
+const TRIGGER_PREVIEW_KEY = "alerts:trigger-preview";
 
-type Tab = "price" | "signals" | "history" | "brief";
+type Tab = "price" | "signals" | "triggers" | "history" | "brief";
 const TABS: { id: Tab; label: string }[] = [
   { id: "price", label: "Price" },
   { id: "signals", label: "Signals" },
+  { id: "triggers", label: "Triggers" },
   { id: "history", label: "History" },
   { id: "brief", label: "Brief" },
 ];
@@ -80,6 +98,8 @@ export interface AlertsPanelProps extends Partial<DockPanelProps> {
   onRemove?(id: string): void;
   onRearm?(id: string): void;
   onClearTriggered?(): void;
+  /** Zones on the chart (AI zones, drawn rectangles) the Triggers tab offers to watch. */
+  zones?: ChartZone[];
   /** Floating mode (as mounted before the dock): rendered only while `open`, with a close button. Leave both
    *  out for a dock tab. */
   open?: boolean;
@@ -90,6 +110,11 @@ export interface AlertsPanelProps extends Partial<DockPanelProps> {
 function parsePrice(s: string): number {
   const v = Number(s.replace(/[,\s]/g, ""));
   return Number.isFinite(v) && v > 0 ? v : NaN;
+}
+
+/** Armed signal alerts, or (`triggers`) armed zone trigger alerts. */
+function armedCount(list: SignalAlert[], triggers: boolean): number {
+  return list.filter((a) => a.armed && (a.signal === "zone_trigger") === triggers).length;
 }
 
 function priceInput(p: number | null | undefined): string {
@@ -127,8 +152,8 @@ export default function AlertsPanel(p: AlertsPanelProps) {
             )}
           >
             {t.label}
-            {t.id === "signals" && api && api.signalAlerts.some((a) => a.armed) && (
-              <span className="ml-1 text-[10px] text-accent">{api.signalAlerts.filter((a) => a.armed).length}</span>
+            {(t.id === "signals" || t.id === "triggers") && api && armedCount(api.signalAlerts, t.id === "triggers") > 0 && (
+              <span className="ml-1 text-[10px] text-accent">{armedCount(api.signalAlerts, t.id === "triggers")}</span>
             )}
           </button>
         ))}
@@ -152,6 +177,7 @@ export default function AlertsPanel(p: AlertsPanelProps) {
       <div className="min-h-0 flex-1 overflow-y-auto">
         {active === "price" && <PriceTab p={p} />}
         {active === "signals" && api && <SignalsTab p={p} api={api} />}
+        {active === "triggers" && api && <TriggersTab p={p} api={api} />}
         {active === "history" && api && <HistoryTab p={p} api={api} />}
         {active === "brief" && api && <BriefTab p={p} api={api} />}
       </div>
@@ -729,7 +755,7 @@ function SignalsTab({ p, api }: { p: AlertsPanelProps; api: AlertsApi }) {
     }
   };
 
-  const list = api.signalAlerts;
+  const list = useMemo(() => api.signalAlerts.filter((a) => a.signal !== "zone_trigger"), [api.signalAlerts]);
   return (
     <div>
       <div className="space-y-2 border-b border-line px-3 py-2.5">
@@ -870,7 +896,7 @@ function SignalRow(props: { alert: SignalAlert; onPick(): void; onToggle(): void
         <button type="button" onClick={props.onPick} className="font-medium text-ink hover:text-accent">
           {displaySymbol(a.symbol)} {tf}
         </button>{" "}
-        <span className="text-mute">{signalName(a.signal)}</span>
+        <span className="text-mute">{a.trigger ? describeTrigger(a) : signalName(a.signal)}</span>
         <div className="truncate text-[11px] text-mute">
           {a.last_fired_at
             ? `Last fired ${timeAgo(a.last_fired_at)} · ${a.fire_count}× in total`
@@ -878,6 +904,7 @@ function SignalRow(props: { alert: SignalAlert; onPick(): void; onToggle(): void
           {!a.repeat && " · once"}
         </div>
         {a.last_text && <div className="line-clamp-2 text-[11px] text-mute">{a.last_text}</div>}
+        {a.last_stop != null && <div className="text-[11px] text-mute">Suggested stop {formatPrice(a.last_stop)}</div>}
         {a.note && <div className="line-clamp-2 text-[11px] italic text-mute">{a.note}</div>}
       </div>
       <button
@@ -891,6 +918,309 @@ function SignalRow(props: { alert: SignalAlert; onPick(): void; onToggle(): void
       <button type="button" onClick={props.onRemove} className="btn-ghost h-6 w-6 p-0 hover:text-down" title="Delete">
         <Trash2 className="h-3.5 w-3.5" />
       </button>
+    </div>
+  );
+}
+
+// --------------------------------------------------------------- triggers tab --
+
+type ZoneSource = "detected" | "chart" | "prices";
+type Side = "auto" | "long" | "short";
+
+const ZONE_KIND_OPTIONS: { value: TriggerZoneKind; label: string }[] = [
+  { value: "demand", label: "Demand" },
+  { value: "supply", label: "Supply" },
+  { value: "support", label: "Support" },
+  { value: "resistance", label: "Resistance" },
+  { value: "any", label: "Nearest zone" },
+];
+
+const tfLabel = (tf: string) => TIMEFRAMES.find((t) => t.value === tf)?.label ?? tf;
+
+/** Lower-timeframe confirmation inside a higher-timeframe zone: the form, a preview, and the armed triggers. */
+function TriggersTab({ p, api }: { p: AlertsPanelProps; api: AlertsApi }) {
+  const symbol = p.symbol ?? "BTCUSDT";
+  const zones = useMemo(() => p.zones ?? [], [p.zones]);
+  const [interval, setInterval_] = usePersistentState<TriggerInterval>("ac:trigger-interval", "5m");
+  const [confirm, setConfirm] = usePersistentState<Confirmation>("ac:trigger-confirm", "any");
+  const [source, setSource] = useState<ZoneSource>(zones.length ? "chart" : "detected");
+  const [zoneTf, setZoneTf] = useState<Interval>("4h");
+  const [kind, setKind] = useState<TriggerZoneKind>("demand");
+  const [fresh, setFresh] = useState(true);
+  const [zoneKey, setZoneKey] = useState<string>("");
+  const [low, setLow] = useState("");
+  const [high, setHigh] = useState("");
+  const [side, setSide] = useState<Side>("auto");
+  const [cooldown, setCooldown] = useState("60");
+  const [repeat, setRepeat] = useState(true);
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [problem, setProblem] = useState<string | null>(null);
+  const [done, setDone] = useState<string | null>(null);
+  const [preview, setPreview] = useState<TriggerPreview | null>(null);
+  const [previewing, setPreviewing] = useState(false);
+  const previewCtrl = useRef<AbortController | null>(null);
+  const overlaysRef = useRef(p.onChartOverlays);
+  overlaysRef.current = p.onChartOverlays;
+  const markedSymbol = useRef<string | null>(null);
+
+  const chartZone = zones.find((z) => z.key === zoneKey) ?? zones[0] ?? null;
+  const hint = CONFIRM_OPTIONS.find((c) => c.id === confirm)?.hint;
+
+  const clearPreview = useCallback(() => {
+    previewCtrl.current?.abort();
+    setPreview(null);
+    if (markedSymbol.current) overlaysRef.current?.(TRIGGER_PREVIEW_KEY, markedSymbol.current, []);
+    markedSymbol.current = null;
+  }, []);
+
+  useEffect(() => clearPreview, [clearPreview, interval, confirm, source, zoneTf, kind, zoneKey, symbol]);
+
+  /** The form → a spec, or a message saying what is missing. */
+  const buildSpec = (): ZoneTriggerSpec | string => {
+    const minutes = Number(cooldown);
+    if (!Number.isFinite(minutes) || minutes < 0 || minutes > 1440) return "Cooldown is 0 to 1440 minutes.";
+    const direction = side === "auto" ? null : side;
+    let zone: ZoneTriggerSpec["zone"];
+    if (source === "detected") {
+      const ltf = TIMEFRAMES.findIndex((t) => t.value === interval);
+      const htf = TIMEFRAMES.findIndex((t) => t.value === zoneTf);
+      if (htf <= ltf) return "Pick a zone timeframe above the trigger timeframe.";
+      zone = { source: "detected", timeframe: zoneTf, kind, fresh_only: fresh };
+    } else if (source === "chart") {
+      if (!chartZone) return "No zone on the chart. Ask the agent for zones or draw a rectangle.";
+      zone = {
+        source: "fixed", price_low: chartZone.low, price_high: chartZone.high,
+        direction: direction ?? chartZone.direction, label: chartZone.label.slice(0, 120),
+      };
+    } else {
+      const lo = parsePrice(low);
+      const hi = parsePrice(high);
+      if (Number.isNaN(lo) || Number.isNaN(hi)) return "Enter both edges of the zone.";
+      const [a, b] = lo <= hi ? [lo, hi] : [hi, lo];
+      zone = { source: "fixed", price_low: a, price_high: b, direction, label: `Zone ${formatPrice(a)}–${formatPrice(b)}` };
+    }
+    return { symbol, interval, zone, confirm, cooldown_min: Math.round(minutes), repeat, note: note.trim() };
+  };
+
+  const runPreview = async () => {
+    const spec = buildSpec();
+    if (typeof spec === "string") return setProblem(spec);
+    setProblem(null);
+    clearPreview();
+    const ctrl = new AbortController();
+    previewCtrl.current = ctrl;
+    setPreviewing(true);
+    try {
+      const res = await api.previewTrigger(spec, 300, ctrl.signal);
+      setPreview(res);
+      const onChartOverlays = overlaysRef.current;
+      if (onChartOverlays && p.interval === interval) {
+        const long = res.zone?.direction !== "short";
+        const marks: Overlay[] = res.hits.slice(0, 50).map((h, i) => ({
+          type: "marker", id: `trigger-preview-${i}`, kind: "signal_preview", time: h.time, price: h.price,
+          position: long ? "below" : "above", shape: long ? "arrowUp" : "arrowDown", label: "Trigger", color: "#60a5fa",
+        }));
+        if (res.zone) {
+          marks.push({
+            type: "box", id: "trigger-preview-zone", kind: "trigger_zone", label: `${res.zone.label} (trigger zone)`,
+            color: "rgba(96,165,250,0.08)", border_color: "#60a5fa", price_low: res.zone.low, price_high: res.zone.high,
+          });
+        }
+        onChartOverlays(TRIGGER_PREVIEW_KEY, symbol, marks);
+        markedSymbol.current = symbol;
+      }
+    } catch (err) {
+      if ((err as Error).name !== "AbortError") setProblem((err as Error).message);
+    } finally {
+      if (previewCtrl.current === ctrl) setPreviewing(false);
+    }
+  };
+
+  const create = async () => {
+    const spec = buildSpec();
+    if (typeof spec === "string") return setProblem(spec);
+    setProblem(null);
+    setBusy(true);
+    setDone(null);
+    const made = await api.addTrigger(spec);
+    setBusy(false);
+    if (made) {
+      setDone(`Watching ${displaySymbol(made.symbol)} ${tfLabel(made.interval)}: ${describeTrigger(made)}.`);
+      setNote("");
+    }
+  };
+
+  const list = useMemo(() => api.signalAlerts.filter((a) => a.signal === "zone_trigger"), [api.signalAlerts]);
+  return (
+    <div>
+      <div className="space-y-2 border-b border-line px-3 py-2.5">
+        <div className={LABEL}>New trigger alert on {displaySymbol(symbol)}</div>
+        <div className="grid grid-cols-[auto_1fr] items-end gap-2">
+          <Field label="Trigger timeframe">
+            <Segmented
+              value={interval}
+              options={TRIGGER_INTERVALS.map((t) => ({ value: t, label: tfLabel(t) }))}
+              onChange={(v) => setInterval_(v as TriggerInterval)}
+            />
+          </Field>
+          <Field label="Confirmation">
+            <select className={INPUT} value={confirm} onChange={(e) => setConfirm(e.target.value as Confirmation)}>
+              {CONFIRM_OPTIONS.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+        </div>
+        {hint && <div className="text-[11px] text-mute">{hint}, inside (or just after touching) the zone.</div>}
+        <Field label="Zone">
+          <Segmented
+            value={source}
+            options={[
+              { value: "chart", label: `On the chart (${zones.length})` },
+              { value: "detected", label: "Detected" },
+              { value: "prices", label: "Prices" },
+            ]}
+            onChange={(v) => setSource(v as ZoneSource)}
+          />
+        </Field>
+        {source === "detected" && (
+          <div className="space-y-1.5">
+            <div className="grid grid-cols-2 gap-2">
+              <Field label="Nearest">
+                <select className={INPUT} value={kind} onChange={(e) => setKind(e.target.value as TriggerZoneKind)}>
+                  {ZONE_KIND_OPTIONS.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="On timeframe">
+                <IntervalSelect value={zoneTf} onChange={setZoneTf} />
+              </Field>
+            </div>
+            {(kind === "demand" || kind === "supply") && (
+              <Checkbox checked={fresh} onChange={setFresh} label="Fresh zones only (tested at most once)" />
+            )}
+            <div className="text-[11px] text-mute">Looked up again each time that timeframe closes, so the zone follows the market.</div>
+          </div>
+        )}
+        {source === "chart" &&
+          (zones.length ? (
+            <Field label="Zone on the chart">
+              <select className={INPUT} value={chartZone?.key ?? ""} onChange={(e) => setZoneKey(e.target.value)}>
+                {zones.map((z) => (
+                  <option key={z.key} value={z.key}>
+                    {z.label} · {formatPrice(z.low)}–{formatPrice(z.high)}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          ) : (
+            <div className="text-[11px] text-mute">
+              No zones on the chart. Ask the agent for zones, draw a rectangle, or use Detected / Prices.
+            </div>
+          ))}
+        {source === "prices" && (
+          <div className="grid grid-cols-2 gap-2">
+            <Field label="Zone low">
+              <input className={INPUT} inputMode="decimal" value={low} onChange={(e) => setLow(e.target.value)} />
+            </Field>
+            <Field label="Zone high">
+              <input className={INPUT} inputMode="decimal" value={high} onChange={(e) => setHigh(e.target.value)} />
+            </Field>
+          </div>
+        )}
+        <div className="grid grid-cols-2 gap-2">
+          {source !== "detected" && (
+            <Field label="Direction">
+              <select className={INPUT} value={side} onChange={(e) => setSide(e.target.value as Side)}>
+                <option value="auto">From the zone / price</option>
+                <option value="long">Long (bullish trigger)</option>
+                <option value="short">Short (bearish trigger)</option>
+              </select>
+            </Field>
+          )}
+          <Field label="Cooldown (minutes)">
+            <input className={INPUT} inputMode="numeric" value={cooldown} onChange={(e) => setCooldown(e.target.value)} />
+          </Field>
+        </div>
+        <Field label="Note">
+          <input className={INPUT} value={note} maxLength={500} placeholder="optional, added to the message" onChange={(e) => setNote(e.target.value)} />
+        </Field>
+        <Checkbox checked={repeat} onChange={setRepeat} label="Stay armed for the next touch (off: alert once, then switch off)" />
+        {problem && <div className="text-[11px] text-down">{problem}</div>}
+        <div className="flex items-center gap-1.5">
+          <button type="button" onClick={runPreview} disabled={previewing} className="btn-ghost h-7 px-2 text-[12px] disabled:opacity-50">
+            <Eye className="h-3.5 w-3.5" />
+            {previewing ? "Checking…" : "Preview"}
+          </button>
+          <div className="flex-1" />
+          <button
+            type="button"
+            onClick={create}
+            disabled={busy}
+            className="h-7 rounded bg-accent px-3 text-[12px] font-medium text-white hover:bg-accent/90 disabled:opacity-50"
+          >
+            {busy ? "Saving…" : "Create trigger"}
+          </button>
+        </div>
+        {done && <div className="text-[11px] text-up">{done}</div>}
+        {preview && <TriggerPreviewResult preview={preview} onClose={clearPreview} />}
+      </div>
+
+      {list.length === 0 ? (
+        <p className="px-3 py-4 text-[12px] leading-relaxed text-mute">
+          No trigger alerts yet. A trigger fires once per touch of a zone, when a lower-timeframe candle confirms the
+          reaction (CHoCH, sweep or engulfing close), with a suggested stop under the swing. Create one above, press{" "}
+          <span className="text-ink">Alert on 5m confirmation</span> on a trade plan, or ask the agent (&quot;alert me
+          when 1m shows a CHoCH inside the 4h demand&quot;).
+        </p>
+      ) : (
+        list.map((a) => (
+          <SignalRow
+            key={a.id}
+            alert={a}
+            onPick={() => p.onPickSymbol?.(a.symbol, a.interval)}
+            onToggle={() => void api.updateSignal(a.id, { armed: !a.armed })}
+            onToggleRepeat={() => void api.updateSignal(a.id, { repeat: !a.repeat })}
+            onRemove={() => void api.removeSignal(a.id)}
+          />
+        ))
+      )}
+    </div>
+  );
+}
+
+function TriggerPreviewResult({ preview, onClose }: { preview: TriggerPreview; onClose(): void }) {
+  const tf = tfLabel(preview.interval);
+  return (
+    <div className="rounded border border-line bg-panel2/60 p-2 text-[11px]">
+      <div className="mb-1 flex items-start gap-2">
+        <span className="flex-1 text-ink">
+          {preview.zone
+            ? `${preview.zone.label} ${formatPrice(preview.zone.low)}–${formatPrice(preview.zone.high)}: ` +
+              (preview.hits.length
+                ? `fired ${preview.hits.length} time${preview.hits.length === 1 ? "" : "s"} in the last ${preview.bars} ${tf} candles`
+                : `no trigger in the last ${preview.bars} ${tf} candles`)
+            : "No zone found right now."}
+        </span>
+        <button type="button" onClick={onClose} className="text-mute hover:text-ink" aria-label="Close preview">
+          <X className="h-3.5 w-3.5" />
+        </button>
+      </div>
+      <ul className="max-h-40 space-y-0.5 overflow-y-auto">
+        {preview.hits.slice(0, 12).map((h) => (
+          <li key={`${h.time}-${h.text}`} className="flex gap-2">
+            <span className="shrink-0 text-mute">{formatWhen(h.time * 1000)}</span>
+            <span className="text-ink">{h.text}</span>
+          </li>
+        ))}
+      </ul>
+      {preview.note && <div className="mt-1 text-mute">{preview.note}</div>}
     </div>
   );
 }

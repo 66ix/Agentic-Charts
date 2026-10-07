@@ -115,7 +115,9 @@ def build_plan(direction: Literal["long", "short", "auto"], last: float, atr: fl
         notes.append("This is against the current trend.")
     return TradePlan(direction=side, entry=float(f"{entry:.6g}"), stop=float(f"{stop:.6g}"),
                      targets=[t.model_copy(update={"price": float(f"{t.price:.6g}")}) for t in targets], basis=basis,
-                     risk_pct=round(risk / entry * 100, 2), notes=notes, **zone_info)
+                     risk_pct=round(risk / entry * 100, 2), notes=notes, **zone_info,
+                     zone_low=float(f"{zone.low:.6g}") if zone else None,
+                     zone_high=float(f"{zone.high:.6g}") if zone else None)
 
 
 def plan_overlays(plan: TradePlan, time_start: int) -> list:

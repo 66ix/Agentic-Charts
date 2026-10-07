@@ -61,3 +61,11 @@
 {"prompt": "any good setups right now?", "expect": {"scan_market": true, "scan_filter": "any", "symbol": null}}
 {"prompt": "best setups on my watchlist", "expect": {"scan_market": false, "scan_watchlist": true}}
 {"prompt": "best long setup on SOL", "expect": {"scan_market": false, "trade_plan": "long", "symbol": "SOLUSDT"}}
+{"prompt": "alert me when 1m shows a CHoCH inside the 4h demand", "expect": {"zone_trigger": {"timeframe": "1m", "confirm": "choch", "zone_kind": "demand", "zone_timeframe": "4h"}, "alert_targets": [], "alert_prices": [], "features": [], "timeframe": null, "keep_existing": true}}
+{"prompt": "ping me on a 5m confirmation in the H4 supply zone", "expect": {"zone_trigger": {"timeframe": "5m", "confirm": "any", "zone_kind": "supply", "zone_timeframe": "4h"}, "alert_targets": [], "features": []}}
+{"prompt": "notify me if the 15 minute sweeps the low inside daily support", "expect": {"zone_trigger": {"timeframe": "15m", "confirm": "sweep", "zone_kind": "support", "zone_timeframe": "1d"}, "alert_targets": []}}
+{"prompt": "tell me when M5 prints a bullish engulfing at the demand zone", "expect": {"zone_trigger": {"timeframe": "5m", "confirm": "engulfing", "zone_kind": "demand", "zone_timeframe": null}, "alert_targets": []}}
+{"prompt": "set an alert for a 1m break of structure inside the 1h zone", "expect": {"zone_trigger": {"timeframe": "1m", "confirm": "choch", "zone_kind": "any", "zone_timeframe": "1h"}, "alert_targets": []}}
+{"prompt": "give me a long setup and alert me when the 5m shows a change of character in the zone", "expect": {"trade_plan": "long", "zone_trigger": {"timeframe": "5m", "confirm": "choch", "zone_kind": "any", "zone_timeframe": null}, "alert_targets": []}}
+{"prompt": "show the 4h demand and alert me if price enters it", "expect": {"zone_trigger": null, "features": ["supply_demand"], "alert_targets": ["new"]}}
+{"prompt": "alert me at 65k on the 15m", "expect": {"zone_trigger": null, "alert_prices": [65000.0]}}

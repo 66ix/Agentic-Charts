@@ -82,6 +82,8 @@ class NewJournalEntry(BaseModel):
     fee_pct: float = Field(0.1, ge=0, le=1, description="Fee per side, % of notional")
     manage: Literal["breakeven_after_t1", "none"] = "breakeven_after_t1"
     taken_at: Optional[int] = Field(None, ge=0, description="UNIX seconds; default now")
+    zone_low: Optional[float] = Field(None, gt=0, description="The zone the trade was taken from, for its post-mortem")
+    zone_high: Optional[float] = Field(None, gt=0)
 
     @field_validator("symbol")
     @classmethod
@@ -119,7 +121,25 @@ class NewJournalEntry(BaseModel):
         if bad:
             raise ValueError(f"every target of a {self.direction} must be {'above' if long else 'below'} the entry")
         self.targets = sorted(set(self.targets), reverse=not long)
+        if (self.zone_low is None) != (self.zone_high is None):
+            raise ValueError("give both zone_low and zone_high, or neither")
+        if self.zone_low is not None and self.zone_high is not None and self.zone_low > self.zone_high:
+            self.zone_low, self.zone_high = self.zone_high, self.zone_low
         return self
+
+
+class PostMortem(BaseModel):
+    """The review written when a trade closes (postmortem.py). Mirrors PostMortem in frontend/lib/journal.ts."""
+
+    generated_at: int = Field(..., description="UNIX seconds")
+    engine: str = Field("template", description="'template', or 'provider:model' when the LLM wrote the text")
+    summary: str
+    lessons: list[str] = Field(default_factory=list)
+    lesson_codes: list[str] = Field(default_factory=list, description="Rule ids behind the lessons, e.g. 'gave_back'")
+    facts: dict = Field(default_factory=dict, description="The numbers the text is built from")
+    closed_at: Optional[int] = Field(None, description="The result it was written for; a new result rewrites it")
+    realized_r: float = 0.0
+    data_source: str = ""
 
 
 class JournalEntry(NewJournalEntry):
@@ -131,6 +151,7 @@ class JournalEntry(NewJournalEntry):
     manual_close: Optional[ManualClose] = None
     created_at: int
     updated_at: float = Field(0.0, description="Bumped on every edit; invalidates the cached evaluation")
+    postmortem: Optional[PostMortem] = None
 
 
 class ClosePatch(BaseModel):
@@ -456,7 +477,8 @@ def entry_from_plan(plan: TradePlan, symbol: str, interval: str, **extra) -> New
     notes = extra.pop("notes", None)
     body = {"symbol": symbol, "interval": interval, "direction": plan.direction, "entry": plan.entry,
             "stop": plan.stop, "targets": [t.price for t in plan.targets], "setup": plan_setup_name(plan.basis),
-            "source": "agent_plan", "notes": notes if notes is not None else f"From {plan.basis}"}
+            "source": "agent_plan", "notes": notes if notes is not None else f"From {plan.basis}",
+            "zone_low": plan.zone_low, "zone_high": plan.zone_high}
     body.update({k: v for k, v in extra.items() if v is not None})
     return NewJournalEntry.model_validate(body)
 
@@ -545,6 +567,16 @@ class JournalService:
         self._entries[entry_id] = entry
         self._save()
         return entry, await self.evaluate(entry)
+
+    def set_postmortem(self, entry_id: str, pm: PostMortem) -> Optional[JournalEntry]:
+        """Store a trade's post-mortem. Not an edit: the cached evaluation stays valid."""
+        entry = self._entries.get(entry_id)
+        if entry is None:
+            return None
+        entry = entry.model_copy(update={"postmortem": pm})
+        self._entries[entry_id] = entry
+        self._save()
+        return entry
 
     async def remove(self, entry_id: str) -> bool:
         if self._entries.pop(entry_id, None) is None:

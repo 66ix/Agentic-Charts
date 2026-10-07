@@ -177,6 +177,71 @@ class CustomLevel(BaseModel):
         return self
 
 
+# ------------------------------------------------------ zone trigger alerts --
+# A lower-timeframe confirmation inside a higher-timeframe zone (zone_triggers.py). Mirrors the ZoneTrigger types in
+# frontend/lib/alerts.ts.
+
+TriggerInterval = Literal["1m", "5m", "15m"]
+TRIGGER_INTERVALS: tuple[str, ...] = ("1m", "5m", "15m")
+Confirmation = Literal["choch", "sweep", "engulfing", "any"]
+CONFIRMATIONS: tuple[str, ...] = ("choch", "sweep", "engulfing", "any")
+TriggerZoneKind = Literal["demand", "supply", "support", "resistance", "any"]
+TRIGGER_ZONE_KINDS: tuple[str, ...] = ("demand", "supply", "support", "resistance", "any")
+
+
+class TriggerZone(BaseModel):
+    """The zone a trigger alert watches: fixed prices (an AI zone or rectangle picked on the chart, a plan's zone),
+    or the nearest zone of `kind` the detectors find on `timeframe`, looked up again each time that timeframe
+    closes."""
+
+    source: Literal["fixed", "detected"] = "fixed"
+    price_low: Optional[float] = Field(None, gt=0)
+    price_high: Optional[float] = Field(None, gt=0)
+    direction: Optional[Literal["long", "short"]] = Field(
+        None, description="The way the confirmation must point; a fixed zone without one takes it from where price is")
+    timeframe: Optional[Interval] = Field(None, description="Detected: where to find it; fixed: where it came from")
+    kind: TriggerZoneKind = Field("any", description="Detected: which zone (any = nearest demand or supply)")
+    fresh_only: bool = Field(True, description="Detected demand/supply: skip zones tested more than once")
+    label: str = Field("", max_length=120)
+
+    @model_validator(mode="after")
+    def _complete(self) -> "TriggerZone":
+        if self.source == "fixed":
+            if self.price_low is None or self.price_high is None:
+                raise ValueError("a fixed zone needs price_low and price_high")
+            if self.price_low > self.price_high:
+                self.price_low, self.price_high = self.price_high, self.price_low
+        elif self.timeframe is None:
+            raise ValueError("a detected zone needs the timeframe to find it on")
+        return self
+
+
+class ZoneTriggerSpec(BaseModel):
+    """A trigger alert to create: POST /api/zone-triggers, or returned by the agent for the client to arm."""
+
+    symbol: str = Field(..., min_length=2, max_length=20)
+    interval: TriggerInterval = Field("5m", description="The lower timeframe that must confirm")
+    zone: TriggerZone
+    confirm: Confirmation = "any"
+    cooldown_min: int = Field(60, ge=0, le=1440, description="At most one fire per this many minutes")
+    repeat: bool = True
+    note: str = Field("", max_length=500)
+
+    @field_validator("symbol")
+    @classmethod
+    def _symbol(cls, v: str) -> str:
+        return norm_symbol(v)
+
+
+class ZoneTriggerIntent(BaseModel):
+    """"Alert me when 1m shows a CHoCH inside the 4h demand" → the trigger alert the agent sets up."""
+
+    timeframe: TriggerInterval = "5m"
+    confirm: Confirmation = "any"
+    zone_kind: TriggerZoneKind = "any"
+    zone_timeframe: Optional[Interval] = Field(None, description="Where the zone is; null = the chart's timeframe")
+
+
 class AnalysisIntent(BaseModel):
     """What the user asked for, normalised. Produced by the LLM or the rule parser."""
 
@@ -198,6 +263,7 @@ class AnalysisIntent(BaseModel):
     trade_plan: Optional[Literal["long", "short", "auto"]] = Field(None, description="Build a trade plan")
     indicators_on: list[IndicatorName] = Field(default_factory=list)
     indicators_off: list[IndicatorName] = Field(default_factory=list)
+    zone_trigger: Optional[ZoneTriggerIntent] = Field(None, description="Set a lower-timeframe trigger alert")
 
     @field_validator("symbol")
     @classmethod
@@ -225,7 +291,7 @@ class AnalysisIntent(BaseModel):
     def has_actions(self) -> bool:
         return bool(self.custom_levels or self.remove or self.alert_prices or self.alert_targets or self.symbol
                     or self.switch_chart or self.scan_watchlist or self.scan_market or self.trade_plan or self.indicators_on
-                    or self.indicators_off)
+                    or self.indicators_off or self.zone_trigger)
 
     @model_validator(mode="after")
     def _default_features(self) -> "AnalysisIntent":
@@ -309,6 +375,8 @@ class TradePlan(BaseModel):
     zone_fresh: Optional[bool] = None
     zone_htf: list[str] = Field(default_factory=list)
     track_record: Optional[TrackRecord] = None
+    zone_low: Optional[float] = Field(None, description="The zone the entry is built on, when there is one")
+    zone_high: Optional[float] = None
 
 
 class ScanResult(BaseModel):
@@ -439,6 +507,7 @@ class AnalyzeResponse(BaseModel):
     plan: Optional[TradePlan] = None
     setups: list[MarketSetup] = Field(default_factory=list, description="Market-wide scanner results")
     steps: list[str] = Field(default_factory=list, description="What the agent looked at, in order")
+    trigger_alerts: list[ZoneTriggerSpec] = Field(default_factory=list, description="Trigger alerts for the client")
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

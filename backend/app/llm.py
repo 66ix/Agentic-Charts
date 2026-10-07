@@ -29,14 +29,18 @@ from .config import Settings, get_settings
 from .pricefmt import round_facts
 from .schemas import (
     ALL_FEATURES,
+    CONFIRMATIONS,
     FULL_FEATURES,
     INDICATORS,
     INTERVALS,
     SCAN_FILTERS,
     TARGETS,
+    TRIGGER_INTERVALS,
+    TRIGGER_ZONE_KINDS,
     AnalysisIntent,
     ChatTurn,
     CustomLevel,
+    ZoneTriggerIntent,
 )
 from .symbols import find_symbol
 
@@ -49,7 +53,8 @@ INTENT_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["features", "timeframe", "window_timeframes", "max_zones", "answer_hint", "custom_levels",
                  "remove", "keep_existing", "alert_prices", "alert_targets", "symbol", "switch_chart",
-                 "scan_watchlist", "scan_filter", "scan_market", "trade_plan", "indicators_on", "indicators_off"],
+                 "scan_watchlist", "scan_filter", "scan_market", "trade_plan", "indicators_on", "indicators_off",
+                 "zone_trigger"],
     "properties": {
         "features": {
             "type": "array",
@@ -152,6 +157,31 @@ INTENT_SCHEMA: dict[str, Any] = {
                                          "Kimi Cooked' → kimi, the user's own indicator)."},
         "indicators_off": {"type": "array", "items": {"type": "string", "enum": list(INDICATORS)},
                            "description": "Chart indicators to hide."},
+        "zone_trigger": {
+            "anyOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["timeframe", "confirm", "zone_kind", "zone_timeframe"],
+                    "properties": {
+                        "timeframe": {"type": "string", "enum": list(TRIGGER_INTERVALS),
+                                      "description": "The lower timeframe that must confirm (M1 → 1m)."},
+                        "confirm": {"type": "string", "enum": list(CONFIRMATIONS),
+                                    "description": "choch = change of character or break of structure (CHoCH, "
+                                                   "BOS, MSS); sweep = liquidity sweep of the low/high that closes "
+                                                   "back; engulfing = engulfing candle; any = 'a confirmation'."},
+                        "zone_kind": {"type": "string", "enum": list(TRIGGER_ZONE_KINDS),
+                                      "description": "Which zone; any when the user just says 'the zone'."},
+                        "zone_timeframe": {"type": ["string", "null"], "enum": [*INTERVALS, None],
+                                           "description": "The zone's timeframe (4h demand → 4h); null if unsaid."},
+                    },
+                },
+                {"type": "null"},
+            ],
+            "description": "A trigger alert on a lower-timeframe confirmation inside a zone: 'alert me when 1m shows "
+                           "a CHoCH inside the 4h demand' → {timeframe 1m, confirm choch, zone_kind demand, "
+                           "zone_timeframe 4h}. null for every other request, including plain price alerts.",
+        },
     },
 }
 
@@ -171,6 +201,9 @@ INTENT_SYSTEM = (
     "'Best setups right now' or 'scan the market' is scan_market (the whole market, not the watchlist) with no "
     "features and keep_existing true. "
     "Keep what is on the chart (keep_existing true) whenever the request doesn't ask for a new analysis. "
+    "An alert on a lower-timeframe confirmation inside a zone ('alert me when 1m shows a CHoCH inside the 4h "
+    "demand', 'ping me on a 5m confirmation in the H4 supply') is zone_trigger, not alert_targets: features empty, "
+    "keep_existing true. "
     "Respond with JSON only."
 )
 
@@ -265,6 +298,40 @@ _MARKET_SCAN = (r"\b(?:(?:scan|screen|search|sweep|check) (?:the |across the )?(
 _NOT_MARKET = r"\b(?:my|watch ?list|here|this (?:chart|coin|pair|one))\b"
 
 
+_ALERT_VERB = r"\b(?:alert|notify|ping|tell me|let me know)\b"
+_LTF = r"\b(?:(1|5|15)\s*-?\s*m(?:in(?:ute)?s?)?|m(1|5|15))\b|\b(?:lower[ -]time ?frame|ltf)\b"
+_CONFIRM_WORDS: list[tuple[str, str]] = [
+    (r"\b(?:choch|change of character|bos|break of structure|structure break|mss|market structure shift)\b", "choch"),
+    (r"\b(?:sweep(?:s|ing)?|liquidity grab|stop hunt|takes? out the (?:low|high))\b", "sweep"),
+    (r"\bengulf(?:s|ing)?\b", "engulfing"),
+    (r"\b(?:confirm(?:s|ed|ation)?|trigger|entry signal|reaction)\b", "any"),
+]
+_TRIGGER_ZONE = r"\b(demand|supply|support|resistance|zone|poi|area|box)\b"
+
+
+def _zone_trigger(p: str) -> tuple[ZoneTriggerIntent | None, tuple[int, int]]:
+    """'alert me when 1m shows a CHoCH inside the 4h demand' → (the trigger, the span of its sentence). Needs an
+    alert verb, a lower timeframe, a confirmation and a zone in the same sentence."""
+    verb = re.search(_ALERT_VERB, p)
+    if not verb:
+        return None, (0, 0)
+    end = re.compile(r"[.;!?]|$").search(p, verb.end())
+    stop = end.start() if end else len(p)
+    clause = p[verb.start():stop]
+    ltf = re.search(_LTF, clause)
+    zone = re.search(_TRIGGER_ZONE, clause)
+    confirm = next((c for pat, c in _CONFIRM_WORDS if re.search(pat, clause)), None)
+    if not (ltf and zone and confirm):
+        return None, (0, 0)
+    num = ltf.group(1) or ltf.group(2)
+    tf = f"{num}m" if num else "5m"
+    rest = clause[:ltf.start()] + " " + clause[ltf.end():]
+    higher = [t for pat, t in _TF_PATTERNS if re.search(pat, rest) and INTERVALS.index(t) > INTERVALS.index(tf)]
+    kind = zone.group(1) if zone.group(1) in ("demand", "supply", "support", "resistance") else "any"
+    return (ZoneTriggerIntent(timeframe=tf, confirm=confirm, zone_kind=kind,  # type: ignore[arg-type]
+                              zone_timeframe=higher[0] if higher else None), (verb.start(), stop))
+
+
 def _num(token: str) -> float:
     token = token.replace(",", "").lower()
     return float(token[:-1]) * 1000 if token.endswith("k") else float(token)
@@ -344,6 +411,11 @@ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases
         symbol = None
 
     indicators_on, indicators_off, p_ind = _indicator_toggles(p)
+    # A trigger alert ("alert me when 1m shows a CHoCH inside the 4h demand"): its sentence is spent, so its
+    # timeframes and zone words neither move the analysis nor become a price alert.
+    zone_trigger, (t0, t1) = _zone_trigger(p_ind)
+    if zone_trigger:
+        p, p_ind = (s[:t0] + " " * (t1 - t0) + s[t1:] for s in (p, p_ind))
 
     # Removals: the clause after the verb names what to take off ("remove the trendline and ...").
     remove: list[str] = []
@@ -444,7 +516,7 @@ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases
         re.search(r"\b(?:chart|timeframe|tf)\b", p)) and not feats and not scan_market)
 
     acting = bool(custom or remove or alert_prices or alert_targets or indicators_on or indicators_off
-                  or scan_watchlist or scan_market or trade_plan)
+                  or scan_watchlist or scan_market or trade_plan or zone_trigger)
     navigating = symbol is not None or switch_chart
     # "What does Kimi say?" is read from Kimi's own facts: no detectors, and the chart stays as it is.
     asks_kimi = not feats and bool(re.search(r"\bkimi\b", p))
@@ -467,7 +539,7 @@ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases
                           keep_existing=keep, alert_prices=alert_prices[:10], alert_targets=alert_targets,
                           symbol=symbol, switch_chart=switch_chart, scan_watchlist=scan_watchlist,
                           scan_filter=scan_filter, scan_market=scan_market, trade_plan=trade_plan, indicators_on=indicators_on,
-                          indicators_off=indicators_off)
+                          indicators_off=indicators_off, zone_trigger=zone_trigger)
 
 
 _FEATURE_GROUPS: dict[str, list[str]] = {
@@ -651,6 +723,19 @@ class LLMClient:
 
     def note_failure(self, exc: Exception) -> None:
         self._trip(exc)
+
+    async def write(self, system: str, user: str) -> tuple[str, str] | None:
+        """Free text from the model → (text, "provider:model"), or None when no model is available or it failed.
+        Callers check the text against their facts (e.g. post-mortems keep their template otherwise)."""
+        if not self._available():
+            return None
+        try:
+            text = (await self._text(system, user)).strip()
+            return (text, f"{self.provider}:{self.model}") if text else None
+        except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+            log.warning("LLM text failed (%s: %s)", type(exc).__name__, exc)
+            self._trip(exc)
+            return None
 
     async def narrate(self, prompt: str, facts: dict, fallback: str,
                       history: list[ChatTurn] | None = None) -> tuple[str, str]:

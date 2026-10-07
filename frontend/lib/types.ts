@@ -37,7 +37,13 @@ export interface Candle {
   volume: number;
 }
 
-export type DataSource = "binance" | "synthetic" | "client" | "connecting" | "reconnecting" | "offline";
+export type DataSource =
+  | "binance"
+  | "synthetic"
+  | "client"
+  | "connecting"
+  | "reconnecting"
+  | "offline";
 export type LineStyleName = "solid" | "dashed" | "dotted";
 
 interface OverlayBase {
@@ -87,7 +93,11 @@ export interface TrendlineOverlay extends OverlayBase {
   line_style?: LineStyleName;
 }
 
-export type Overlay = HorizontalLineOverlay | BoxOverlay | MarkerOverlay | TrendlineOverlay;
+export type Overlay =
+  | HorizontalLineOverlay
+  | BoxOverlay
+  | MarkerOverlay
+  | TrendlineOverlay;
 
 export interface CustomLevel {
   kind: "line" | "zone";
@@ -117,6 +127,8 @@ export interface AnalysisIntent {
   trade_plan: "long" | "short" | "auto" | null;
   indicators_on: string[];
   indicators_off: string[];
+  /** "Alert me when 1m shows a CHoCH inside the 4h demand". */
+  zone_trigger?: ZoneTriggerIntent | null;
 }
 
 export interface Navigate {
@@ -143,6 +155,9 @@ export interface TradePlan {
   zone_kind?: string | null;
   zone_fresh?: boolean | null;
   zone_htf?: string[];
+  /** The zone the entry is built on, when there is one. */
+  zone_low?: number | null;
+  zone_high?: number | null;
   /** How the matching backtest setup did on this coin and timeframe. */
   track_record?: TrackRecord | null;
 }
@@ -155,7 +170,13 @@ export interface TrackRecord {
   label: string;
   symbol: string;
   interval: Interval;
-  status: "ok" | "small_sample" | "too_few_trades" | "short_history" | "no_match" | "unavailable";
+  status:
+    | "ok"
+    | "small_sample"
+    | "too_few_trades"
+    | "short_history"
+    | "no_match"
+    | "unavailable";
   trades: number;
   wins: number;
   win_rate: number | null;
@@ -197,7 +218,11 @@ export interface MarketSetup {
   distance_atr: number;
   basis: string;
   /** Trend per timeframe against the setup's direction; a range counts half. */
-  agreement: { frames: Partial<Record<Interval, "up" | "down" | "range">>; aligned: number; total: number };
+  agreement: {
+    frames: Partial<Record<Interval, "up" | "down" | "range">>;
+    aligned: number;
+    total: number;
+  };
   track_record: TrackRecord | null;
   score: number;
   plan: TradePlan;
@@ -265,6 +290,49 @@ export interface AlertSpec {
   note?: string;
 }
 
+// Zone trigger alerts: a lower-timeframe confirmation inside a higher-timeframe zone. Mirrors schemas.py.
+export type TriggerInterval = "1m" | "5m" | "15m";
+export type Confirmation = "choch" | "sweep" | "engulfing" | "any";
+export type TriggerZoneKind =
+  | "demand"
+  | "supply"
+  | "support"
+  | "resistance"
+  | "any";
+
+/** Fixed prices (a zone picked on the chart, a plan's zone), or the nearest `kind` the detectors find on
+ *  `timeframe`, looked up again whenever that timeframe closes. */
+export interface TriggerZone {
+  source: "fixed" | "detected";
+  price_low?: number | null;
+  price_high?: number | null;
+  /** The way the confirmation must point; a fixed zone without one takes it from where price is. */
+  direction?: "long" | "short" | null;
+  timeframe?: Interval | null;
+  kind?: TriggerZoneKind;
+  /** Detected demand/supply: skip zones tested more than once (default true). */
+  fresh_only?: boolean;
+  label?: string;
+}
+
+export interface ZoneTriggerSpec {
+  symbol: string;
+  interval: TriggerInterval;
+  zone: TriggerZone;
+  confirm?: Confirmation;
+  /** At most one fire per this many minutes (default 60). */
+  cooldown_min?: number;
+  repeat?: boolean;
+  note?: string;
+}
+
+export interface ZoneTriggerIntent {
+  timeframe: TriggerInterval;
+  confirm: Confirmation;
+  zone_kind: TriggerZoneKind;
+  zone_timeframe: Interval | null;
+}
+
 /** A price alert stored and evaluated by the backend. Mirrors PriceAlert in schemas.py. */
 export interface PriceAlert extends AlertSpec {
   id: string;
@@ -312,6 +380,8 @@ export interface AnalyzeResponse {
   /** Market-wide scanner results ("best 5m setups right now"). */
   setups?: MarketSetup[];
   steps: string[];
+  /** Zone trigger alerts the client should arm (POST /api/zone-triggers). */
+  trigger_alerts?: ZoneTriggerSpec[];
   generated_at: string;
 }
 
@@ -545,7 +615,11 @@ export interface KimiForecast {
   pct_change: number;
   vol_regime: "LOW" | "NORMAL" | "HIGH";
   headline: string;
-  next_candle: { direction: "up" | "down"; right_pct: number | null; calls: number } | null;
+  next_candle: {
+    direction: "up" | "down";
+    right_pct: number | null;
+    calls: number;
+  } | null;
 }
 
 /** One line of a Kimi pattern drawing; times past the last candle are future candles on the chart's grid. */
