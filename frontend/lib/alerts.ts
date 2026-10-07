@@ -224,7 +224,7 @@ export function previewSignalAlert(symbol: string, interval: Interval, signal: S
 
 // ------------------------------------------------------------------- history --
 
-export type AlertHistoryKind = "price" | "signal" | "brief";
+export type AlertHistoryKind = "price" | "signal" | "brief" | "trade";
 
 /** One fire. Mirrors AlertHistory items in backend/app/alerts.py. */
 export interface AlertHistoryItem {

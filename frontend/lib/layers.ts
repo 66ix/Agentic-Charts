@@ -87,6 +87,7 @@ export function panelLayer(key: string): LayerId {
   const map: Record<string, LayerId> = {
     gridbot: "gridbots",
     journal: "journal",
+    trade: "journal",
     backtest: "backtest",
     walls: "walls",
     liqs: "liqs",

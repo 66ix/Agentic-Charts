@@ -216,6 +216,19 @@ sends at most one liquidation per symbol per second, so that total is a lower bo
 for its source. Binance futures has no US-accessible mirror, so from a US IP those two fall back to
 mocked values (marked with a dot).
 
+## Live trades (trade manager)
+
+The Live trades tab (Q) watches trades you are in and tells you what to do with them, in the tab, as a browser
+notification and on Telegram/Discord. Add one from an open trade in the journal or type it in (entry, stop,
+targets) and pick the timeframe it is managed on. On every closed candle of that timeframe the backend
+(`app/trade_manager.py`) checks, in this order: the stop (out, and for how many R), each target (take that
+target's share off; after T1, move the stop to breakeven), a trailing stop once the trade is past T1 or +1R
+(just under the newest confirmed higher low for a long, or ATR × N from the close), and a change of character
+against the position (structure broke: consider closing). Each suggestion comes once, with the stop it
+suggests drawn on the chart in yellow. The app never touches your orders: "Moved it" records that you moved
+the stop there, and "I closed it" closes the trade at your price. Trades are kept in `TRADES_STORE`
+(default `.cache/trades.json`).
+
 ## Alerts
 
 Price alerts are stored and checked by the backend, so they fire with every browser tab closed.

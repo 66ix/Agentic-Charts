@@ -6,6 +6,7 @@ import {
   Bell,
   BellRing,
   Check,
+  Crosshair,
   Eye,
   Newspaper,
   Pencil,
@@ -896,8 +897,8 @@ function SignalRow(props: { alert: SignalAlert; onPick(): void; onToggle(): void
 
 // ---------------------------------------------------------------- history tab --
 
-const KIND_ICON = { price: BellRing, signal: Activity, brief: Newspaper } as const;
-const KIND_COLOR = { price: "text-yellow-300", signal: "text-accent", brief: "text-mute" } as const;
+const KIND_ICON = { price: BellRing, signal: Activity, brief: Newspaper, trade: Crosshair } as const;
+const KIND_COLOR = { price: "text-yellow-300", signal: "text-accent", brief: "text-mute", trade: "text-up" } as const;
 
 function HistoryTab({ p, api }: { p: AlertsPanelProps; api: AlertsApi }) {
   const [confirm, setConfirm] = useState(false);

@@ -126,6 +126,9 @@ class Settings:
         "SIGNAL_ALERTS_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "signal_alerts.json")))
     brief_store: str = field(default_factory=lambda: _env(
         "BRIEF_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "brief.json")))
+    # Trade manager (trade_manager.py): live trades it watches and the advice it gave.
+    trades_store: str = field(default_factory=lambda: _env(
+        "TRADES_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "trades.json")))
 
 
 @lru_cache

@@ -49,6 +49,7 @@ from .schemas import (INTERVALS, AnalyzeRequest, AnalyzeResponse, CreateAlertsRe
                       ScanResult)
 from .signal_alerts import SIGNALS, CreateSignalAlertsRequest, SignalAlertPatch, SignalAlertService
 from .stream_hub import StreamHub
+from .trade_manager import NewManagedTrade, TradeManager, TradePatch, from_journal
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("agentic-charts")
@@ -81,11 +82,15 @@ async def lifespan(app: FastAPI):
     app.state.brief = BriefService(market, app.state.kimi, app.state.derivatives, app.state.alerts,
                                    events_provider=app.state.events.upcoming_events)
     app.state.brief.start()
+    # Trade manager: live trades it watches on closed candles, advising through the same channels.
+    app.state.trades = TradeManager(market, app.state.alerts)
+    app.state.trades.start()
     log.info("Data source: %s | LLM provider: %s %s", market.settings.data_source,
              app.state.llm.provider, app.state.llm.model)
     yield
     await app.state.brief.close()
     await app.state.models.close()
+    await app.state.trades.close()
     await app.state.signal_alerts.close()
     await asyncio.gather(app.state.futures.close(), app.state.events.close(), app.state.indexes.close())
     await app.state.alerts.close()
@@ -402,6 +407,49 @@ async def gridbot_simulate(request: Request, body: dict = Body(...)) -> dict:
     req: GridSimulateRequest = _gridbot_body(GridSimulateRequest, body)
     result = await _gridbot_run(request.app.state.gridbots.simulate(req, req.binance))
     return result.model_dump()
+
+
+# ------------------------------------------------------------------ trade manager
+
+
+@app.get("/api/trades/managed")
+async def trades_list(request: Request) -> dict:
+    return {"trades": [t.model_dump(exclude={"keys"}) for t in request.app.state.trades.list()]}
+
+
+@app.post("/api/trades/managed")
+async def trades_add(request: Request, body: dict = Body(...)) -> dict:
+    """A trade to manage: its fields, or {"journal_id", "interval"?} to manage a journal entry."""
+    st = request.app.state
+    try:
+        if body.get("journal_id"):
+            entry = st.journal.get(body["journal_id"])
+            if entry is None:
+                raise HTTPException(404, "Journal entry not found")
+            new = from_journal(entry, body.get("interval"))
+        else:
+            new = NewManagedTrade.model_validate(body)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return (await st.trades.add(new)).model_dump(exclude={"keys"})
+
+
+@app.patch("/api/trades/managed/{trade_id}")
+async def trades_update(trade_id: str, request: Request, body: dict = Body(...)) -> dict:
+    try:
+        t = await request.app.state.trades.update(trade_id, TradePatch.model_validate(body))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    if t is None:
+        raise HTTPException(404, "Managed trade not found")
+    return t.model_dump(exclude={"keys"})
+
+
+@app.delete("/api/trades/managed/{trade_id}")
+async def trades_delete(trade_id: str, request: Request) -> dict:
+    if not request.app.state.trades.remove(trade_id):
+        raise HTTPException(404, "Managed trade not found")
+    return {"ok": True}
 
 
 # ------------------------------------------------------------------ AI model (Settings → AI model)

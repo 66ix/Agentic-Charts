@@ -136,6 +136,7 @@ interface WsMessage {
   text?: string;
   time?: number;
   item?: AlertHistoryItem;
+  trade_id?: string;
 }
 
 /**
@@ -232,6 +233,10 @@ export function useAlerts(onFire: (fired: FiredAlert[]) => void, onSignal?: (fir
           beep(660);
           notify(`${fired.alert.symbol} ${fired.alert.interval} signal`, fired.text, `signal-${fired.alert.id}`);
           onSignalRef.current?.(fired);
+        } else if (msg.type === "trade_advice" && msg.text) {
+          // The trade manager (Live trades tab) has advice on an open trade.
+          beep(880);
+          notify("Live trade", String(msg.text), `trade-${msg.trade_id}`);
         } else if (msg.type === "history" && msg.item) {
           addHistory([msg.item]);
         }
