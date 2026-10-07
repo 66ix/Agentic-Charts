@@ -472,8 +472,11 @@ def weekly_review(rows: list[tuple[JournalEntry, JournalEvaluation]], now: Optio
     (from the post-mortems), and the text the scheduled message sends."""
     ts = time.time() if now is None else now
     start = ts - days * 86400
-    closed = [(e, ev) for e, ev in rows if ev.status == "closed" and ev.closed_at is not None
-              and start <= ev.closed_at <= ts]
+    in_period = [(e, ev) for e, ev in rows if ev.status == "closed" and ev.closed_at is not None
+                 and start <= ev.closed_at <= ts]
+    # R needs a stop: trades imported from Binance without one are only counted, with their dollar PnL.
+    closed = [(e, ev) for e, ev in in_period if e.stop is not None]
+    imported = [ev for e, ev in in_period if e.stop is None]
     st = journal_stats(closed)
     setups, coins = st["by_setup"], st["by_symbol"]
     best_setup = max(setups, key=lambda g: (g["avg_r"], g["trades"]), default=None)
@@ -504,6 +507,8 @@ def weekly_review(rows: list[tuple[JournalEntry, JournalEvaluation]], now: Optio
         "recurring": recurring, "trades": trades,
         "missing_postmortems": sum(1 for e, _ in closed if e.postmortem is None),
         "open": sum(1 for _, ev in rows if ev.status == "open"),
+        "imported_without_stop": len(imported),
+        "imported_pnl": round(sum(ev.pnl_usd or 0.0 for ev in imported), 2) if imported else None,
         "data_source": "synthetic" if any(ev.data_source == "synthetic" for _, ev in closed) else "binance",
     }
     out["text"] = render_weekly(out)
@@ -516,9 +521,13 @@ def _day(ts: float) -> str:
 
 def render_weekly(w: dict) -> str:
     head = f"Weekly trade review, {_day(w['from'])} – {_day(w['to'])}"
+    imp = w.get("imported_without_stop") or 0
+    imp_line = (f"{imp} imported Binance trade{'s' if imp != 1 else ''} without a stop "
+                f"({'+' if (w['imported_pnl'] or 0) >= 0 else '-'}${abs(w['imported_pnl'] or 0):,.2f}), not in the R numbers."
+                if imp else "")
     if not w["closed"]:
         return f"{head}\nNo trades closed in the last {w['days']} days." + (
-            f" {w['open']} still open." if w["open"] else "")
+            f" {w['open']} still open." if w["open"] else "") + (f"\n{imp_line}" if imp else "")
     lines = [head, f"{w['closed']} closed: {w['wins']} won, {w['losses']} lost, {w['breakeven']} breakeven "
                    f"({round((w['win_rate'] or 0) * 100)}% win rate). Average {w['avg_r']:+.2f}R, total "
                    f"{w['total_r']:+.2f}R."]
@@ -535,6 +544,8 @@ def render_weekly(w: dict) -> str:
     if w["recurring"]:
         lines.append("Keeps coming back: " + "; ".join(f"{r['name']} ({r['count']}x)" for r in w["recurring"][:3]) + ".")
         lines.append(f"e.g. {w['recurring'][0]['example']}")
+    if imp:
+        lines.append(imp_line)
     if w["open"]:
         lines.append(f"{w['open']} trade{'s' if w['open'] != 1 else ''} still open.")
     if w.get("data_source") == "synthetic":
@@ -621,7 +632,7 @@ class PostMortemService:
     @staticmethod
     def stale(e: JournalEntry, ev: JournalEvaluation) -> bool:
         """A closed trade whose post-mortem is missing or was written for a different result."""
-        if ev.status != "closed":
+        if ev.status != "closed" or e.stop is None:  # an imported trade without a stop has no R to review
             return False
         pm = e.postmortem
         return pm is None or pm.closed_at != ev.closed_at or abs(pm.realized_r - ev.realized_r) > 1e-6
@@ -635,6 +646,8 @@ class PostMortemService:
         ev = await self.journal.evaluate(e)
         if ev.status != "closed":
             raise ValueError("Only closed trades get a post-mortem")
+        if e.stop is None:
+            raise ValueError("This trade was imported without a stop, so there is no risk to measure it against")
         df, source = await self.market.get_range(e.symbol, ev.resolution, e.taken_at)
         if self._demo_fallback(source):
             raise MarketDataError("Binance is unreachable; try again when it is back")

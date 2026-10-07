@@ -51,10 +51,7 @@ export default function TradeManagerPanel(props: DockPanelProps) {
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [adding, setAdding] = useState(false);
-  const [hidden, setHidden] = usePersistentState<string[]>(
-    "ac:trades-hidden",
-    [],
-  );
+  const [hidden, setHidden] = usePersistentState<string[]>("ac:trades-hidden", []);
 
   const load = useCallback(async (signal?: AbortSignal) => {
     try {
@@ -62,8 +59,7 @@ export default function TradeManagerPanel(props: DockPanelProps) {
       setTrades(r.trades);
       setError(null);
     } catch (err) {
-      if ((err as Error).name !== "AbortError")
-        setError((err as Error).message);
+      if ((err as Error).name !== "AbortError") setError((err as Error).message);
     } finally {
       setLoaded(true);
     }
@@ -87,12 +83,7 @@ export default function TradeManagerPanel(props: DockPanelProps) {
   const drawn = useRef(new Map<string, { symbol: string; sig: string }>());
   useEffect(() => {
     const want = new Map<string, { symbol: string; overlays: Overlay[] }>();
-    for (const t of trades)
-      if (!hidden.includes(t.id) && t.status === "open")
-        want.set(`trade:${t.id}`, {
-          symbol: t.symbol,
-          overlays: tradeOverlays(t),
-        });
+    for (const t of trades) if (!hidden.includes(t.id) && t.status === "open") want.set(`trade:${t.id}`, { symbol: t.symbol, overlays: tradeOverlays(t) });
     for (const [key, d] of drawn.current) {
       if (!want.has(key)) {
         drawFn.current(key, d.symbol, []);
@@ -118,12 +109,7 @@ export default function TradeManagerPanel(props: DockPanelProps) {
   };
 
   const remove = async (t: ManagedTrade) => {
-    if (
-      !window.confirm(
-        `Stop managing ${displaySymbol(t.symbol)} ${t.direction}?`,
-      )
-    )
-      return;
+    if (!window.confirm(`Stop managing ${displaySymbol(t.symbol)} ${t.direction}?`)) return;
     try {
       await deleteManagedTrade(t.id);
       setTrades((list) => list.filter((x) => x.id !== t.id));
@@ -138,21 +124,10 @@ export default function TradeManagerPanel(props: DockPanelProps) {
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-1.5 text-[11px] text-mute">
-        <span className="truncate">
-          Watches your live trades and says when to move the stop or take profit
-        </span>
+        <span className="truncate">Watches your live trades and says when to move the stop or take profit</span>
         <div className="flex-1" />
-        <button
-          type="button"
-          className="btn-ghost h-6 shrink-0 gap-1 px-1.5 text-[11px]"
-          onClick={() => setAdding((v) => !v)}
-        >
-          {adding ? (
-            <X className="h-3.5 w-3.5" />
-          ) : (
-            <Plus className="h-3.5 w-3.5" />
-          )}{" "}
-          {adding ? "Cancel" : "Add trade"}
+        <button type="button" className="btn-ghost h-6 shrink-0 gap-1 px-1.5 text-[11px]" onClick={() => setAdding((v) => !v)}>
+          {adding ? <X className="h-3.5 w-3.5" /> : <Plus className="h-3.5 w-3.5" />} {adding ? "Cancel" : "Add trade"}
         </button>
       </div>
 
@@ -173,8 +148,7 @@ export default function TradeManagerPanel(props: DockPanelProps) {
         {!loaded && <Loader2 className="h-4 w-4 animate-spin text-mute" />}
         {loaded && trades.length === 0 && !adding && (
           <p className="text-mute">
-            No trades yet. Add one from your Binance positions or your journal,
-            or type it in. The app only advises: you still move stops and take
+            No trades yet. Add one from your Binance positions or your journal, or type it in. The app only advises: you still move stops and take
             profit on the exchange.
           </p>
         )}
@@ -183,11 +157,7 @@ export default function TradeManagerPanel(props: DockPanelProps) {
             key={t.id}
             t={t}
             shown={!hidden.includes(t.id)}
-            onToggleShown={() =>
-              setHidden((h) =>
-                h.includes(t.id) ? h.filter((x) => x !== t.id) : [...h, t.id],
-              )
-            }
+            onToggleShown={() => setHidden((h) => (h.includes(t.id) ? h.filter((x) => x !== t.id) : [...h, t.id]))}
             onPatch={(p) => void patch(t, p)}
             onRemove={() => void remove(t)}
             onOpen={() => props.onPickSymbol(t.symbol)}
@@ -195,18 +165,9 @@ export default function TradeManagerPanel(props: DockPanelProps) {
         ))}
         {past.length > 0 && (
           <>
-            <p className="pt-1 text-[10px] uppercase tracking-wide text-mute">
-              Finished
-            </p>
+            <p className="pt-1 text-[10px] uppercase tracking-wide text-mute">Finished</p>
             {past.map((t) => (
-              <TradeCard
-                key={t.id}
-                t={t}
-                shown={false}
-                onPatch={(p) => void patch(t, p)}
-                onRemove={() => void remove(t)}
-                onOpen={() => props.onPickSymbol(t.symbol)}
-              />
+              <TradeCard key={t.id} t={t} shown={false} onPatch={(p) => void patch(t, p)} onRemove={() => void remove(t)} onOpen={() => props.onPickSymbol(t.symbol)} />
             ))}
           </>
         )}
@@ -233,60 +194,25 @@ function TradeCard(p: {
   return (
     <div className="rounded-md border border-line bg-base/40 p-2">
       <div className="flex items-center gap-1.5">
-        <button
-          type="button"
-          onClick={p.onOpen}
-          className="font-semibold text-ink hover:text-accent"
-          title="Open this chart"
-        >
+        <button type="button" onClick={p.onOpen} className="font-semibold text-ink hover:text-accent" title="Open this chart">
           {displaySymbol(t.symbol)}
         </button>
-        <span className={long ? "text-up" : "text-down"}>
-          {long ? "Long" : "Short"}
-        </span>
+        <span className={long ? "text-up" : "text-down"}>{long ? "Long" : "Short"}</span>
         <span className="text-mute">{tfLabel(t.interval)}</span>
-        <span className={clsx("rounded px-1 py-0.5 text-[10px]", st.cls)}>
-          {st.label}
-        </span>
+        <span className={clsx("rounded px-1 py-0.5 text-[10px]", st.cls)}>{st.label}</span>
         {t.source === "binance" && (
-          <span
-            className="rounded bg-yellow-400/15 px-1 py-0.5 text-[10px] text-yellow-300"
-            title="Added from your Binance position; closed here when it closes there"
-          >
+          <span className="rounded bg-yellow-400/15 px-1 py-0.5 text-[10px] text-yellow-300" title="Added from your Binance position; closed here when it closes there">
             Binance
           </span>
         )}
-        {t.data_source && t.data_source !== "binance" && (
-          <span className="rounded bg-yellow-400/15 px-1 py-0.5 text-[10px] text-yellow-300">
-            demo data
-          </span>
-        )}
+        {t.data_source && t.data_source !== "binance" && <span className="rounded bg-yellow-400/15 px-1 py-0.5 text-[10px] text-yellow-300">demo data</span>}
         <div className="flex-1" />
         {p.onToggleShown && (
-          <button
-            type="button"
-            className="btn-ghost h-6 w-6 p-0"
-            onClick={p.onToggleShown}
-            title={
-              p.shown
-                ? "Hide its lines on the chart"
-                : "Show its lines on the chart"
-            }
-          >
-            {p.shown ? (
-              <Eye className="h-3.5 w-3.5" />
-            ) : (
-              <EyeOff className="h-3.5 w-3.5" />
-            )}
+          <button type="button" className="btn-ghost h-6 w-6 p-0" onClick={p.onToggleShown} title={p.shown ? "Hide its lines on the chart" : "Show its lines on the chart"}>
+            {p.shown ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
           </button>
         )}
-        <button
-          type="button"
-          className="btn-ghost h-6 w-6 p-0"
-          onClick={p.onRemove}
-          title="Stop managing this trade"
-          aria-label="Remove"
-        >
+        <button type="button" className="btn-ghost h-6 w-6 p-0" onClick={p.onRemove} title="Stop managing this trade" aria-label="Remove">
           <Trash2 className="h-3.5 w-3.5" />
         </button>
       </div>
@@ -297,41 +223,21 @@ function TradeCard(p: {
         <span className="text-mute">Stop</span>
         <span className="text-down">
           {formatPrice(t.stop)}
-          {t.stop !== t.initial_stop && (
-            <span className="text-mute">
-              {" "}
-              (was {formatPrice(t.initial_stop)})
-            </span>
-          )}
+          {t.stop !== t.initial_stop && <span className="text-mute"> (was {formatPrice(t.initial_stop)})</span>}
         </span>
         <span className="text-mute">Now</span>
         <span className={(t.r_now ?? 0) >= 0 ? "text-up" : "text-down"}>
-          {t.last_price != null ? formatPrice(t.last_price) : "–"}{" "}
-          {t.status === "open" ? rText(t.r_now) : ""}
+          {t.last_price != null ? formatPrice(t.last_price) : "–"} {t.status === "open" ? rText(t.r_now) : ""}
         </span>
-        <span className="text-mute">
-          {t.status === "open" ? "Best" : "Result"}
-        </span>
-        <span
-          className={
-            (t.status === "open" ? t.max_r : (t.exit_r ?? 0)) >= 0
-              ? "text-up"
-              : "text-down"
-          }
-        >
+        <span className="text-mute">{t.status === "open" ? "Best" : "Result"}</span>
+        <span className={(t.status === "open" ? t.max_r : (t.exit_r ?? 0)) >= 0 ? "text-up" : "text-down"}>
           {t.status === "open" ? rText(t.max_r) : rText(t.exit_r)}
         </span>
       </div>
       {t.targets.length > 0 && (
         <p className="mt-0.5 font-mono text-[11px]">
           {t.targets.map((x, i) => (
-            <span
-              key={i}
-              className={clsx(
-                "mr-2",
-                i < t.targets_hit ? "text-mute line-through" : "text-up",
-              )}
-            >
+            <span key={i} className={clsx("mr-2", i < t.targets_hit ? "text-mute line-through" : "text-up")}>
               T{i + 1} {formatPrice(x)}
             </span>
           ))}
@@ -339,14 +245,7 @@ function TradeCard(p: {
       )}
 
       {fresh.map((a) => (
-        <AdviceRow
-          key={a.id}
-          a={a}
-          onDone={() => p.onPatch({ advice_id: a.id, advice_status: "done" })}
-          onDismiss={() =>
-            p.onPatch({ advice_id: a.id, advice_status: "dismissed" })
-          }
-        />
+        <AdviceRow key={a.id} a={a} onDone={() => p.onPatch({ advice_id: a.id, advice_status: "done" })} onDismiss={() => p.onPatch({ advice_id: a.id, advice_status: "dismissed" })} />
       ))}
       {older.map((a) => (
         <p key={a.id} className="mt-1 text-[11px] text-mute">
@@ -378,10 +277,7 @@ function TradeCard(p: {
             type="button"
             className="btn-ghost h-6 border border-line px-1.5"
             onClick={() => {
-              const v = window.prompt(
-                "Closed at what price?",
-                t.last_price != null ? String(t.last_price) : "",
-              );
+              const v = window.prompt("Closed at what price?", t.last_price != null ? String(t.last_price) : "");
               if (v && Number(v) > 0) p.onPatch({ close_price: Number(v) });
             }}
           >
@@ -389,9 +285,7 @@ function TradeCard(p: {
           </button>
           <select
             value={t.trail}
-            onChange={(e) =>
-              p.onPatch({ trail: e.target.value as ManagedTrade["trail"] })
-            }
+            onChange={(e) => p.onPatch({ trail: e.target.value as ManagedTrade["trail"] })}
             className="h-6 rounded border border-line bg-base px-1 text-ink outline-none"
             title="How it suggests trailing the stop once the trade is past T1 or +1R"
           >
@@ -405,54 +299,18 @@ function TradeCard(p: {
   );
 }
 
-function AdviceRow({
-  a,
-  onDone,
-  onDismiss,
-}: {
-  a: TradeAdvice;
-  onDone(): void;
-  onDismiss(): void;
-}) {
+function AdviceRow({ a, onDone, onDismiss }: { a: TradeAdvice; onDone(): void; onDismiss(): void }) {
   const urgent = a.kind === "stop" || a.kind === "structure";
   return (
-    <div
-      className={clsx(
-        "mt-1.5 rounded border px-2 py-1.5 text-[11px]",
-        urgent
-          ? "border-down/40 bg-down/10"
-          : "border-yellow-400/40 bg-yellow-400/10",
-      )}
-    >
+    <div className={clsx("mt-1.5 rounded border px-2 py-1.5 text-[11px]", urgent ? "border-down/40 bg-down/10" : "border-yellow-400/40 bg-yellow-400/10")}>
       <p className="text-ink">{a.text}</p>
       <div className="mt-1 flex items-center gap-1.5">
-        <span className="text-[10px] text-mute">
-          {new Date(a.time * 1000).toLocaleString([], {
-            month: "short",
-            day: "numeric",
-            hour: "2-digit",
-            minute: "2-digit",
-          })}
-        </span>
+        <span className="text-[10px] text-mute">{new Date(a.time * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
         <div className="flex-1" />
-        <button
-          type="button"
-          className="btn-ghost h-5 gap-1 border border-line px-1.5 text-[10px]"
-          onClick={onDone}
-          title={
-            a.suggested_stop != null
-              ? `Records your stop at ${formatPrice(a.suggested_stop)}`
-              : "Mark as done"
-          }
-        >
-          <Check className="h-3 w-3" />{" "}
-          {a.suggested_stop != null ? "Moved it" : "Done"}
+        <button type="button" className="btn-ghost h-5 gap-1 border border-line px-1.5 text-[10px]" onClick={onDone} title={a.suggested_stop != null ? `Records your stop at ${formatPrice(a.suggested_stop)}` : "Mark as done"}>
+          <Check className="h-3 w-3" /> {a.suggested_stop != null ? "Moved it" : "Done"}
         </button>
-        <button
-          type="button"
-          className="btn-ghost h-5 border border-line px-1.5 text-[10px]"
-          onClick={onDismiss}
-        >
+        <button type="button" className="btn-ghost h-5 border border-line px-1.5 text-[10px]" onClick={onDismiss}>
           Ignore
         </button>
       </div>
@@ -470,23 +328,10 @@ interface BinancePosition {
   market: "spot" | "futures";
 }
 
-function AddTrade(p: {
-  symbol: string;
-  interval: Interval;
-  price: number | null;
-  onAdded(t: ManagedTrade): void;
-}) {
+function AddTrade(p: { symbol: string; interval: Interval; price: number | null; onAdded(t: ManagedTrade): void }) {
   const [journal, setJournal] = useState<JournalEntry[] | null>(null);
-  const [tf, setTf] = useState<Interval>(
-    MANAGE_TFS.includes(p.interval) ? p.interval : "15m",
-  );
-  const [f, setF] = useState({
-    symbol: p.symbol,
-    direction: "long" as "long" | "short",
-    entry: p.price ? String(p.price) : "",
-    stop: "",
-    targets: "",
-  });
+  const [tf, setTf] = useState<Interval>(MANAGE_TFS.includes(p.interval) ? p.interval : "15m");
+  const [f, setF] = useState({ symbol: p.symbol, direction: "long" as "long" | "short", entry: p.price ? String(p.price) : "", stop: "", targets: "" });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [positions, setPositions] = useState<BinancePosition[]>([]);
@@ -496,13 +341,7 @@ function AddTrade(p: {
   useEffect(() => {
     const ctrl = new AbortController();
     fetchJournal(ctrl.signal)
-      .then((r) =>
-        setJournal(
-          r.entries.filter(
-            (e) => e.evaluation.status === "open" && e.stop != null,
-          ),
-        ),
-      )
+      .then((r) => setJournal(r.entries.filter((e) => e.evaluation.status === "open" && e.stop != null)))
       .catch(() => setJournal([]));
     // Only the user's own positions: holdings and positions classed as a bot's are left out. No key = no list.
     fetchAccountPositions(false, ctrl.signal)
@@ -510,22 +349,8 @@ function AddTrade(p: {
         setPositions([
           ...r.manual.spot
             .filter((h) => h.own_qty > 0 && (h.value == null || h.value >= 5))
-            .map((h) => ({
-              key: h.key,
-              symbol: h.symbol,
-              direction: "long" as const,
-              qty: h.own_qty,
-              entry: h.avg_entry,
-              market: "spot" as const,
-            })),
-          ...r.manual.futures.map((f) => ({
-            key: f.key,
-            symbol: f.symbol,
-            direction: f.side,
-            qty: f.qty,
-            entry: f.entry_price || null,
-            market: "futures" as const,
-          })),
+            .map((h) => ({ key: h.key, symbol: h.symbol, direction: "long" as const, qty: h.own_qty, entry: h.avg_entry, market: "spot" as const })),
+          ...r.manual.futures.map((f) => ({ key: f.key, symbol: f.symbol, direction: f.side, qty: f.qty, entry: f.entry_price || null, market: "futures" as const })),
         ]),
       )
       .catch(() => setPositions([]));
@@ -534,13 +359,7 @@ function AddTrade(p: {
 
   const pick = (b: BinancePosition) => {
     setPicked(b);
-    setF({
-      symbol: b.symbol,
-      direction: b.direction,
-      entry: b.entry ? String(b.entry) : "",
-      stop: "",
-      targets: "",
-    });
+    setF({ symbol: b.symbol, direction: b.direction, entry: b.entry ? String(b.entry) : "", stop: "", targets: "" });
   };
 
   const submit = async (body: Parameters<typeof manageTrade>[0]) => {
@@ -555,17 +374,12 @@ function AddTrade(p: {
     }
   };
 
-  const input =
-    "h-7 rounded border border-line bg-base px-2 font-mono text-[12px] text-ink outline-none focus:border-accent";
+  const input = "h-7 rounded border border-line bg-base px-2 font-mono text-[12px] text-ink outline-none focus:border-accent";
   return (
     <div className="rounded-md border border-accent/40 bg-panel2/40 p-2">
       <div className="mb-2 flex items-center gap-2 text-[11px]">
         <span className="text-mute">Manage on</span>
-        <select
-          value={tf}
-          onChange={(e) => setTf(e.target.value as Interval)}
-          className="h-6 rounded border border-line bg-base px-1 text-ink outline-none"
-        >
+        <select value={tf} onChange={(e) => setTf(e.target.value as Interval)} className="h-6 rounded border border-line bg-base px-1 text-ink outline-none">
           {MANAGE_TFS.map((v) => (
             <option key={v} value={v}>
               {tfLabel(v)}
@@ -577,10 +391,7 @@ function AddTrade(p: {
 
       {positions.length > 0 && (
         <>
-          <p className="mb-1 text-[11px] text-mute">
-            Your positions on Binance (bots&apos; holdings left out). Pick one,
-            then add its stop:
-          </p>
+          <p className="mb-1 text-[11px] text-mute">Your positions on Binance (bots&apos; holdings left out). Pick one, then add its stop:</p>
           {positions.map((b) => (
             <button
               key={b.key}
@@ -592,17 +403,10 @@ function AddTrade(p: {
                 picked?.key === b.key ? "border-accent" : "border-line",
               )}
             >
-              <span className="font-medium text-ink">
-                {displaySymbol(b.symbol)}
-              </span>
-              <span
-                className={b.direction === "long" ? "text-up" : "text-down"}
-              >
-                {b.market === "spot" ? "spot" : b.direction}
-              </span>
+              <span className="font-medium text-ink">{displaySymbol(b.symbol)}</span>
+              <span className={b.direction === "long" ? "text-up" : "text-down"}>{b.market === "spot" ? "spot" : b.direction}</span>
               <span className="font-mono text-mute">
-                {formatPrice(b.qty)}{" "}
-                {b.entry ? `@ ${formatPrice(b.entry)}` : "· entry unknown"}
+                {formatPrice(b.qty)} {b.entry ? `@ ${formatPrice(b.entry)}` : "· entry unknown"}
               </span>
             </button>
           ))}
@@ -611,9 +415,7 @@ function AddTrade(p: {
 
       {journal && journal.length > 0 && (
         <>
-          <p className="mb-1 text-[11px] text-mute">
-            Open trades in your journal:
-          </p>
+          <p className="mb-1 text-[11px] text-mute">Open trades in your journal:</p>
           {journal.map((e) => (
             <button
               key={e.id}
@@ -622,14 +424,8 @@ function AddTrade(p: {
               onClick={() => void submit({ journal_id: e.id, interval: tf })}
               className="mb-1 flex w-full items-center gap-2 rounded border border-line px-2 py-1 text-left text-[11px] hover:border-accent/60"
             >
-              <span className="font-medium text-ink">
-                {displaySymbol(e.symbol)}
-              </span>
-              <span
-                className={e.direction === "long" ? "text-up" : "text-down"}
-              >
-                {e.direction}
-              </span>
+              <span className="font-medium text-ink">{displaySymbol(e.symbol)}</span>
+              <span className={e.direction === "long" ? "text-up" : "text-down"}>{e.direction}</span>
               <span className="font-mono text-mute">
                 {formatPrice(e.entry)} · stop {formatPrice(e.stop ?? 0)}
               </span>
@@ -637,24 +433,14 @@ function AddTrade(p: {
           ))}
         </>
       )}
-      {(positions.length > 0 || (journal && journal.length > 0)) && (
-        <p className="mb-1 mt-2 text-[11px] text-mute">Or type it in:</p>
-      )}
+      {(positions.length > 0 || (journal && journal.length > 0)) && <p className="mb-1 mt-2 text-[11px] text-mute">Or type it in:</p>}
 
       <form
         className="grid grid-cols-2 gap-1.5"
         onSubmit={(ev) => {
           ev.preventDefault();
-          const targets = f.targets
-            .split(/[\s,]+/)
-            .map(Number)
-            .filter((x) => x > 0);
-          const from =
-            picked &&
-            picked.symbol === f.symbol &&
-            picked.direction === f.direction
-              ? picked
-              : null;
+          const targets = f.targets.split(/[\s,]+/).map(Number).filter((x) => x > 0);
+          const from = picked && picked.symbol === f.symbol && picked.direction === f.direction ? picked : null;
           void submit({
             symbol: f.symbol,
             interval: tf,
@@ -662,62 +448,19 @@ function AddTrade(p: {
             entry: Number(f.entry),
             stop: Number(f.stop),
             targets,
-            ...(from
-              ? {
-                  source: "binance" as const,
-                  source_id: from.key,
-                  qty: from.qty,
-                }
-              : {}),
+            ...(from ? { source: "binance" as const, source_id: from.key, qty: from.qty } : {}),
           });
         }}
       >
-        <input
-          className={input}
-          value={f.symbol}
-          onChange={(e) => setF({ ...f, symbol: e.target.value.toUpperCase() })}
-          placeholder="INJUSDT"
-          aria-label="Symbol"
-        />
-        <select
-          className={input}
-          value={f.direction}
-          onChange={(e) =>
-            setF({ ...f, direction: e.target.value as "long" | "short" })
-          }
-          aria-label="Direction"
-        >
+        <input className={input} value={f.symbol} onChange={(e) => setF({ ...f, symbol: e.target.value.toUpperCase() })} placeholder="INJUSDT" aria-label="Symbol" />
+        <select className={input} value={f.direction} onChange={(e) => setF({ ...f, direction: e.target.value as "long" | "short" })} aria-label="Direction">
           <option value="long">Long</option>
           <option value="short">Short</option>
         </select>
-        <input
-          className={input}
-          value={f.entry}
-          onChange={(e) => setF({ ...f, entry: e.target.value })}
-          placeholder="Entry"
-          inputMode="decimal"
-          aria-label="Entry"
-        />
-        <input
-          className={input}
-          value={f.stop}
-          onChange={(e) => setF({ ...f, stop: e.target.value })}
-          placeholder="Stop"
-          inputMode="decimal"
-          aria-label="Stop"
-        />
-        <input
-          className={clsx(input, "col-span-2")}
-          value={f.targets}
-          onChange={(e) => setF({ ...f, targets: e.target.value })}
-          placeholder="Targets, e.g. 7.95 8.20"
-          aria-label="Targets"
-        />
-        <button
-          type="submit"
-          disabled={busy || !Number(f.entry) || !Number(f.stop)}
-          className="col-span-2 h-7 rounded bg-accent text-[12px] text-white disabled:opacity-50"
-        >
+        <input className={input} value={f.entry} onChange={(e) => setF({ ...f, entry: e.target.value })} placeholder="Entry" inputMode="decimal" aria-label="Entry" />
+        <input className={input} value={f.stop} onChange={(e) => setF({ ...f, stop: e.target.value })} placeholder="Stop" inputMode="decimal" aria-label="Stop" />
+        <input className={clsx(input, "col-span-2")} value={f.targets} onChange={(e) => setF({ ...f, targets: e.target.value })} placeholder="Targets, e.g. 7.95 8.20" aria-label="Targets" />
+        <button type="submit" disabled={busy || !Number(f.entry) || !Number(f.stop)} className="col-span-2 h-7 rounded bg-accent text-[12px] text-white disabled:opacity-50">
           {busy ? "Adding…" : "Manage this trade"}
         </button>
       </form>

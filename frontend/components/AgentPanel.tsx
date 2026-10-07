@@ -21,35 +21,13 @@ import {
   Trash2,
   User,
 } from "lucide-react";
-import {
-  Fragment,
-  useEffect,
-  useImperativeHandle,
-  useRef,
-  useState,
-  type ReactNode,
-  type Ref,
-} from "react";
+import { Fragment, useEffect, useImperativeHandle, useRef, useState, type ReactNode, type Ref } from "react";
 
 import { usePersistentState } from "@/hooks/usePersistentState";
 import { searchSessions, type ChatSession } from "@/lib/chatHistory";
 import { displaySymbol, formatPct, formatPrice } from "@/lib/format";
-import {
-  DEFAULT_SIZING,
-  orderText,
-  qtyText,
-  sizePlan,
-  type SizingSettings,
-} from "@/lib/sizing";
-import {
-  TIMEFRAMES,
-  type Interval,
-  type MarketSetup,
-  type Overlay,
-  type ScanResult,
-  type TradePlan,
-  type TriggerInterval,
-} from "@/lib/types";
+import { DEFAULT_SIZING, orderText, qtyText, sizePlan, type SizingSettings } from "@/lib/sizing";
+import { TIMEFRAMES, type Interval, type MarketSetup, type Overlay, type ScanResult, type TradePlan, type TriggerInterval } from "@/lib/types";
 
 import { SetupList } from "./ScannerPanel";
 import TrackRecordLine from "./TrackRecordLine";
@@ -87,13 +65,7 @@ const SUGGESTIONS = [
   "Open BTC daily and show key levels",
 ];
 
-const FOLLOW_UPS = [
-  "Also show swings",
-  "Same on daily",
-  "Does the daily agree?",
-  "Alert me on these levels",
-  "Add RSI",
-];
+const FOLLOW_UPS = ["Also show swings", "Same on daily", "Does the daily agree?", "Alert me on these levels", "Add RSI"];
 
 /** Prices in an answer in bold: numbers with decimals or thousands separators within ±60% of the last price. */
 function emphasize(text: string, last: number | undefined): ReactNode {
@@ -104,12 +76,7 @@ function emphasize(text: string, last: number | undefined): ReactNode {
   for (const m of text.matchAll(re)) {
     const v = Number(m[0].replace(/,/g, ""));
     if (!(v > last * 0.4 && v < last * 1.6)) continue;
-    out.push(
-      text.slice(i, m.index),
-      <strong key={m.index} className="font-semibold text-white">
-        {m[0]}
-      </strong>,
-    );
+    out.push(text.slice(i, m.index), <strong key={m.index} className="font-semibold text-white">{m[0]}</strong>);
     i = (m.index ?? 0) + m[0].length;
   }
   out.push(text.slice(i));
@@ -128,36 +95,19 @@ function PlanCard({
   /** Arms a trigger alert: a `tf` confirmation inside the plan's entry zone. */
   onTrigger?(tf: TriggerInterval): Promise<boolean>;
 }) {
-  const [sizing] = usePersistentState<SizingSettings>(
-    "ac:sizing",
-    DEFAULT_SIZING,
-  );
+  const [sizing] = usePersistentState<SizingSettings>("ac:sizing", DEFAULT_SIZING);
   const [copied, setCopied] = useState(false);
-  const [logged, setLogged] = useState<"idle" | "busy" | "done" | "error">(
-    "idle",
-  );
-  const [triggerTf, setTriggerTf] = usePersistentState<TriggerInterval>(
-    "ac:plan-trigger-tf",
-    "5m",
-  );
-  const [armed, setArmed] = useState<"idle" | "busy" | "done" | "error">(
-    "idle",
-  );
-  const zone =
-    plan.zone_low != null && plan.zone_high != null
-      ? [plan.zone_low, plan.zone_high]
-      : null;
+  const [logged, setLogged] = useState<"idle" | "busy" | "done" | "error">("idle");
+  const [triggerTf, setTriggerTf] = usePersistentState<TriggerInterval>("ac:plan-trigger-tf", "5m");
+  const [armed, setArmed] = useState<"idle" | "busy" | "done" | "error">("idle");
+  const zone = plan.zone_low != null && plan.zone_high != null ? [plan.zone_low, plan.zone_high] : null;
   const long = plan.direction === "long";
   const sized = sizePlan(plan, sizing);
   return (
     <div className="mt-1.5 rounded-md border border-line bg-base/60 p-2 text-[11px]">
       <div className="mb-1 flex items-center gap-1.5">
-        <Target
-          className={clsx("h-3.5 w-3.5", long ? "text-up" : "text-down")}
-        />
-        <span className={clsx("font-semibold", long ? "text-up" : "text-down")}>
-          {long ? "Long" : "Short"} plan
-        </span>
+        <Target className={clsx("h-3.5 w-3.5", long ? "text-up" : "text-down")} />
+        <span className={clsx("font-semibold", long ? "text-up" : "text-down")}>{long ? "Long" : "Short"} plan</span>
         <span className="truncate text-mute">from {plan.basis}</span>
       </div>
       <div className="grid grid-cols-[auto_1fr_auto_auto] gap-x-3 gap-y-0.5 font-mono">
@@ -168,38 +118,28 @@ function PlanCard({
         <span className="text-mute">Stop</span>
         <span className="text-down">{formatPrice(plan.stop)}</span>
         <span className="text-mute">−{plan.risk_pct}%</span>
-        <span className="text-down">
-          {sized ? `−$${sized.riskUsd.toFixed(2)}` : ""}
-        </span>
+        <span className="text-down">{sized ? `−$${sized.riskUsd.toFixed(2)}` : ""}</span>
         {plan.targets.map((t, i) => (
           <Fragment key={t.label}>
             <span className="text-mute">{t.label.split(" ")[0]}</span>
             <span className="text-up">{formatPrice(t.price)}</span>
             <span className="text-ink">{t.rr}R</span>
-            <span className="text-up">
-              {sized ? `+$${sized.targets[i].pnlUsd.toFixed(2)}` : ""}
-            </span>
+            <span className="text-up">{sized ? `+$${sized.targets[i].pnlUsd.toFixed(2)}` : ""}</span>
           </Fragment>
         ))}
       </div>
       {sized && symbol && (
         <div className="mt-1.5 border-t border-line pt-1.5 text-mute">
-          Size <span className="font-mono text-ink">{qtyText(sized.qty)}</span>{" "}
-          (~${sized.notional.toFixed(0)}) for {sizing.riskPct}% risk of $
-          {sizing.account.toLocaleString()}
-          {sized.leverage > 1 && <> · needs {sized.leverage.toFixed(1)}x</>} ·
-          fees ~${sized.feesUsd.toFixed(2)}
+          Size <span className="font-mono text-ink">{qtyText(sized.qty)}</span> (~${sized.notional.toFixed(0)}) for{" "}
+          {sizing.riskPct}% risk of ${sizing.account.toLocaleString()}
+          {sized.leverage > 1 && <> · needs {sized.leverage.toFixed(1)}x</>} · fees ~${sized.feesUsd.toFixed(2)}
         </div>
       )}
       {sized?.warnings.map((w) => (
-        <p key={w} className="mt-1 text-yellow-300">
-          {w}
-        </p>
+        <p key={w} className="mt-1 text-yellow-300">{w}</p>
       ))}
       {plan.notes.map((n) => (
-        <p key={n} className="mt-1 text-mute">
-          {n}
-        </p>
+        <p key={n} className="mt-1 text-mute">{n}</p>
       ))}
       {plan.track_record && <TrackRecordLine tr={plan.track_record} />}
       {symbol && (
@@ -209,19 +149,13 @@ function PlanCard({
             className="btn-ghost h-6 border border-line px-1.5 text-[11px]"
             title="Copy entry, stop, targets and size as one line"
             onClick={() => {
-              void navigator.clipboard
-                ?.writeText(orderText(plan, symbol, sized, sizing))
-                .then(() => {
-                  setCopied(true);
-                  setTimeout(() => setCopied(false), 1500);
-                });
+              void navigator.clipboard?.writeText(orderText(plan, symbol, sized, sizing)).then(() => {
+                setCopied(true);
+                setTimeout(() => setCopied(false), 1500);
+              });
             }}
           >
-            {copied ? (
-              <Check className="h-3.5 w-3.5 text-up" />
-            ) : (
-              <ClipboardCopy className="h-3.5 w-3.5" />
-            )}
+            {copied ? <Check className="h-3.5 w-3.5 text-up" /> : <ClipboardCopy className="h-3.5 w-3.5" />}
             {copied ? "Copied" : "Copy order"}
           </button>
           {onLog && (
@@ -235,16 +169,8 @@ function PlanCard({
                 setLogged((await onLog()) ? "done" : "error");
               }}
             >
-              {logged === "done" ? (
-                <Check className="h-3.5 w-3.5 text-up" />
-              ) : (
-                <NotebookPen className="h-3.5 w-3.5" />
-              )}
-              {logged === "done"
-                ? "In journal"
-                : logged === "error"
-                  ? "Not saved, retry"
-                  : "Log trade"}
+              {logged === "done" ? <Check className="h-3.5 w-3.5 text-up" /> : <NotebookPen className="h-3.5 w-3.5" />}
+              {logged === "done" ? "In journal" : logged === "error" ? "Not saved, retry" : "Log trade"}
             </button>
           )}
           {onTrigger && zone && (
@@ -259,16 +185,8 @@ function PlanCard({
                   setArmed((await onTrigger(triggerTf)) ? "done" : "error");
                 }}
               >
-                {armed === "done" ? (
-                  <Check className="h-3.5 w-3.5 text-up" />
-                ) : (
-                  <Bell className="h-3.5 w-3.5" />
-                )}
-                {armed === "done"
-                  ? "Trigger set"
-                  : armed === "error"
-                    ? "Not saved, retry"
-                    : `Alert on ${triggerTf} confirmation`}
+                {armed === "done" ? <Check className="h-3.5 w-3.5 text-up" /> : <Bell className="h-3.5 w-3.5" />}
+                {armed === "done" ? "Trigger set" : armed === "error" ? "Not saved, retry" : `Alert on ${triggerTf} confirmation`}
               </button>
               <select
                 aria-label="Trigger timeframe"
@@ -291,13 +209,7 @@ function PlanCard({
   );
 }
 
-function ScanTable({
-  rows,
-  onPick,
-}: {
-  rows: ScanResult[];
-  onPick(symbol: string): void;
-}) {
+function ScanTable({ rows, onPick }: { rows: ScanResult[]; onPick(symbol: string): void }) {
   return (
     <div className="mt-1.5 overflow-hidden rounded-md border border-line">
       {rows.slice(0, 10).map((r) => (
@@ -308,20 +220,11 @@ function ScanTable({
           className="flex w-full items-start gap-2 border-b border-line px-2 py-1 text-left text-[11px] last:border-b-0 hover:bg-panel2"
           title={`Open ${displaySymbol(r.symbol)}`}
         >
-          <span className="w-20 shrink-0 font-medium text-ink">
-            {displaySymbol(r.symbol)}
-          </span>
-          <span
-            className={clsx(
-              "w-14 shrink-0 font-mono",
-              (r.change_pct ?? 0) >= 0 ? "text-up" : "text-down",
-            )}
-          >
+          <span className="w-20 shrink-0 font-medium text-ink">{displaySymbol(r.symbol)}</span>
+          <span className={clsx("w-14 shrink-0 font-mono", (r.change_pct ?? 0) >= 0 ? "text-up" : "text-down")}>
             {formatPct(r.change_pct)}
           </span>
-          <span className="min-w-0 flex-1 truncate text-mute">
-            {r.signals.slice(0, 2).join(" · ") || r.trend}
-          </span>
+          <span className="min-w-0 flex-1 truncate text-mute">{r.signals.slice(0, 2).join(" · ") || r.trend}</span>
         </button>
       ))}
     </div>
@@ -364,15 +267,10 @@ export default function AgentPanel(p: Props) {
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
-  useImperativeHandle(p.handleRef, () => ({
-    focus: () => inputRef.current?.focus(),
-  }));
+  useImperativeHandle(p.handleRef, () => ({ focus: () => inputRef.current?.focus() }));
 
   useEffect(() => {
-    listRef.current?.scrollTo({
-      top: listRef.current.scrollHeight,
-      behavior: "smooth",
-    });
+    listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: "smooth" });
   }, [p.messages.length, p.busy]);
 
   const submit = (text: string) => {
@@ -385,27 +283,17 @@ export default function AgentPanel(p: Props) {
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex shrink-0 items-center gap-1 border-b border-line px-3 py-1.5 text-[11px] text-mute">
-        <span className="truncate">
-          Draws levels, plans trades, switches charts, scans your watchlist
-        </span>
+        <span className="truncate">Draws levels, plans trades, switches charts, scans your watchlist</span>
         <div className="flex-1" />
         {p.overlayCount > 0 && (
-          <button
-            type="button"
-            onClick={p.onClearOverlays}
-            className="btn-ghost h-6 shrink-0 gap-1 px-1.5 text-[11px]"
-            title="Remove the agent's drawings from this chart (Ctrl+Z brings them back)"
-          >
+          <button type="button" onClick={p.onClearOverlays} className="btn-ghost h-6 shrink-0 gap-1 px-1.5 text-[11px]" title="Remove the agent's drawings from this chart (Ctrl+Z brings them back)">
             <Eraser className="h-3.5 w-3.5" /> Clear {p.overlayCount}
           </button>
         )}
         <button
           type="button"
           onClick={() => setShowHistory((v) => !v)}
-          className={clsx(
-            "btn-ghost h-6 shrink-0 gap-1 px-1.5 text-[11px]",
-            showHistory && "text-accent",
-          )}
+          className={clsx("btn-ghost h-6 shrink-0 gap-1 px-1.5 text-[11px]", showHistory && "text-accent")}
           title="Past conversations"
           aria-pressed={showHistory}
         >
@@ -439,39 +327,25 @@ export default function AgentPanel(p: Props) {
         />
       ) : (
         <>
-          <div
-            ref={listRef}
-            className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3 text-[13px] leading-relaxed"
-          >
+          <div ref={listRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3 text-[13px] leading-relaxed">
             {p.messages.length === 0 && !p.busy && (
               <p className="text-[12px] text-mute">
-                Ask in plain English. The agent finds zones, swings and
-                liquidity, builds trade plans, sets alerts, reads Kimi Cooked
-                and your watchlist. Every price it draws comes from the
-                detectors, never from the model.
+                Ask in plain English. The agent finds zones, swings and liquidity, builds trade plans, sets alerts, reads
+                Kimi Cooked and your watchlist. Every price it draws comes from the detectors, never from the model.
               </p>
             )}
             {p.messages.map((m) => {
               const isPinned = p.pinned.has(m.id);
-              const drawable =
-                m.role === "agent" && !!m.overlays?.length && !!m.symbol;
+              const drawable = m.role === "agent" && !!m.overlays?.length && !!m.symbol;
               return (
                 <div key={m.id} className="group flex gap-2">
                   <div
                     className={clsx(
                       "mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded-full",
-                      m.role === "user"
-                        ? "bg-panel2 text-mute"
-                        : m.role === "error"
-                          ? "bg-down/20 text-down"
-                          : "bg-accent/20 text-accent",
+                      m.role === "user" ? "bg-panel2 text-mute" : m.role === "error" ? "bg-down/20 text-down" : "bg-accent/20 text-accent",
                     )}
                   >
-                    {m.role === "user" ? (
-                      <User className="h-3 w-3" />
-                    ) : (
-                      <Bot className="h-3 w-3" />
-                    )}
+                    {m.role === "user" ? <User className="h-3 w-3" /> : <Bot className="h-3 w-3" />}
                   </div>
                   <div className="min-w-0 flex-1">
                     {m.steps && (
@@ -483,46 +357,21 @@ export default function AgentPanel(p: Props) {
                         ))}
                       </ul>
                     )}
-                    <p
-                      className={clsx(
-                        m.role === "user"
-                          ? "text-mute"
-                          : m.role === "error"
-                            ? "text-down"
-                            : "text-ink",
-                      )}
-                    >
-                      {m.role === "agent"
-                        ? emphasize(m.text, m.lastPrice)
-                        : m.text}
+                    <p className={clsx(m.role === "user" ? "text-mute" : m.role === "error" ? "text-down" : "text-ink")}>
+                      {m.role === "agent" ? emphasize(m.text, m.lastPrice) : m.text}
                     </p>
                     {m.plan && (
                       <PlanCard
                         plan={m.plan}
                         symbol={m.symbol}
-                        onLog={
-                          p.onLogTrade ? () => p.onLogTrade!(m) : undefined
-                        }
-                        onTrigger={
-                          p.onPlanTrigger
-                            ? (tf) => p.onPlanTrigger!(m, tf)
-                            : undefined
-                        }
+                        onLog={p.onLogTrade ? () => p.onLogTrade!(m) : undefined}
+                        onTrigger={p.onPlanTrigger ? (tf) => p.onPlanTrigger!(m, tf) : undefined}
                       />
                     )}
-                    {m.scan && (
-                      <ScanTable rows={m.scan} onPick={p.onPickSymbol} />
-                    )}
+                    {m.scan && <ScanTable rows={m.scan} onPick={p.onPickSymbol} />}
                     {m.setups && (
                       <div className="mt-1.5">
-                        <SetupList
-                          rows={m.setups}
-                          onPick={(s) =>
-                            p.onOpenSetup
-                              ? p.onOpenSetup(s)
-                              : p.onPickSymbol(s.symbol)
-                          }
-                        />
+                        <SetupList rows={m.setups} onPick={(s) => (p.onOpenSetup ? p.onOpenSetup(s) : p.onPickSymbol(s.symbol))} />
                       </div>
                     )}
                     {m.overlays && m.overlays.length > 0 && (
@@ -530,14 +379,8 @@ export default function AgentPanel(p: Props) {
                         {m.overlays
                           .filter((o) => o.type !== "marker" && o.label)
                           .map((o, i) => (
-                            <span
-                              key={o.id ?? i}
-                              className="inline-flex items-center gap-1 rounded bg-panel2 px-1.5 py-0.5 text-[11px] text-ink/80"
-                            >
-                              <span
-                                className="h-2 w-2 rounded-sm"
-                                style={{ background: swatch(o) }}
-                              />
+                            <span key={o.id ?? i} className="inline-flex items-center gap-1 rounded bg-panel2 px-1.5 py-0.5 text-[11px] text-ink/80">
+                              <span className="h-2 w-2 rounded-sm" style={{ background: swatch(o) }} />
                               {o.label}
                             </span>
                           ))}
@@ -545,35 +388,22 @@ export default function AgentPanel(p: Props) {
                     )}
                     {m.alerts ? (
                       <p className="mt-1 inline-flex items-center gap-1 text-[11px] text-yellow-300">
-                        <Bell className="h-3 w-3" /> {m.alerts} alert
-                        {m.alerts === 1 ? "" : "s"} armed
+                        <Bell className="h-3 w-3" /> {m.alerts} alert{m.alerts === 1 ? "" : "s"} armed
                       </p>
                     ) : null}
                     <div className="mt-1 flex items-center gap-2">
-                      {m.meta && (
-                        <p className="text-[10px] text-mute">{m.meta}</p>
-                      )}
+                      {m.meta && <p className="text-[10px] text-mute">{m.meta}</p>}
                       {drawable && (
                         <button
                           type="button"
                           onClick={() => p.onTogglePin(m)}
                           className={clsx(
                             "ml-auto inline-flex shrink-0 items-center gap-1 rounded px-1 py-0.5 text-[10px]",
-                            isPinned
-                              ? "bg-accent/15 text-accent"
-                              : "text-mute opacity-70 hover:bg-panel2 hover:text-ink group-hover:opacity-100",
+                            isPinned ? "bg-accent/15 text-accent" : "text-mute opacity-70 hover:bg-panel2 hover:text-ink group-hover:opacity-100",
                           )}
-                          title={
-                            isPinned
-                              ? "Unpin: these drawings go when the next answer replaces them"
-                              : `Keep these drawings on ${displaySymbol(m.symbol!)} when you ask something else`
-                          }
+                          title={isPinned ? "Unpin: these drawings go when the next answer replaces them" : `Keep these drawings on ${displaySymbol(m.symbol!)} when you ask something else`}
                         >
-                          {isPinned ? (
-                            <PinOff className="h-3 w-3" />
-                          ) : (
-                            <Pin className="h-3 w-3" />
-                          )}
+                          {isPinned ? <PinOff className="h-3 w-3" /> : <Pin className="h-3 w-3" />}
                           {isPinned ? "Pinned" : "Pin"}
                         </button>
                       )}
@@ -584,8 +414,7 @@ export default function AgentPanel(p: Props) {
             })}
             {p.busy && (
               <div className="flex items-center gap-2 text-mute">
-                <Loader2 className="h-4 w-4 animate-spin" /> Analysing market
-                structure…
+                <Loader2 className="h-4 w-4 animate-spin" /> Analysing market structure…
               </div>
             )}
           </div>
@@ -623,11 +452,7 @@ export default function AgentPanel(p: Props) {
                   submit(value);
                 }
               }}
-              placeholder={
-                p.messages.length
-                  ? 'Follow up, e.g. "same on ETH", "line at 25.4" or "alert me at the entry"'
-                  : 'Ask the agent, e.g. "Which of my coins are near demand?"'
-              }
+              placeholder={p.messages.length ? 'Follow up, e.g. "same on ETH", "line at 25.4" or "alert me at the entry"' : 'Ask the agent, e.g. "Which of my coins are near demand?"'}
               className="min-h-9 flex-1 resize-none rounded-lg border border-line bg-base px-3 py-2 text-sm text-ink outline-none placeholder:text-mute focus:border-accent/60"
               aria-label="Agent prompt"
             />
@@ -637,11 +462,7 @@ export default function AgentPanel(p: Props) {
               className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-accent text-white transition-opacity disabled:opacity-40"
               aria-label="Send"
             >
-              {p.busy ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <SendHorizontal className="h-4 w-4" />
-              )}
+              {p.busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <SendHorizontal className="h-4 w-4" />}
             </button>
           </form>
         </>
@@ -660,24 +481,13 @@ function ago(ms: number): string {
 }
 
 /** Past conversations, newest first: open one to read it and carry on, or delete it. */
-function ChatHistory(p: {
-  chats: ChatSession[];
-  onBack(): void;
-  onOpen(id: string): void;
-  onDelete(id: string): void;
-}) {
+function ChatHistory(p: { chats: ChatSession[]; onBack(): void; onOpen(id: string): void; onDelete(id: string): void }) {
   const [query, setQuery] = useState("");
   const shown = searchSessions(p.chats, query);
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex shrink-0 items-center gap-2 px-3 py-2">
-        <button
-          type="button"
-          onClick={p.onBack}
-          className="btn-ghost h-7 w-7 shrink-0 p-0"
-          title="Back to the conversation"
-          aria-label="Back"
-        >
+        <button type="button" onClick={p.onBack} className="btn-ghost h-7 w-7 shrink-0 p-0" title="Back to the conversation" aria-label="Back">
           <ArrowLeft className="h-4 w-4" />
         </button>
         <label className="flex h-7 min-w-0 flex-1 items-center gap-1.5 rounded-md border border-line bg-base px-2 focus-within:border-accent/60">
@@ -694,30 +504,17 @@ function ChatHistory(p: {
       <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
         {shown.length === 0 && (
           <p className="pt-2 text-[12px] text-mute">
-            {p.chats.length
-              ? "No conversation matches."
-              : "No past conversations yet. Starting a new one keeps the current one here."}
+            {p.chats.length ? "No conversation matches." : "No past conversations yet. Starting a new one keeps the current one here."}
           </p>
         )}
         {shown.map((c) => {
-          const tf =
-            TIMEFRAMES.find((t) => t.value === c.interval)?.label ?? c.interval;
+          const tf = TIMEFRAMES.find((t) => t.value === c.interval)?.label ?? c.interval;
           return (
-            <div
-              key={c.id}
-              className="group flex items-start gap-1 border-b border-line last:border-b-0"
-            >
-              <button
-                type="button"
-                onClick={() => p.onOpen(c.id)}
-                className="min-w-0 flex-1 py-2 text-left hover:text-white"
-                title="Open and continue this conversation"
-              >
+            <div key={c.id} className="group flex items-start gap-1 border-b border-line last:border-b-0">
+              <button type="button" onClick={() => p.onOpen(c.id)} className="min-w-0 flex-1 py-2 text-left hover:text-white" title="Open and continue this conversation">
                 <p className="truncate text-[12px] text-ink">{c.title}</p>
                 <p className="text-[10px] text-mute">
-                  {c.symbol
-                    ? `${displaySymbol(c.symbol)}${tf ? ` ${tf}` : ""} · `
-                    : ""}
+                  {c.symbol ? `${displaySymbol(c.symbol)}${tf ? ` ${tf}` : ""} · ` : ""}
                   {c.messages.length} messages · {ago(c.updatedAt)}
                 </p>
               </button>

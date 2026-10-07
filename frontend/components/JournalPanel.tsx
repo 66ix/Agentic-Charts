@@ -579,6 +579,12 @@ function ReviewView() {
       </div>
       {error && <p className="text-[11px] text-down">{error}</p>}
       {!review && !error && <Loader2 className="mx-auto h-4 w-4 animate-spin text-mute" />}
+      {review && review.imported_without_stop > 0 && (
+        <p className="text-[11px] text-mute">
+          {review.imported_without_stop} imported Binance trade{review.imported_without_stop > 1 ? "s" : ""} without a stop (
+          {(review.imported_pnl ?? 0) >= 0 ? "+" : "-"}${Math.abs(review.imported_pnl ?? 0).toFixed(2)}), not in the R numbers.
+        </p>
+      )}
       {review && (review.closed === 0 ? (
         <p className="text-[12px] leading-relaxed text-mute">
           No trades closed in the last {review.days} days{review.open ? ` (${review.open} still open)` : ""}. Each closed trade

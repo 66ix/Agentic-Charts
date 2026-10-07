@@ -279,6 +279,9 @@ export interface WeeklyReview {
   }[];
   missing_postmortems: number;
   open: number;
+  /** Closed trades imported from Binance without a stop: not in the R numbers, only counted with their PnL. */
+  imported_without_stop: number;
+  imported_pnl: number | null;
   data_source: string;
   /** The message the schedule sends. */
   text: string;

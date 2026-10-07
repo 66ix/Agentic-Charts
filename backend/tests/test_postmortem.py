@@ -15,8 +15,8 @@ import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app.config import get_settings  # noqa: E402
-from app.journal import (JournalEntry, JournalEvaluation, JournalService, ManualClose, NewJournalEntry,  # noqa: E402
-                         PostMortem, entry_from_plan, evaluate_entry)
+from app.journal import (ImportedTrade, JournalEntry, JournalEvaluation, JournalService, ManualClose,  # noqa: E402
+                         NewJournalEntry, PostMortem, entry_from_plan, evaluate_entry)
 from app.main import app  # noqa: E402
 from app.market_data import candles_to_df, synthetic_klines  # noqa: E402
 from app.postmortem import (PostMortemService, ReviewSettings, entry_context, grounded, kimi_context,  # noqa: E402
@@ -297,6 +297,18 @@ def test_weekly_review():
         "e.g. lesson stop_too_tight",
         "1 trade still open.",
     ]
+    # A Binance import without a stop: counted with its PnL, kept out of R, the trade list and post-mortems.
+    imp = JournalEntry(id="imp", symbol="BTCUSDT", direction="long", entry=100, stop=None, targets=[],
+                       taken_at=now - 7200, created_at=now - 7200,
+                       imported=ImportedTrade(external_id="x", market="spot", opened_at=now - 7200, closed_at=now - 3600,
+                                              qty=1, entry_price=100, exit_price=112.5, realized_pnl=12.5, fills=2))
+    imp_ev = JournalEvaluation(status="closed", realized_r=0, outcome="win", closed_at=now - 3600, pnl_usd=12.5,
+                               data_source="binance")
+    wi = weekly_review(rows + [(imp, imp_ev)], now)
+    assert (wi["closed"], wi["total_r"], wi["imported_without_stop"], wi["imported_pnl"]) == (4, 0.9, 1, 12.5)
+    assert "imp" not in [t["id"] for t in wi["trades"]]
+    assert "1 imported Binance trade without a stop (+$12.50), not in the R numbers." in wi["text"]
+    assert not PostMortemService.stale(imp, imp_ev)
     empty = weekly_review(rows[-1:], now)
     assert empty["closed"] == 0 and "No trades closed in the last 7 days. 1 still open." in empty["text"]
     assert weekly_review(rows, now, days=30)["closed"] == 5

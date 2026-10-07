@@ -39,13 +39,7 @@ export interface Candle {
   volume: number;
 }
 
-export type DataSource =
-  | "binance"
-  | "synthetic"
-  | "client"
-  | "connecting"
-  | "reconnecting"
-  | "offline";
+export type DataSource = "binance" | "synthetic" | "client" | "connecting" | "reconnecting" | "offline";
 export type LineStyleName = "solid" | "dashed" | "dotted";
 
 interface OverlayBase {
@@ -95,11 +89,7 @@ export interface TrendlineOverlay extends OverlayBase {
   line_style?: LineStyleName;
 }
 
-export type Overlay =
-  | HorizontalLineOverlay
-  | BoxOverlay
-  | MarkerOverlay
-  | TrendlineOverlay;
+export type Overlay = HorizontalLineOverlay | BoxOverlay | MarkerOverlay | TrendlineOverlay;
 
 export interface CustomLevel {
   kind: "line" | "zone";
@@ -173,13 +163,7 @@ export interface TrackRecord {
   label: string;
   symbol: string;
   interval: Interval;
-  status:
-    | "ok"
-    | "small_sample"
-    | "too_few_trades"
-    | "short_history"
-    | "no_match"
-    | "unavailable";
+  status: "ok" | "small_sample" | "too_few_trades" | "short_history" | "no_match" | "unavailable";
   trades: number;
   wins: number;
   win_rate: number | null;
@@ -221,11 +205,7 @@ export interface MarketSetup {
   distance_atr: number;
   basis: string;
   /** Trend per timeframe against the setup's direction; a range counts half. */
-  agreement: {
-    frames: Partial<Record<Interval, "up" | "down" | "range">>;
-    aligned: number;
-    total: number;
-  };
+  agreement: { frames: Partial<Record<Interval, "up" | "down" | "range">>; aligned: number; total: number };
   track_record: TrackRecord | null;
   score: number;
   plan: TradePlan;
@@ -296,12 +276,7 @@ export interface AlertSpec {
 // Zone trigger alerts: a lower-timeframe confirmation inside a higher-timeframe zone. Mirrors schemas.py.
 export type TriggerInterval = "1m" | "5m" | "15m";
 export type Confirmation = "choch" | "sweep" | "engulfing" | "any";
-export type TriggerZoneKind =
-  | "demand"
-  | "supply"
-  | "support"
-  | "resistance"
-  | "any";
+export type TriggerZoneKind = "demand" | "supply" | "support" | "resistance" | "any";
 
 /** Fixed prices (a zone picked on the chart, a plan's zone), or the nearest `kind` the detectors find on
  *  `timeframe`, looked up again whenever that timeframe closes. */
@@ -620,11 +595,7 @@ export interface KimiForecast {
   pct_change: number;
   vol_regime: "LOW" | "NORMAL" | "HIGH";
   headline: string;
-  next_candle: {
-    direction: "up" | "down";
-    right_pct: number | null;
-    calls: number;
-  } | null;
+  next_candle: { direction: "up" | "down"; right_pct: number | null; calls: number } | null;
 }
 
 /** One line of a Kimi pattern drawing; times past the last candle are future candles on the chart's grid. */
