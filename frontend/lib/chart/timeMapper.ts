@@ -63,7 +63,14 @@ export class TimeMapper {
   }
 
   timeToX(chart: IChartApi, t: number): number | null {
-    return chart.timeScale().logicalToCoordinate(this.timeToLogical(t) as Logical);
+    // logicalToCoordinate answers 0 for a fractional logical (lightweight-charts 4.2), so interpolate between bars.
+    const ts = chart.timeScale();
+    const l = this.timeToLogical(t);
+    const i = Math.floor(l);
+    const x0 = ts.logicalToCoordinate(i as Logical);
+    if (x0 === null || l === i) return x0;
+    const x1 = ts.logicalToCoordinate((i + 1) as Logical);
+    return x1 === null ? x0 : x0 + (x1 - x0) * (l - i);
   }
 
   xToTime(chart: IChartApi, x: number): number | null {
