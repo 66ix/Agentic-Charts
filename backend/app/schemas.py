@@ -194,6 +194,7 @@ class AnalysisIntent(BaseModel):
     switch_chart: bool = Field(False, description="Move the chart to the analysed symbol and timeframe")
     scan_watchlist: bool = Field(False, description="Scan every watchlist symbol instead of one chart")
     scan_filter: ScanFilter = "any"
+    scan_market: bool = Field(False, description="Scan the top coins by volume for the best setups")
     trade_plan: Optional[Literal["long", "short", "auto"]] = Field(None, description="Build a trade plan")
     indicators_on: list[IndicatorName] = Field(default_factory=list)
     indicators_off: list[IndicatorName] = Field(default_factory=list)
@@ -223,7 +224,7 @@ class AnalysisIntent(BaseModel):
     @property
     def has_actions(self) -> bool:
         return bool(self.custom_levels or self.remove or self.alert_prices or self.alert_targets or self.symbol
-                    or self.switch_chart or self.scan_watchlist or self.trade_plan or self.indicators_on
+                    or self.switch_chart or self.scan_watchlist or self.scan_market or self.trade_plan or self.indicators_on
                     or self.indicators_off)
 
     @model_validator(mode="after")
@@ -268,6 +269,32 @@ class PlanTarget(BaseModel):
     rr: float = Field(..., description="Reward-to-risk at this target")
 
 
+class TrackRecord(BaseModel):
+    """How the backtest setup matching a plan's basis did on that coin and timeframe (track_record.py).
+    Mirrors TrackRecord in frontend/lib/types.ts."""
+
+    setup: Optional[str] = Field(None, description="Backtest setup id (backtest.py), null when nothing matches")
+    label: str = Field("", description="e.g. 'fresh 4h demand longs on INJ'")
+    symbol: str
+    interval: str
+    status: Literal["ok", "small_sample", "too_few_trades", "short_history", "no_match", "unavailable"]
+    trades: int = 0
+    wins: int = 0
+    win_rate: Optional[float] = None
+    avg_r: Optional[float] = None
+    total_r: Optional[float] = None
+    profit_factor: Optional[float] = None
+    max_drawdown_r: Optional[float] = None
+    bars: int = 0
+    from_time: Optional[int] = None
+    to_time: Optional[int] = None
+    period: str = Field("", description="'last 1 year', 'last 4 months'")
+    target: str = "next_level"
+    data_source: str = ""
+    summary: str = Field("", description="One line for the plan card and the narrator")
+    notes: list[str] = Field(default_factory=list)
+
+
 class TradePlan(BaseModel):
     direction: Literal["long", "short"]
     entry: float
@@ -276,6 +303,12 @@ class TradePlan(BaseModel):
     basis: str = Field("", description="What the entry is built on, e.g. 'H4 demand 23.9–24.2'")
     risk_pct: float = Field(..., description="Entry-to-stop distance as % of entry")
     notes: list[str] = Field(default_factory=list)
+    # What the entry zone is, for matching the plan to a backtest setup: its kind ("demand", "support", ...,
+    # "swing" for a market entry beyond the last swing), whether it is untested, and higher-timeframe confluence.
+    zone_kind: Optional[str] = None
+    zone_fresh: Optional[bool] = None
+    zone_htf: list[str] = Field(default_factory=list)
+    track_record: Optional[TrackRecord] = None
 
 
 class ScanResult(BaseModel):
@@ -291,6 +324,40 @@ class ScanResult(BaseModel):
     distance_pct: Optional[float] = Field(None, description="Signed distance to the nearest zone, % of price; 0 inside")
     signals: list[str] = Field(default_factory=list)
     score: float = 0.0
+    data_source: str = "binance"
+
+
+class SetupAgreement(BaseModel):
+    """Trend per timeframe (the scan's own and the next ones up) against the setup's direction."""
+
+    frames: dict[str, Literal["up", "down", "range"]] = Field(default_factory=dict)
+    aligned: float = Field(0.0, description="Frames trending the setup's way (a range counts half)")
+    total: int = 0
+
+
+class MarketSetup(BaseModel):
+    """One long or short setup from the market-wide scanner (market_scanner.py). Mirrors MarketSetup in
+    frontend/lib/types.ts."""
+
+    symbol: str
+    interval: Interval
+    direction: Literal["long", "short"]
+    last_price: float
+    change_pct: Optional[float] = None
+    quote_volume: Optional[float] = Field(None, description="24h quote volume, USDT")
+    entry: float
+    stop: float
+    target: float = Field(..., description="T1")
+    rr: float = Field(..., description="Reward-to-risk at T1")
+    risk_pct: float
+    distance_pct: float = Field(..., description="Entry distance from price, % of price (0 = at market)")
+    distance_atr: float
+    basis: str = ""
+    agreement: SetupAgreement = Field(default_factory=SetupAgreement)
+    track_record: Optional[TrackRecord] = None
+    score: float = 0.0
+    plan: TradePlan
+    overlays: list[Overlay] = Field(default_factory=list, description="The plan as chart overlays")
     data_source: str = "binance"
 
 
@@ -370,6 +437,7 @@ class AnalyzeResponse(BaseModel):
     indicators: dict[str, bool] = Field(default_factory=dict, description="Indicator toggles to apply")
     scan: list[ScanResult] = Field(default_factory=list)
     plan: Optional[TradePlan] = None
+    setups: list[MarketSetup] = Field(default_factory=list, description="Market-wide scanner results")
     steps: list[str] = Field(default_factory=list, description="What the agent looked at, in order")
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

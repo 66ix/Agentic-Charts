@@ -112,6 +112,8 @@ export interface AnalysisIntent {
   switch_chart: boolean;
   scan_watchlist: boolean;
   scan_filter: string;
+  /** Scan the top coins by volume for the best setups (the Scanner tab). */
+  scan_market?: boolean;
   trade_plan: "long" | "short" | "auto" | null;
   indicators_on: string[];
   indicators_off: string[];
@@ -136,6 +138,87 @@ export interface TradePlan {
   targets: PlanTarget[];
   basis: string;
   risk_pct: number;
+  notes: string[];
+  /** What the entry zone is ("demand", "support", ..., "swing"), whether it is untested, and HTF confluence. */
+  zone_kind?: string | null;
+  zone_fresh?: boolean | null;
+  zone_htf?: string[];
+  /** How the matching backtest setup did on this coin and timeframe. */
+  track_record?: TrackRecord | null;
+}
+
+/** How a plan's setup type did in the backtest on that coin and timeframe. Mirrors TrackRecord in schemas.py. */
+export interface TrackRecord {
+  /** Backtest setup id (BacktestSetup in lib/backtest.ts); null when nothing matches the plan's basis. */
+  setup: string | null;
+  /** "fresh 4h demand longs on INJ" */
+  label: string;
+  symbol: string;
+  interval: Interval;
+  status: "ok" | "small_sample" | "too_few_trades" | "short_history" | "no_match" | "unavailable";
+  trades: number;
+  wins: number;
+  win_rate: number | null;
+  avg_r: number | null;
+  total_r: number | null;
+  profit_factor: number | null;
+  max_drawdown_r: number | null;
+  /** Candles backtested (the Backtest tab's "Candles"). */
+  bars: number;
+  from_time: number | null;
+  to_time: number | null;
+  /** "last 1 year" */
+  period: string;
+  /** Exit rule (the Backtest tab's "Exit at"). */
+  target: string;
+  data_source: string;
+  /** One line for the plan card. */
+  summary: string;
+  notes: string[];
+}
+
+/** One setup from the market-wide scanner. Mirrors MarketSetup in schemas.py. */
+export interface MarketSetup {
+  symbol: string;
+  interval: Interval;
+  direction: "long" | "short";
+  last_price: number;
+  change_pct: number | null;
+  quote_volume: number | null;
+  entry: number;
+  stop: number;
+  /** T1 */
+  target: number;
+  /** Reward-to-risk at T1. */
+  rr: number;
+  risk_pct: number;
+  /** Entry distance from price, % (0 = at market). */
+  distance_pct: number;
+  distance_atr: number;
+  basis: string;
+  /** Trend per timeframe against the setup's direction; a range counts half. */
+  agreement: { frames: Partial<Record<Interval, "up" | "down" | "range">>; aligned: number; total: number };
+  track_record: TrackRecord | null;
+  score: number;
+  plan: TradePlan;
+  /** The plan as chart overlays. */
+  overlays: Overlay[];
+  data_source: string;
+}
+
+/** One market scan of one timeframe. Mirrors MarketScanResult in backend/app/market_scanner.py. */
+export interface MarketScanResult {
+  interval: Interval;
+  /** ms */
+  generated_at: number;
+  seconds: number;
+  trigger: "manual" | "timer" | "agent";
+  universe: number;
+  scanned: number;
+  universe_source: "binance" | "fallback";
+  data_source: string;
+  longs: MarketSetup[];
+  shorts: MarketSetup[];
   notes: string[];
 }
 
@@ -226,6 +309,8 @@ export interface AnalyzeResponse {
   indicators: Record<string, boolean>;
   scan: ScanResult[];
   plan: TradePlan | null;
+  /** Market-wide scanner results ("best 5m setups right now"). */
+  setups?: MarketSetup[];
   steps: string[];
   generated_at: string;
 }

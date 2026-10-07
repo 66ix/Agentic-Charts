@@ -130,6 +130,18 @@ class Settings:
     trades_store: str = field(default_factory=lambda: _env(
         "TRADES_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "trades.json")))
 
+    # Market-wide setup scanner (market_scanner.py): the top N USDT pairs by 24h quote volume, at most this many
+    # coins loading at once. MARKET_SCAN_SCHEDULE runs it on a timer, "timeframe=minutes" pairs such as
+    # "15m=10,4h=60" (empty = on demand only). MARKET_SCAN_NOTIFY_TOP > 0 sends that many of the best setups to
+    # Telegram / Discord after each timed run. MARKET_SCAN_STORE=memory keeps the last results in memory only.
+    market_scan_top: int = field(default_factory=lambda: max(5, min(int(_env("MARKET_SCAN_TOP", "100")), 300)))
+    market_scan_concurrency: int = field(
+        default_factory=lambda: max(1, min(int(_env("MARKET_SCAN_CONCURRENCY", "4")), 16)))
+    market_scan_schedule: str = field(default_factory=lambda: _env("MARKET_SCAN_SCHEDULE", ""))
+    market_scan_notify_top: int = field(default_factory=lambda: max(0, int(_env("MARKET_SCAN_NOTIFY_TOP", "0"))))
+    market_scan_store: str = field(default_factory=lambda: _env(
+        "MARKET_SCAN_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "market_scan.json")))
+
 
 @lru_cache
 def get_settings() -> Settings:
