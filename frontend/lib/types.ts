@@ -1,5 +1,7 @@
 // Mirrors backend/app/schemas.py. Keep the two in sync.
 
+import type { GridPlan } from "./gridbot";
+
 export const TIMEFRAMES = [
   { value: "1m", label: "1m" },
   { value: "5m", label: "5m" },
@@ -115,6 +117,7 @@ export interface AnalysisIntent {
   trade_plan: "long" | "short" | "auto" | null;
   indicators_on: string[];
   indicators_off: string[];
+  grid_plan?: boolean;
 }
 
 export interface Navigate {
@@ -226,6 +229,8 @@ export interface AnalyzeResponse {
   indicators: Record<string, boolean>;
   scan: ScanResult[];
   plan: TradePlan | null;
+  /** "Plan a grid bot on INJ": the grid planner's suggestion (lib/gridbot.ts). */
+  grid_plan?: GridPlan | null;
   steps: string[];
   generated_at: string;
 }

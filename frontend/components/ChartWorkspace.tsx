@@ -15,6 +15,7 @@ import { isCustom } from "@/lib/customSymbols";
 import { createJournalEntry, planToJournalEntry } from "@/lib/journal";
 import { DEFAULT_SIZING, sizePlan, type SizingSettings } from "@/lib/sizing";
 import type { DockPanelProps } from "@/lib/dock";
+import { offerGridPlan } from "@/lib/gridbot";
 import {
   composeOverlays,
   drawingsFor,
@@ -440,6 +441,11 @@ export default function ChartWorkspace() {
         };
         setMessages((m) => [...m, answer]);
         if (!opts.silent) setQuickAnswer(answer);
+        if (res.grid_plan && !opts.silent) {
+          // "Plan a grid bot on INJ": the Grid bots tab takes the plan to test, edit and track it.
+          offerGridPlan(res.grid_plan);
+          openTabRef.current("gridbots");
+        }
       } catch (err) {
         if ((err as Error).name === "AbortError") return;
         const msg: AgentMessage = { id: uid(), role: "error", text: (err as Error).message };
@@ -509,6 +515,8 @@ export default function ChartWorkspace() {
     },
     [mobile, setDock],
   );
+  const openTabRef = useRef(openTab);
+  openTabRef.current = openTab;
   const closeDock = useCallback(() => (mobile ? setMobileTab(null) : setDock((d) => ({ ...d, open: false }))), [mobile, setDock]);
   const focusAgent = useCallback(() => {
     openTab("agent");
