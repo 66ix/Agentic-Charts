@@ -1,5 +1,7 @@
 // Mirrors backend/app/schemas.py. Keep the two in sync.
 
+import type { GridPlan } from "./gridbot";
+
 export const TIMEFRAMES = [
   { value: "1m", label: "1m" },
   { value: "5m", label: "5m" },
@@ -129,6 +131,7 @@ export interface AnalysisIntent {
   indicators_off: string[];
   /** "Alert me when 1m shows a CHoCH inside the 4h demand". */
   zone_trigger?: ZoneTriggerIntent | null;
+  grid_plan?: boolean;
 }
 
 export interface Navigate {
@@ -379,6 +382,8 @@ export interface AnalyzeResponse {
   plan: TradePlan | null;
   /** Market-wide scanner results ("best 5m setups right now"). */
   setups?: MarketSetup[];
+  /** "Plan a grid bot on INJ": the grid planner's suggestion (lib/gridbot.ts). */
+  grid_plan?: GridPlan | null;
   steps: string[];
   /** Zone trigger alerts the client should arm (POST /api/zone-triggers). */
   trigger_alerts?: ZoneTriggerSpec[];

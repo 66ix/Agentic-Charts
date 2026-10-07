@@ -23,6 +23,9 @@ from .config import get_settings
 from .derivatives import DerivativesService
 from .events import EventsService
 from .futures_data import FuturesDataService
+from .grid_planner import GridPlanRequest, describe_plan, plan_grid
+from .grid_planner import plan_facts as grid_plan_facts
+from .gridbot import GridBotService
 from .kimi_service import KimiService, summarize
 from .llm import ChartContext, LLMClient
 from .market_data import INTERVAL_SECONDS, MarketData, candles_to_df
@@ -315,12 +318,24 @@ async def _kimi_facts(kimi: KimiService | None, symbol: str, tf: str) -> dict | 
         return {"error": f"Kimi Cooked could not run: {exc}"}
 
 
+async def _grid_plan(gridbots: GridBotService | None, symbol: str):
+    """A grid bot plan for "plan a grid bot on INJ" (grid_planner.py); None when it cannot be made."""
+    if gridbots is None:
+        return None
+    try:
+        return await plan_grid(gridbots, GridPlanRequest(symbol=symbol))
+    except Exception as exc:  # the answer goes out without it and says so
+        log.warning("Grid plan for %s failed: %s", symbol, exc)
+        return None
+
+
 async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
                        derivatives: DerivativesService | None = None, kimi: KimiService | None = None,
                        futures: FuturesDataService | None = None,
                        events: EventsService | None = None,
                        scanner: MarketScanner | None = None,
-                       levels: SessionLevelsService | None = None) -> AnalyzeResponse:
+                       levels: SessionLevelsService | None = None,
+                       gridbots: GridBotService | None = None) -> AnalyzeResponse:
     settings = get_settings()
     scanner = scanner or MarketScanner(market)
     chart = ChartContext(req.symbol, req.interval, req.watchlist)
@@ -398,7 +413,8 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
     want_news = bool(NEWS_WORDS.search(req.prompt)) and not custom_chart
     # Session / previous day-week-month / opening-range levels, so the answer can say "price is at the London high".
     want_levels = levels is not None and not custom_chart
-    (candles, source), higher, frames, rows, deriv, kimi_facts, fut, upcoming, headlines, mscan, lvl = await asyncio.gather(
+    want_grid = intent.grid_plan and not custom_chart
+    (candles, source), higher, frames, rows, deriv, kimi_facts, fut, upcoming, headlines, mscan, lvl, grid = await asyncio.gather(
         candles_for_chart(), windows(),
         _confluence_frames(market, symbol, tf, [] if custom_chart else features), scan_rows(),
         derivatives.symbol_snapshot(symbol) if want_deriv else _none(),
@@ -406,7 +422,8 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         _guarded(futures.futures_context(symbol), "futures context") if want_futures else _none(),
         _upcoming(events, EVENT_HOURS) if want_events else _none(),
         _headlines(events, symbol) if want_news else _empty(), market_scan(),
-        _guarded(levels.get(symbol, tf), "session levels") if want_levels else _none())
+        _guarded(levels.get(symbol, tf), "session levels") if want_levels else _none(),
+        _grid_plan(gridbots, symbol) if want_grid else _none())
 
     df = candles_to_df(candles)
     # Detection is CPU-bound (SciPy); keep the event loop free for streams.
@@ -451,6 +468,8 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         facts["upcoming_events"] = upcoming  # [] says "nothing high-impact coming", which is worth saying too
     if headlines:
         facts["headlines"] = headlines
+    if want_grid:
+        facts["grid_plan"] = grid_plan_facts(grid) if grid else None
     if intent.scan_watchlist:
         facts["scan"] = [r.model_dump(include={"symbol", "last_price", "change_pct", "trend", "rsi", "signals",
                                                "nearest_kind", "distance_pct"}) for r in rows[:6]]
@@ -481,6 +500,9 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         facts["actions"] = actions
     narrate_facts = {k: v for k, v in facts.items() if k != "last_bar_time"}
     fallback = describe(narrate_facts, symbol)
+    if want_grid:  # the grid plan leads the answer; the chart summary follows
+        fallback = (describe_plan(grid) if grid else "Couldn't plan a grid bot for this coin right now.") + " " + \
+            fallback
     summary, narrate_engine = await llm.narrate(req.prompt, narrate_facts, fallback, req.history)
 
     return AnalyzeResponse(
@@ -499,6 +521,7 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         scan=rows[:10],
         plan=plan,
         setups=setups,
+        grid_plan=grid.model_dump() if grid else None,
         steps=steps,
         trigger_alerts=triggers,
     )

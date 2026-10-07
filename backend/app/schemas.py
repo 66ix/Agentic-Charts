@@ -7,7 +7,7 @@ can draw is described here and mirrored in `frontend/lib/types.ts`.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Annotated, Literal, Optional, Union
+from typing import Annotated, Any, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -261,6 +261,7 @@ class AnalysisIntent(BaseModel):
     scan_filter: ScanFilter = "any"
     scan_market: bool = Field(False, description="Scan the top coins by volume for the best setups")
     trade_plan: Optional[Literal["long", "short", "auto"]] = Field(None, description="Build a trade plan")
+    grid_plan: bool = Field(False, description="Plan a Spot Grid bot: range, grids, type (grid_planner.py)")
     indicators_on: list[IndicatorName] = Field(default_factory=list)
     indicators_off: list[IndicatorName] = Field(default_factory=list)
     zone_trigger: Optional[ZoneTriggerIntent] = Field(None, description="Set a lower-timeframe trigger alert")
@@ -291,7 +292,7 @@ class AnalysisIntent(BaseModel):
     def has_actions(self) -> bool:
         return bool(self.custom_levels or self.remove or self.alert_prices or self.alert_targets or self.symbol
                     or self.switch_chart or self.scan_watchlist or self.scan_market or self.trade_plan or self.indicators_on
-                    or self.indicators_off or self.zone_trigger)
+                    or self.indicators_off or self.zone_trigger or self.grid_plan)
 
     @model_validator(mode="after")
     def _default_features(self) -> "AnalysisIntent":
@@ -506,6 +507,7 @@ class AnalyzeResponse(BaseModel):
     scan: list[ScanResult] = Field(default_factory=list)
     plan: Optional[TradePlan] = None
     setups: list[MarketSetup] = Field(default_factory=list, description="Market-wide scanner results")
+    grid_plan: Optional[dict[str, Any]] = Field(None, description="A grid bot plan (grid_planner.GridPlan)")
     steps: list[str] = Field(default_factory=list, description="What the agent looked at, in order")
     trigger_alerts: list[ZoneTriggerSpec] = Field(default_factory=list, description="Trigger alerts for the client")
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

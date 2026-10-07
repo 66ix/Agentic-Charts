@@ -15,6 +15,7 @@ in. On every closed candle of the trade's management timeframe it checks, in thi
 
 Each piece of advice is given once (a key per event) and kept on the trade with a suggested stop where one applies.
 "I moved it" (PATCH stop) updates the tracked stop; `follow_advice` does that by itself, for tracking only.
+A trade added from a Binance position is closed here once that position is no longer open on the account.
 Swings are judged on the candles up to each bar with a few bars of confirmation, so nothing is suggested from a
 swing that only exists in hindsight.
 """
@@ -27,6 +28,7 @@ import logging
 import math
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Literal, Optional
 
 import pandas as pd
@@ -47,6 +49,7 @@ log = logging.getLogger(__name__)
 
 AdviceKind = Literal["stop", "target", "breakeven", "trail", "structure", "done"]
 CHECK_SECONDS = 20.0       # how often open trades look for a newly closed candle
+POSITIONS_CHECK_SECONDS = 120.0  # how often managed Binance positions are checked for being closed
 LOOKBACK_BARS = 300        # candles fetched per check (swings and ATR need history before the entry)
 SWING_CONFIRM = 3          # bars after a swing before it can be trailed to
 MAX_ADVICE = 100
@@ -271,6 +274,8 @@ def describe(t: ManagedTrade, a: Advice) -> str:
 
 
 def from_journal(e: "JournalEntry", interval: Optional[str] = None) -> NewManagedTrade:
+    if e.stop is None:
+        raise ValueError("this journal entry has no stop; add the trade with its stop instead")
     return NewManagedTrade(symbol=e.symbol, interval=interval or e.interval, direction=e.direction, entry=e.entry,
                            stop=e.stop, targets=e.targets, qty=e.size_qty, opened_at=e.taken_at, source="journal",
                            source_id=e.id, breakeven_after_t1=e.manage == "breakeven_after_t1", notes=e.notes)
@@ -292,6 +297,9 @@ class TradeManager:
         self._trades: dict[str, ManagedTrade] = {}
         self._task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
+        # Keys of the user's open Binance positions (BinanceImportService.open_position_keys), None when unknown.
+        self.open_positions: Optional[Callable[[], Awaitable[Optional[set[str]]]]] = None
+        self._positions_checked = 0.0
         self._load()
 
     def start(self) -> None:
@@ -379,6 +387,29 @@ class TradeManager:
             self._announce(t, a)
         return new
 
+    async def sync_positions(self) -> bool:
+        """Close managed Binance positions that are no longer open on the account. True when one was closed."""
+        trades = [t for t in self._trades.values() if t.status == "open" and t.source == "binance" and t.source_id]
+        if not trades or self.open_positions is None:
+            return False
+        keys = await self.open_positions()
+        if keys is None:
+            return False
+        closed = False
+        for t in trades:
+            if t.source_id in keys:
+                continue
+            t.status, closed = "closed", True
+            if t.last_price is not None:
+                t.exit_price, t.exit_r = t.last_price, r_multiple(t, t.last_price)
+            text = (f"{t.symbol} {t.direction}: the position is no longer open on Binance, so it is no longer "
+                    f"managed" + (f" (last price {fmt_price(t.last_price)}, {t.exit_r:+.2f}R)."
+                                  if t.exit_r is not None else "."))
+            self.alerts.record("trade", t.symbol, f"{t.symbol} {t.direction}: closed on Binance", text,
+                               price=t.last_price)
+            self.alerts.broadcast({"type": "trade_advice", "trade_id": t.id, "advice": None, "text": text})
+        return closed
+
     def _announce(self, t: ManagedTrade, a: Advice) -> None:
         text = describe(t, a)
         self.alerts.record("trade", t.symbol, f"{t.symbol} {t.direction}: {a.kind}", text, price=a.price)
@@ -400,6 +431,12 @@ class TradeManager:
                         changed |= before != (t.last_bar, len(t.advice), t.status)
                     except Exception:
                         log.exception("Trade manager check failed for %s", t.id)
+                if now - self._positions_checked >= POSITIONS_CHECK_SECONDS:
+                    self._positions_checked = now
+                    try:
+                        changed |= await self.sync_positions()
+                    except Exception:
+                        log.exception("Trade manager: Binance position check failed")
                 if changed:
                     self._save()
 

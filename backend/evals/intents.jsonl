@@ -69,3 +69,6 @@
 {"prompt": "give me a long setup and alert me when the 5m shows a change of character in the zone", "expect": {"trade_plan": "long", "zone_trigger": {"timeframe": "5m", "confirm": "choch", "zone_kind": "any", "zone_timeframe": null}, "alert_targets": []}}
 {"prompt": "show the 4h demand and alert me if price enters it", "expect": {"zone_trigger": null, "features": ["supply_demand"], "alert_targets": ["new"]}}
 {"prompt": "alert me at 65k on the 15m", "expect": {"zone_trigger": null, "alert_prices": [65000.0]}}
+{"prompt": "plan a grid bot on SOL", "expect": {"grid_plan": true, "symbol": "SOLUSDT", "trade_plan": null}}
+{"prompt": "what grid settings would you use here?", "expect": {"grid_plan": true, "trade_plan": null}}
+{"prompt": "hide the grid lines", "expect": {"grid_plan": false}}

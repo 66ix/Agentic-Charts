@@ -94,6 +94,8 @@ function TradeRow({ e, shown, livePrice, busy, ...a }: RowProps) {
   useEffect(() => setDraft(e.notes), [e.notes]);
   const live = ev.status === "open" || ev.status === "pending";
   const r = ev.status === "open" ? ev.realized_r + ev.open_r : ev.realized_r;
+  // Imported from Binance: the fills are the trade, so there is nothing to close or cancel here, and no R without a stop.
+  const im = e.imported;
 
   return (
     <div className={clsx("border-b border-line/60 px-3 py-2 text-[12px]", ev.status === "cancelled" && "opacity-60")}>
@@ -103,6 +105,11 @@ function TradeRow({ e, shown, livePrice, busy, ...a }: RowProps) {
           {displaySymbol(e.symbol)}
         </button>
         <span className={clsx("text-[11px] font-semibold", long ? "text-up" : "text-down")}>{long ? "Long" : "Short"}</span>
+        {im && (
+          <span className="rounded bg-panel2 px-1 py-px text-[10px] text-mute" title={`Imported from your Binance ${im.market} fills`}>
+            Binance {im.market}
+          </span>
+        )}
         <span className="min-w-0 flex-1 truncate text-[11px] text-mute" title={e.setup}>{e.setup}</span>
         {busy && <Loader2 className="h-3.5 w-3.5 animate-spin text-mute" />}
         <button type="button" onClick={a.onToggleShow} className={clsx("btn-ghost h-6 w-6 p-0", shown && "text-accent")}
@@ -112,7 +119,7 @@ function TradeRow({ e, shown, livePrice, busy, ...a }: RowProps) {
         <button type="button" onClick={() => setEditing(!editing)} className="btn-ghost h-6 w-6 p-0" title="Notes">
           <Pencil className="h-3.5 w-3.5" />
         </button>
-        {ev.status === "open" && (
+        {ev.status === "open" && !im && (
           <button type="button" onClick={a.onClose} className="btn-ghost h-6 w-6 p-0 hover:text-yellow-300"
             title={livePrice != null ? `Close now at ${formatPrice(livePrice)}` : "Close now at the last price"}>
             <X className="h-3.5 w-3.5" />
@@ -123,7 +130,8 @@ function TradeRow({ e, shown, livePrice, busy, ...a }: RowProps) {
             <Ban className="h-3.5 w-3.5" />
           </button>
         )}
-        <button type="button" onClick={a.onDelete} className="btn-ghost h-6 w-6 p-0 hover:text-down" title="Delete from the journal">
+        <button type="button" onClick={a.onDelete} className="btn-ghost h-6 w-6 p-0 hover:text-down"
+          title={im ? "Delete from the journal (later imports skip it)" : "Delete from the journal"}>
           <Trash2 className="h-3.5 w-3.5" />
         </button>
       </div>
@@ -132,11 +140,19 @@ function TradeRow({ e, shown, livePrice, busy, ...a }: RowProps) {
         <span className="text-mute">Entry</span>
         <span className="truncate text-ink">
           {formatPrice(ev.fill_price ?? e.entry)}
-          <span className="text-mute"> · stop </span>
-          <span className="text-down">{formatPrice(ev.current_stop ?? e.stop)}</span>
-          <span className="text-mute"> · {e.targets.map((t) => formatPrice(t)).join(" / ")}</span>
+          {im ? (
+            im.exit_price != null && <span className="text-mute"> → {formatPrice(im.exit_price)} · {im.fills} fills</span>
+          ) : (
+            <>
+              <span className="text-mute"> · stop </span>
+              <span className="text-down">{formatPrice(ev.current_stop ?? e.stop ?? e.entry)}</span>
+              <span className="text-mute"> · {e.targets.map((t) => formatPrice(t)).join(" / ")}</span>
+            </>
+          )}
         </span>
-        <span className={clsx("text-right", tone(r))}>{ev.status === "pending" || ev.status === "cancelled" ? "–" : fmtR(r)}</span>
+        <span className={clsx("text-right", tone(r))}>
+          {ev.status === "pending" || ev.status === "cancelled" || e.stop == null ? "–" : fmtR(r)}
+        </span>
         <span className="text-mute">{ev.status === "open" ? "Open" : ev.status === "closed" ? "Result" : "Taken"}</span>
         <span className="truncate text-mute">
           {ev.status === "open" && (
@@ -382,6 +398,13 @@ function StatsView({ symbol }: { symbol: string }) {
             <Tile label="Profit factor" value={stats.profit_factor == null ? "–" : stats.profit_factor.toFixed(2)} />
             <Tile label="Best / worst" value={`${fmtR(stats.best_r, 1)} ${fmtR(stats.worst_r, 1)}`} />
           </div>
+          {stats.imported_closed > 0 && (
+            <div className="grid grid-cols-3 gap-1.5">
+              <Tile label="PnL (after fees)" value={fmtUsd(stats.pnl_usd) || "–"} cls={tone(stats.pnl_usd)} />
+              <Tile label="From Binance" value={String(stats.imported_closed)} />
+              <Tile label="Without R" value={String(stats.no_r)} />
+            </div>
+          )}
           <div className="text-[11px] text-mute">
             {stats.closed} closed ({stats.wins} won, {stats.losses} lost, {stats.breakeven} breakeven) · {stats.open} open
             {stats.open ? ` (${fmtR(stats.open_r)} unrealized)` : ""} · {stats.pending} pending. R is after fees.

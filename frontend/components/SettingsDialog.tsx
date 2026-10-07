@@ -7,6 +7,7 @@ import { readStored, storedKeys, usePersistentState, writeStored } from "@/hooks
 import { DEFAULT_SIZING, type SizingSettings } from "@/lib/sizing";
 import type { LayoutState } from "@/lib/types";
 
+import { BinanceKeySettings } from "./AccountPanel";
 import Dialog, { NumberInput, Row, Section, Toggle } from "./Dialog";
 import ModelSettings from "./ModelSettings";
 
@@ -128,6 +129,10 @@ export default function SettingsDialog(p: Props) {
           <NumberInput value={sizing.maxLeverage} min={1} max={125} step={1} onChange={(v) => setSizing({ ...sizing, maxLeverage: v })} suffix="×" />
         </Row>
       </Section>
+
+      <div className="border-b border-line py-2">
+        <BinanceKeySettings />
+      </div>
 
       <Section title="Backup">
         <p className="pb-2 text-[11px] text-mute">

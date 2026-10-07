@@ -26,6 +26,7 @@ import contextlib
 import logging
 from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
@@ -37,6 +38,9 @@ from .brief import BriefService, BriefSettings, NoChannelError
 from .config import get_settings
 from .derivatives import DerivativesService
 from .gridbot import GridBotCreate, GridBotPatch, GridBotService, GridSimulateRequest, error_text
+from .grid_planner import GridBacktestRequest, GridPlanRequest, backtest_grid, plan_grid
+from .binance_account import BinanceAccount, BinanceApiError, BinanceKeyError
+from .binance_import import BinanceImportService, ClassifyRequest, ImportSettings
 from .journal import JournalPatch, JournalService, NewJournalEntry, entry_json
 from .events import EventsService
 from .futures_data import FUTURES_PERIODS, FuturesDataService
@@ -79,6 +83,9 @@ async def lifespan(app: FastAPI):
     await app.state.alerts.start()
     app.state.gridbots = GridBotService(market)  # grid bot tracker: saved bots, results cached per 1m bar
     app.state.journal = JournalService(market)  # trade journal: entries tracked on 1m candles
+    # Read-only Binance account: fills → journal, bot vs manual, positions (binance_account.py, binance_import.py).
+    app.state.binance = BinanceImportService(BinanceAccount(), app.state.journal, app.state.gridbots, market)
+    app.state.binance.start()
     # Market data panel (futures, order flow, estimated liquidation levels), calendar + news, market-cap indexes.
     app.state.futures = FuturesDataService(market, app.state.derivatives)
     app.state.events = EventsService()
@@ -92,6 +99,7 @@ async def lifespan(app: FastAPI):
     app.state.brief.start()
     # Trade manager: live trades it watches on closed candles, advising through the same channels.
     app.state.trades = TradeManager(market, app.state.alerts)
+    app.state.trades.open_positions = app.state.binance.open_position_keys  # closes positions sold on Binance
     app.state.trades.start()
     # Market-wide setup scanner (market_scanner.py) with plan track records (track_record.py), shared with the agent.
     app.state.market_scanner = MarketScanner(market, TrackRecordService(market), app.state.alerts)
@@ -112,6 +120,8 @@ async def lifespan(app: FastAPI):
     await app.state.models.close()
     await app.state.trades.close()
     await app.state.heatmap.close()
+    await app.state.binance.close()
+    await app.state.binance.account.close()
     await app.state.signal_alerts.close()
     await asyncio.gather(app.state.futures.close(), app.state.events.close(), app.state.indexes.close())
     await app.state.alerts.close()
@@ -217,7 +227,8 @@ async def agent_analyze(req: AnalyzeRequest, request: Request) -> AnalyzeRespons
         st = request.app.state
         return await run_analysis(req, st.market, st.llm, st.derivatives, st.kimi,
                                   getattr(st, "futures", None), getattr(st, "events", None),
-                                  getattr(st, "market_scanner", None), levels=getattr(st, "session_levels", None))
+                                  getattr(st, "market_scanner", None), levels=getattr(st, "session_levels", None),
+                                  gridbots=getattr(st, "gridbots", None))
     except MarketDataError as exc:
         raise HTTPException(502, str(exc)) from exc
     except ValueError as exc:
@@ -546,6 +557,23 @@ async def llm_eval_get(run_id: str, request: Request) -> dict:
     return run.model_dump()
 
 
+# Grid bot planner (grid_planner.py):
+#   POST   /api/gridbot/plan              {symbol, investment?, timeframe?, grid_type?, fee_rate?, ...} → GridPlan
+#   POST   /api/gridbot/backtest          {symbol, lower, upper, grids, grid_type, investment, days, compare_grids}
+
+
+@app.post("/api/gridbot/plan")
+async def gridbot_plan(request: Request, body: dict = Body(...)) -> dict:
+    req: GridPlanRequest = _gridbot_body(GridPlanRequest, body)
+    return (await _gridbot_run(plan_grid(request.app.state.gridbots, req))).model_dump()
+
+
+@app.post("/api/gridbot/backtest")
+async def gridbot_backtest(request: Request, body: dict = Body(...)) -> dict:
+    req: GridBacktestRequest = _gridbot_body(GridBacktestRequest, body)
+    return (await _gridbot_run(backtest_grid(request.app.state.gridbots, req))).model_dump()
+
+
 @app.get("/api/gridbots")
 async def gridbots_list(request: Request) -> dict:
     return {"bots": [b.model_dump() for b in request.app.state.gridbots.list()]}
@@ -749,6 +777,104 @@ async def backtest(req: BacktestRequest, request: Request) -> dict:
         raise HTTPException(502, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+# ------------------------------------------------ Binance account (read-only key) --
+#   GET    /api/binance/key                  configured, source (env/file), last 4 chars, permissions, problems
+#   PUT    /api/binance/key                  {api_key, api_secret} → checked with Binance, saved only if read-only
+#   POST   /api/binance/key/test             ask Binance again what the key may do
+#   DELETE /api/binance/key
+#   GET    /api/binance/import               settings, last import, fill counts by kind
+#   PUT    /api/binance/import/settings      {auto_minutes, symbols, futures, lookback_days}
+#   POST   /api/binance/import               {symbols?} → new fills, journal added/updated/removed, notes
+#   GET    /api/binance/fills                ?symbol=&kind=manual|bot|unknown&market=spot|futures&limit=
+#   GET    /api/binance/trades               ?kind= → round trips rebuilt from the fills
+#   POST   /api/binance/classify             {keys, kind (null clears), bot_id?} → re-classify, journal re-synced
+#   GET    /api/binance/positions            ?refresh= → own spot holdings + futures positions, bots' separately
+#   GET    /api/binance/gridbots/{id}/compare  a tracked grid bot's real fills next to the simulated ones
+
+
+async def _binance_run(coro, key_status: int = 400):
+    try:
+        return await coro
+    except BinanceKeyError as exc:
+        raise HTTPException(key_status, str(exc)) from exc
+    except (BinanceApiError, httpx.HTTPError) as exc:
+        raise HTTPException(502, f"Binance: {exc}") from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.get("/api/binance/key")
+async def binance_key(request: Request) -> dict:
+    return request.app.state.binance.account.status()
+
+
+@app.put("/api/binance/key")
+async def binance_set_key(request: Request, body: dict = Body(...)) -> dict:
+    key, secret = body.get("api_key"), body.get("api_secret")
+    if not isinstance(key, str) or not isinstance(secret, str):
+        raise HTTPException(422, "Give api_key and api_secret")
+    return await _binance_run(request.app.state.binance.account.set_key(key, secret), key_status=422)
+
+
+@app.post("/api/binance/key/test")
+async def binance_test_key(request: Request) -> dict:
+    return await _binance_run(request.app.state.binance.account.test())
+
+
+@app.delete("/api/binance/key")
+async def binance_remove_key(request: Request) -> dict:
+    return await _binance_run(request.app.state.binance.account.remove_key())
+
+
+@app.get("/api/binance/import")
+async def binance_import_status(request: Request) -> dict:
+    return request.app.state.binance.status()
+
+
+@app.put("/api/binance/import/settings")
+async def binance_import_settings(new: ImportSettings, request: Request) -> dict:
+    return request.app.state.binance.update_settings(new)
+
+
+@app.post("/api/binance/import")
+async def binance_import(request: Request, body: dict | None = Body(None)) -> dict:
+    raw = (body or {}).get("symbols") or []
+    symbols = [_norm_symbol(s) for s in raw[:40] if isinstance(s, str) and s.strip()]
+    return await _binance_run(request.app.state.binance.run(symbols))
+
+
+@app.get("/api/binance/fills")
+async def binance_fills(request: Request, symbol: str | None = Query(None),
+                        kind: str | None = Query(None, pattern="^(manual|bot|unknown)$"),
+                        market: str | None = Query(None, pattern="^(spot|futures)$"),
+                        limit: int = Query(500, ge=1, le=5000)) -> dict:
+    rows = request.app.state.binance.fills(_norm_symbol(symbol) if symbol else None, kind, market, limit)
+    return {"fills": [f.model_dump() for f in rows]}
+
+
+@app.get("/api/binance/trades")
+async def binance_trades(request: Request, kind: str | None = Query(None, pattern="^(manual|bot|unknown)$")) -> dict:
+    return {"trades": [t.model_dump() for t in request.app.state.binance.trades(kind)]}
+
+
+@app.post("/api/binance/classify")
+async def binance_classify(req: ClassifyRequest, request: Request) -> dict:
+    return await _binance_run(request.app.state.binance.set_classification(req))
+
+
+@app.get("/api/binance/positions")
+async def binance_positions(request: Request, refresh: bool = Query(False)) -> dict:
+    return await _binance_run(request.app.state.binance.positions(refresh))
+
+
+@app.get("/api/binance/gridbots/{bot_id}/compare")
+async def binance_gridbot_compare(bot_id: str, request: Request) -> dict:
+    out = await _gridbot_run(request.app.state.binance.compare_bot(bot_id))
+    if out is None:
+        raise HTTPException(404, "Grid bot not found")
+    return out
 
 
 # ------------------------------------------- market data panel, calendar + news, market-cap indexes --

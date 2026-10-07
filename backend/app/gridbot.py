@@ -77,6 +77,7 @@ MAX_BOTS = 50
 FILTERS_TTL = 24 * 3600.0  # exchangeInfo tick/step sizes rarely change
 FILTERS_RETRY = 300.0  # after a failed exchangeInfo call
 MAX_RUNTIME_DAYS = MAX_RANGE_BARS // 1440
+EQUITY_POINTS = 400
 
 GridType = Literal["arithmetic", "geometric"]
 Side = Literal["buy", "sell"]
@@ -244,6 +245,10 @@ class GridBotResult(BaseModel):
     filters: SymbolFilters
     comparison: Optional[GridComparison] = None
     notes: list[str] = Field(default_factory=list)
+    max_drawdown_pct: float = Field(0.0, description="Largest fall of the bot's value from a high, % of that high")
+    time_in_range_pct: float = Field(0.0, description="Share of 1m closes inside the range while the bot ran")
+    equity: Optional[list[tuple[int, float]]] = Field(
+        None, description=f"(time, value) at most {EQUITY_POINTS} points; only when asked for (backtests)")
 
 
 class GridBot(BaseModel):
@@ -418,10 +423,11 @@ def error_text(exc: Exception) -> str:
 
 
 def simulate(df: pd.DataFrame, params: GridBotParams, filters: SymbolFilters, *, now: Optional[float] = None,
-             source: str = "binance", binance: Optional[BinanceShows] = None) -> GridBotResult:
+             source: str = "binance", binance: Optional[BinanceShows] = None, curve: bool = False) -> GridBotResult:
     """Replay a Spot Grid bot over 1m bars (`df`: time/open/high/low/close, oldest first, from the start on).
 
-    `now` (UNIX s) sets the runtime and the 24h window; default: the end of the newest bar. Pure: no I/O.
+    `now` (UNIX s) sets the runtime and the 24h window; default: the end of the newest bar. `curve` adds the
+    bot's value over time (`equity`). Pure: no I/O.
     Raises ValueError when the bot cannot be built (no candles, investment too small for the lot step...)."""
     c = params.fee
     times = df["time"].to_numpy(np.int64)
@@ -555,6 +561,9 @@ def simulate(df: pd.DataFrame, params: GridBotParams, filters: SymbolFilters, *,
         recent.insert(0, initial)
     recent = (recent + extra_fills)[::-1][:RECENT_FILLS]
 
+    max_dd, in_range_pct, equity = _value_path(t, cl, fv, fs, fp, q, c, base0, quote0, first, last_v, stop_price,
+                                               params, curve)
+
     sell_t = ft[is_sell]
     matched_24h = int((sell_t >= now - DAY).sum())
     daily = _daily(start, int(end_moment), sell_t, sell_profit)
@@ -591,11 +600,39 @@ def simulate(df: pd.DataFrame, params: GridBotParams, filters: SymbolFilters, *,
         profit_per_grid_min_pct=round(ppg_min, 4), profit_per_grid_max_pct=round(ppg_max, 4),
         fee_rate=c, fees_paid=round(fees, 8), base_held=round(base, 10), quote_held=round(quote, 8),
         current_value=round(value, 8), open_orders=open_orders, recent_fills=recent, daily=daily,
-        filters=filters, notes=notes,
+        filters=filters, notes=notes, max_drawdown_pct=max_dd, time_in_range_pct=in_range_pct, equity=equity,
     )
     if binance is not None:
         result.comparison = _compare(df, params, filters, binance, result, source)
     return result
+
+
+def _value_path(t: np.ndarray, cl: np.ndarray, fv: np.ndarray, fs: np.ndarray, fp: np.ndarray, q: float, c: float,
+                base0: float, quote0: float, first: int, last_v: int, stop_price: Optional[float],
+                params: GridBotParams, curve: bool) -> tuple[float, float, Optional[list[tuple[int, float]]]]:
+    """The bot's value at each 1m close from the bar it started trading in to the bar it stopped in → (max drawdown
+    %, % of those closes inside the range, the value path downsampled to EQUITY_POINTS when `curve`)."""
+    b0, b1 = first // 4, last_v // 4
+    n = b1 - b0 + 1
+    if n <= 0:
+        return 0.0, 0.0, [] if curve else None
+    bar = fv // 4 - b0
+    buy, sell = fs > 0, fs < 0
+    d_base = np.bincount(bar, weights=q * fs.astype(float), minlength=n)[:n]
+    d_quote = (np.bincount(bar[sell], weights=q * fp[sell] * (1 - c), minlength=n)[:n]
+               - np.bincount(bar[buy], weights=q * fp[buy] * (1 + c), minlength=n)[:n])
+    price = cl[b0:b1 + 1].astype(float)
+    if stop_price is not None:
+        price[-1] = stop_price
+    value = quote0 + np.cumsum(d_quote) + (base0 + np.cumsum(d_base)) * price
+    peak = np.maximum.accumulate(np.maximum(value, params.investment))
+    max_dd = float(((peak - value) / peak).max() * 100)
+    inside = float(((price >= params.lower) & (price <= params.upper)).mean() * 100)
+    equity = None
+    if curve:
+        idx = np.unique(np.linspace(0, n - 1, min(n, EQUITY_POINTS)).astype(np.int64))
+        equity = [(int(t[b0 + i]), round(float(value[i]), 6)) for i in idx]
+    return round(max(0.0, max_dd), 4), round(inside, 2), equity
 
 
 def _quantity(params: GridBotParams, filters: SymbolFilters, lines: np.ndarray, gap: int, n_sell: int, p0: float,

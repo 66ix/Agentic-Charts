@@ -53,8 +53,8 @@ INTENT_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["features", "timeframe", "window_timeframes", "max_zones", "answer_hint", "custom_levels",
                  "remove", "keep_existing", "alert_prices", "alert_targets", "symbol", "switch_chart",
-                 "scan_watchlist", "scan_filter", "scan_market", "trade_plan", "indicators_on", "indicators_off",
-                 "zone_trigger"],
+                 "scan_watchlist", "scan_filter", "scan_market", "trade_plan", "grid_plan", "indicators_on",
+                 "indicators_off", "zone_trigger"],
     "properties": {
         "features": {
             "type": "array",
@@ -152,6 +152,11 @@ INTENT_SCHEMA: dict[str, Any] = {
             "description": "Build an entry/stop/targets plan from the detected zones ('give me a long setup' → long, "
                            "'what's the trade here?' → auto). null for a market scan. null otherwise.",
         },
+        "grid_plan": {
+            "type": "boolean",
+            "description": "true when the user wants a Spot Grid bot planned ('plan a grid bot on INJ', 'what grid "
+                           "settings for SOL?'): the app suggests the range, number of grids and grid type.",
+        },
         "indicators_on": {"type": "array", "items": {"type": "string", "enum": list(INDICATORS)},
                           "description": "Chart indicators to show ('add RSI' → rsi; 'show my Kimi' or 'turn on "
                                          "Kimi Cooked' → kimi, the user's own indicator)."},
@@ -204,6 +209,7 @@ INTENT_SYSTEM = (
     "An alert on a lower-timeframe confirmation inside a zone ('alert me when 1m shows a CHoCH inside the 4h "
     "demand', 'ping me on a 5m confirmation in the H4 supply') is zone_trigger, not alert_targets: features empty, "
     "keep_existing true. "
+    "'Grid bot' or 'grid trading' means grid_plan (a Binance Spot Grid bot), not a trade plan. "
     "Respond with JSON only."
 )
 
@@ -229,6 +235,8 @@ NARRATE_SYSTEM = (
     "walls and estimated liquidation clusters (call them estimates); use what the question needs. "
     "FACTS.upcoming_events lists high-impact economic events by hours from now: with a trade plan, warn about any "
     "inside it; an empty list means nothing high-impact is scheduled. FACTS.headlines are recent news titles. "
+    "FACTS.grid_plan is a Spot Grid bot plan: give its range and what it is built on, the grids and grid type and "
+    "the profit per grid after fees, and say it can be tested on history in the Grid bots tab. "
     "No disclaimers, no markdown."
 )
 
@@ -330,6 +338,12 @@ def _zone_trigger(p: str) -> tuple[ZoneTriggerIntent | None, tuple[int, int]]:
     kind = zone.group(1) if zone.group(1) in ("demand", "supply", "support", "resistance") else "any"
     return (ZoneTriggerIntent(timeframe=tf, confirm=confirm, zone_kind=kind,  # type: ignore[arg-type]
                               zone_timeframe=higher[0] if higher else None), (verb.start(), stop))
+
+# "plan a grid bot on INJ", "grid trading settings for SOL", "suggest a grid": a Spot Grid bot plan (not grid lines).
+_GRID = (r"\bgrid[ -]?(?:bots?|trading|strateg(?:y|ies))\b(?:\s+(?:setup|settings?|plan|range))?|"
+         r"\bgrid (?:setup|settings?|parameters|params)\b|"
+         r"\b(?:plan|set ?up|suggest|design|build|make|create|recommend)\b[^.?!]{0,20}?\bgrids?\b(?! ?lines?)"
+         r"(?:\s+(?:setup|settings?|plan|range))?")
 
 
 def _num(token: str) -> float:
@@ -465,6 +479,9 @@ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases
     scan_market = symbol is None and bool(re.search(_MARKET_SCAN, scan)) and not re.search(_NOT_MARKET, scan)
     if scan_market:
         scan = re.sub(_MARKET_SCAN, " ", scan)
+    grid_plan = bool(re.search(_GRID, scan))
+    if grid_plan:
+        scan = re.sub(_GRID, " ", scan)
 
     trade_plan = None
     if re.search(_PLAN, scan) and not scan_market:
@@ -516,7 +533,7 @@ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases
         re.search(r"\b(?:chart|timeframe|tf)\b", p)) and not feats and not scan_market)
 
     acting = bool(custom or remove or alert_prices or alert_targets or indicators_on or indicators_off
-                  or scan_watchlist or scan_market or trade_plan or zone_trigger)
+                  or scan_watchlist or scan_market or trade_plan or grid_plan or zone_trigger)
     navigating = symbol is not None or switch_chart
     # "What does Kimi say?" is read from Kimi's own facts: no detectors, and the chart stays as it is.
     asks_kimi = not feats and bool(re.search(r"\bkimi\b", p))
@@ -538,8 +555,8 @@ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases
                           answer_hint=prompt.strip()[:200], custom_levels=custom, remove=remove,
                           keep_existing=keep, alert_prices=alert_prices[:10], alert_targets=alert_targets,
                           symbol=symbol, switch_chart=switch_chart, scan_watchlist=scan_watchlist,
-                          scan_filter=scan_filter, scan_market=scan_market, trade_plan=trade_plan, indicators_on=indicators_on,
-                          indicators_off=indicators_off, zone_trigger=zone_trigger)
+                          scan_filter=scan_filter, scan_market=scan_market, trade_plan=trade_plan, grid_plan=grid_plan,
+                          indicators_on=indicators_on, indicators_off=indicators_off, zone_trigger=zone_trigger)
 
 
 _FEATURE_GROUPS: dict[str, list[str]] = {

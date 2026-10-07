@@ -203,6 +203,8 @@ scores are kept in `LLM_CHOICE_STORE` (default `.cache/llm_choice.json`). The sa
 | `GRIDBOTS_STORE` | `backend/.cache/gridbots.json` | Saved grid bots; `memory` = not saved |
 | `JOURNAL_STORE` | `backend/.cache/journal.json` | Trade journal; `memory` = not saved |
 | `JOURNAL_REVIEW_STORE` | `backend/.cache/journal_review.json` | Weekly trade review schedule; `memory` = not saved |
+| `BINANCE_API_KEY` / `BINANCE_API_SECRET` | empty | A **read-only** Binance key for the account import (see [Binance account](#binance-account-read-only-key)); wins over a key entered in the app |
+| `BINANCE_KEY_STORE` / `BINANCE_IMPORT_STORE` | `backend/.cache/binance_key.json`, `binance_import.json` | Key entered in the app, and imported fills with their classifications (both file mode 600); `memory` = not saved |
 | `CALENDAR_URLS` | Forex Factory this week + next week | Economic calendar feeds (JSON, Forex Factory format) |
 | `CALENDAR_COUNTRIES` | `USD` | Currencies kept from the calendar, or `ALL` |
 | `NEWS_FEEDS` | CoinDesk, Cointelegraph RSS | News feeds (RSS or Atom), comma-separated |
@@ -241,6 +243,12 @@ against the position (structure broke: consider closing). Each suggestion comes 
 suggests drawn on the chart in yellow. The app never touches your orders: "Moved it" records that you moved
 the stop there, and "I closed it" closes the trade at your price. Trades are kept in `TRADES_STORE`
 (default `.cache/trades.json`).
+
+With a read-only Binance key (see [Binance account](#binance-account-read-only-key)) the tab also lists your own
+open positions: spot holdings worth $5 or more with their average entry, and USD-M positions. Holdings and
+positions classed as a grid bot's are left out (override the class in the Account tab). Pick one, add its stop
+and targets, and it is managed like any other trade; when the position is no longer open on Binance (checked
+every 2 minutes) the trade is closed here at the last price. The key can't trade, so you still act on Binance.
 
 ## Alerts
 
@@ -326,6 +334,59 @@ is now, so the heatmap starts when you turn it on ("Order book since 14:02" on t
 shows a synthetic book with walls that come and go, with 45 minutes of made-up history, marked **Heatmap: demo
 order book**. It has a layer in the Layers tab, like the session levels.
 
+## Grid bot planner
+
+**Plan** in the Grid bots tab (or ask the agent "plan a grid bot on INJ") suggests a Spot Grid bot for a coin
+and says why (`backend/app/grid_planner.py`):
+
+- **Range:** the lower price is the low of the best support or demand zone below price, the upper price the high
+  of the best resistance or supply zone above it, from the same detectors the agent draws (on 1h, 4h or 1d, with
+  daily confluence). Each edge must sit 1.5–12 ATR from price; without a zone in that band it falls back to the
+  30-day low or high, then to 3 ATR.
+- **Grid type:** geometric when the upper price is 25% or more above the lower one, else arithmetic.
+- **Grids:** about 0.3 ATR per grid, widened until each grid clears the fees by at least 0.3% after both fills,
+  and capped so every order stays above Binance's minimum order size.
+
+The proposed range is drawn on the chart in amber while you plan (kept out of the price auto-scale, like the
+bots' own grids). Edit anything, then **Last 7/30/90 days** replays it with the tracker's simulator on 1-minute
+candles: grid profit, matched trades, grid and total APR, max drawdown, time in range, holding the coin instead
+and the bot's value over time, next to the same grid with a few other grid counts (**Use** switches to one).
+**Track this bot** saves it as a tracked bot starting now; the app never places orders.
+
+## Binance account (read-only key)
+
+The **Account** tab (and Settings) imports your own Binance fills into the journal and shows your positions,
+through an API key that can only read (`binance_account.py`, `binance_import.py`).
+
+- **The key:** on Binance, **Profile > API Management > Create API**, and tick **only "Enable Reading"**: no spot,
+  margin, futures or options trading, no withdrawals, no transfers. Before saving the key, and again every hour
+  and after any error, the backend asks Binance what it may do (`GET /sapi/v1/account/apiRestrictions`) and
+  refuses a key that can trade, withdraw or transfer, or whose permissions it cannot read. The key is stored on
+  the backend only (`backend/.cache/binance_key.json`, file mode 600) or comes from `BINANCE_API_KEY` /
+  `BINANCE_API_SECRET`; the browser only ever gets its last 4 characters. Requests are signed with HMAC-SHA256
+  over the query (with `timestamp` and `recvWindow`), and the clock is re-synced when Binance says it is off.
+- **Import:** spot fills (`/api/v3/myTrades`) for the coins in your wallet, your grid bots' pairs and any pairs you
+  list, and USD-M futures fills (`/fapi/v1/userTrades`) for every symbol with realized PnL or an open position.
+  Each fill is stored once, so re-imports never double up; **Auto-import** repeats it every 5 minutes to daily.
+  Fills are rebuilt into round trips (flat → position → flat; futures flips split a round trip), and only your
+  own closed round trips go into the journal, with their real entry, exit and PnL after fees. They have no stop,
+  so they count in the PnL but not in the R statistics.
+- **Mine, bot or unknown:** every fill, holding and position is classified, with the reason shown: your override
+  first; then an order placed in Binance's own apps (its `clientOrderId` starts with `web_`, `ios_`, `and_` or
+  `electron_`) is yours; a fill on a tracked grid bot's pair, while it ran, on one of its grid lines and with its
+  order size is that bot's; any other API order (random or broker `x-` ids) is unknown. Change any of them in the
+  Account tab; overrides are saved on the server and the journal follows.
+- **Positions:** your spot holdings with the average entry from your own buys, your USD-M positions, and the bots
+  apart: the Trading Bots wallet's total, holdings you marked as a bot's, and the tracked bots' simulated holdings.
+
+What is documented and what is inferred: Binance documents the per-wallet balances
+(`GET /sapi/v1/asset/wallet/balance`, which lists a "Trading Bots" wallet with its total value only) and the
+`clientOrderId` on every order (random when the client does not set one). **Binance has no public API for Spot
+Grid bots**, so their settings, orders and fills cannot be read; the grid bot's **Real vs simulated** section only
+shows fills on your spot account that match the bot. The app prefixes above, and that bot orders run from the
+Trading Bots wallet and so normally don't appear in your spot trade history, are inferred from what responses look
+like, not documented. Fees paid in BNB are not converted into the PnL (noted on the trade).
+
 ## API
 
 | Method | Path | Purpose |
@@ -360,6 +421,17 @@ order book**. It has a layer in the Layers tab, like the session levels.
 | GET/POST | `/api/gridbots` | Saved grid bots; POST `{name?, params, binance?}` → `{bot, result}` |
 | PATCH/DELETE | `/api/gridbots/{id}` | Edit or delete a saved bot |
 | GET | `/api/gridbots/{id}/result` | A saved bot's current numbers (recomputed at most once per 1m bar) |
+| POST | `/api/gridbot/plan` | `{symbol, investment?, timeframe?, grid_type?}` → suggested range, grids, type, reasoning, warnings |
+| POST | `/api/gridbot/backtest` | `{symbol, lower, upper, grids, grid_type, investment, days (1–90), compare_grids?}` → profit, matched trades, APR, max drawdown, time in range, value curve, other grid counts |
+| GET/PUT/DELETE | `/api/binance/key` | Read-only key status (last 4 characters, permissions); PUT `{api_key, api_secret}` saves it only if Binance reports it read-only |
+| POST | `/api/binance/key/test` | Ask Binance again what the key may do |
+| GET/POST | `/api/binance/import` | Import status; POST runs an import (new fills, journal added/updated/removed) |
+| PUT | `/api/binance/import/settings` | `{auto_minutes, symbols, futures, lookback_days}` |
+| GET | `/api/binance/fills?kind=&market=&symbol=` | Imported fills with their classification and reason |
+| GET | `/api/binance/trades?kind=` | Round trips rebuilt from the fills |
+| POST | `/api/binance/classify` | `{keys, kind ("manual"\|"bot"\|"unknown", null = automatic), bot_id?}` |
+| GET | `/api/binance/positions?refresh=` | Your spot holdings and USD-M positions, and the bots' apart |
+| GET | `/api/binance/gridbots/{id}/compare` | A tracked bot's real fills next to the simulated ones |
 | GET/POST | `/api/journal` | Logged trades with their evaluation; POST a trade `{symbol, interval, direction, entry, stop, targets, …}` |
 | PATCH/DELETE | `/api/journal/{id}` | Notes, tags, setup, cancel or close a trade; delete it |
 | GET | `/api/journal/stats?symbol=&setup=&direction=` | Win rate, R, expectancy, profit factor, breakdowns, equity curve |
@@ -431,6 +503,8 @@ Overlay types: `box`, `horizontal_line`, `trendline`, `marker` (see `backend/app
 - **Caching:** candles are kept in the browser (IndexedDB) and on the backend (SQLite), so opening the app draws the chart from cache at once and only the bars since the last visit are downloaded.
 - **Layers:** the layers tab lists what is drawn on the chart by group (agent zones, window levels, structure, trade plan, pinned answers, each part of Kimi Cooked, your drawings, alerts, journal trades, grid bots, …) with an eye toggle each, plus the pinned answers and your drawings. Labels that would overlap move apart.
 - **Grid bots** (`B`): track a Binance Spot Grid bot you already run. Copy its settings from Bot details on Binance: pair, lower and upper price, number of grids, arithmetic or geometric, investment and how long it has been running ("3d 4h 12m", or the start time). The app replays the bot on Binance's 1-minute candles from that moment and shows what the bot card shows: total PnL, grid profit, floating PnL, matched trades (all and last 24h), grid and total APR, plus its open orders, recent fills and matched trades per day. Its grid is drawn on the chart. To check it against Binance, type Binance's matched trades, grid profit and total PnL in the form and the bot shows both side by side. **More settings** covers fees (and the BNB discount), trigger price, take profit, stop loss, sell on stop and Binance's "Qty per order". The numbers can differ a little from Binance's: several fills inside one minute are not all seen, and Binance keeps a small fee reserve (enter its qty per order to remove that difference).
+- **Grid bot planner:** **Plan** in the Grid bots tab, or "plan a grid bot on INJ" to the agent, suggests a range, grid count and type with the reasons, tests it on the last 7/30/90 days and tracks it in one click (see [Grid bot planner](#grid-bot-planner)).
+- **Binance account:** the Account tab imports your own fills into the journal with a read-only API key, shows your positions apart from the bots', and lets you correct what is yours (see [Binance account](#binance-account-read-only-key)).
 - **Trade journal** (`J`): **Log trade** on a plan card tracks that plan, sized from your position-sizing settings, and **Add trade** logs your own. Each trade is followed on 1-minute candles: pending until the entry fills, then partial exits at each target (the stop moves to entry after the first), with R, PnL after fees, best and worst excursion. **Stats** shows win rate, average R, expectancy, profit factor, an equity curve and results by setup, coin and direction. Trades show on the chart; close or cancel them by hand when you exit early.
 - **Post-mortems and the weekly review:** when a journal trade closes (stop, target, breakeven or by hand) the backend writes a short review onto it: where the fill sat in its zone (the plan's zone, else the agent's nearest one), the best and worst excursion in R and which came first, what happened at each target (hit, missed by how much, reached after the exit), what the agent's levels and Kimi Cooked said when the trade was taken, and one or two concrete lessons (e.g. "stopped, then T1 was reached 2h later: the stop sat inside the noise"). The numbers are computed in Python from the candles; the configured LLM only rewrites the text, and its answer is dropped for the template when it contains a number that is not in the facts. **Regenerate** on the trade writes it again. The **Review** tab sums up the last 7, 14 or 30 days (win rate, average R, best and worst setup types and coins, lessons that keep coming back) and can send that summary to Telegram / Discord every week at a time you pick, next to the brief.
 - **Backtest** (`X`): pick a setup (first touch of fresh demand or supply, support or resistance holds, sweeps, Kimi Cooked signals, …), an exit (1.5R, 2R, 3R or the next level), a max hold and fees, and it replays the setup over the last 100–5,000 candles of the chart, with no look-ahead. It shows win rate, average and total R, profit factor, max drawdown, an equity curve and every trade; click a trade to see it on the chart.

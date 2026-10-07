@@ -151,6 +151,15 @@ class Settings:
     market_scan_store: str = field(default_factory=lambda: _env(
         "MARKET_SCAN_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "market_scan.json")))
 
+    # Read-only Binance account import (binance_account.py, binance_import.py). The env key wins over one entered
+    # in the app, which is kept in BINANCE_KEY_STORE (mode 600). Imported fills live in BINANCE_IMPORT_STORE.
+    binance_api_key: str = field(default_factory=lambda: _env("BINANCE_API_KEY", ""), repr=False)
+    binance_api_secret: str = field(default_factory=lambda: _env("BINANCE_API_SECRET", ""), repr=False)
+    binance_key_store: str = field(default_factory=lambda: _env(
+        "BINANCE_KEY_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "binance_key.json")))
+    binance_import_store: str = field(default_factory=lambda: _env(
+        "BINANCE_IMPORT_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "binance_import.json")))
+
 
 @lru_cache
 def get_settings() -> Settings:

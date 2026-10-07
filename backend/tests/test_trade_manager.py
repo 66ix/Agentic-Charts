@@ -147,3 +147,41 @@ def test_api_manages_a_journal_entry():
         assert c.post("/api/trades/managed", json={"symbol": "INJUSDT", "direction": "long",
                                                    "entry": 1, "stop": 2}).status_code == 422
         assert c.delete(f"/api/trades/managed/{t['id']}").json() == {"ok": True}
+
+
+class _Alerts:
+    def __init__(self):
+        self.sent = []
+
+    def record(self, *a, **kw):
+        self.sent.append(a)
+
+    def broadcast(self, msg):
+        self.sent.append(msg)
+
+
+def test_binance_position_closed_on_the_account_closes_the_trade():
+    df = frame(BASE + [101, 102])
+    held, sold, typed = (trade(df, 40, source="binance", source_id=k) for k in ("holding:spot:INJ", "holding:spot:SOL", None))
+    typed.source = "manual"
+    held.id, sold.id, typed.id = "held", "sold", "typed"
+    for t in (held, sold, typed):
+        review(t, df)
+    tm = TradeManager.__new__(TradeManager)
+    tm._trades = {t.id: t for t in (held, sold, typed)}
+    tm.alerts = _Alerts()
+
+    async def unknown():
+        return None  # no key, or Binance unreachable: nothing is closed
+
+    async def only_inj():
+        return {"holding:spot:INJ", "position:futures:BTCUSDT:BOTH"}
+
+    tm.open_positions = unknown
+    assert asyncio.run(tm.sync_positions()) is False and sold.status == "open"
+    tm.open_positions = only_inj
+    assert asyncio.run(tm.sync_positions()) is True
+    assert sold.status == "closed" and sold.exit_price == sold.last_price and sold.exit_r is not None
+    assert held.status == "open" and typed.status == "open"
+    assert any("no longer open on Binance" in str(m) for m in tm.alerts.sent)
+    assert asyncio.run(tm.sync_positions()) is False  # already closed: said once
