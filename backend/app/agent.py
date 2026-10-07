@@ -28,6 +28,7 @@ from .llm import ChartContext, LLMClient
 from .market_data import INTERVAL_SECONDS, MarketData, candles_to_df
 from .market_scanner import MarketScanner, MarketScanResult
 from .scanner import DEFAULT_WATCHLIST, scan, tickers
+from .session_levels import SessionLevelsService, level_facts
 from .schemas import (
     FEATURE_KINDS,
     TARGET_KINDS,
@@ -316,7 +317,8 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
                        derivatives: DerivativesService | None = None, kimi: KimiService | None = None,
                        futures: FuturesDataService | None = None,
                        events: EventsService | None = None,
-                       scanner: MarketScanner | None = None) -> AnalyzeResponse:
+                       scanner: MarketScanner | None = None,
+                       levels: SessionLevelsService | None = None) -> AnalyzeResponse:
     settings = get_settings()
     scanner = scanner or MarketScanner(market)
     chart = ChartContext(req.symbol, req.interval, req.watchlist)
@@ -392,14 +394,17 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         bool(intent.trade_plan) or bool(FUTURES_WORDS.search(req.prompt)))
     want_events = bool(intent.trade_plan) or bool(EVENT_WORDS.search(req.prompt))
     want_news = bool(NEWS_WORDS.search(req.prompt)) and not custom_chart
-    (candles, source), higher, frames, rows, deriv, kimi_facts, fut, upcoming, headlines, mscan = await asyncio.gather(
+    # Session / previous day-week-month / opening-range levels, so the answer can say "price is at the London high".
+    want_levels = levels is not None and not custom_chart
+    (candles, source), higher, frames, rows, deriv, kimi_facts, fut, upcoming, headlines, mscan, lvl = await asyncio.gather(
         candles_for_chart(), windows(),
         _confluence_frames(market, symbol, tf, [] if custom_chart else features), scan_rows(),
         derivatives.symbol_snapshot(symbol) if want_deriv else _none(),
         _kimi_facts(kimi, symbol, tf) if want_kimi else _none(),
         _guarded(futures.futures_context(symbol), "futures context") if want_futures else _none(),
         _upcoming(events, EVENT_HOURS) if want_events else _none(),
-        _headlines(events, symbol) if want_news else _empty(), market_scan())
+        _headlines(events, symbol) if want_news else _empty(), market_scan(),
+        _guarded(levels.get(symbol, tf), "session levels") if want_levels else _none())
 
     df = candles_to_df(candles)
     # Detection is CPU-bound (SciPy); keep the event loop free for streams.
@@ -435,6 +440,8 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         facts["kimi"] = kimi_facts
     if fut:
         facts["futures_context"] = fut
+    if lvl and (lf := level_facts(lvl, result.stats.last_price, result.stats.atr)):
+        facts["session_levels"] = lf
     if upcoming is not None:
         facts["upcoming_events"] = upcoming  # [] says "nothing high-impact coming", which is worth saying too
     if headlines:

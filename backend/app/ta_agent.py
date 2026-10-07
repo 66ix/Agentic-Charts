@@ -46,6 +46,7 @@ from .schemas import (
     MarkerOverlay,
     TrendlineOverlay,
 )
+from .session_levels import level_lines
 from .trade_plan import Level
 
 TF_LABEL = {
@@ -758,6 +759,8 @@ def describe(facts: dict, symbol: str) -> str:
             lines.append("Futures: " + ", ".join(bits) + ".")
     if facts.get("futures_context"):
         lines += _futures_lines(facts["futures_context"])
+    if facts.get("session_levels"):
+        lines += level_lines(facts["session_levels"])
     if facts.get("upcoming_events"):
         ev = facts["upcoming_events"]
         lines.append("Coming up: " + "; ".join(f"{e['country']} {e['title']} in {e['in_hours']:.0f}h" for e in ev[:3])

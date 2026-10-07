@@ -50,6 +50,7 @@ class StreamHub:
         self.market = market
         self._streams: dict[tuple[str, str], _Stream] = {}
         self._lock = asyncio.Lock()
+        self._last_price: dict[str, float] = {}  # newest close streamed per symbol (the demo heatmap centres on it)
 
     async def subscribe(self, symbol: str, interval: str) -> asyncio.Queue:
         key = (symbol.upper(), interval)
@@ -87,12 +88,18 @@ class StreamHub:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await t
 
+    def last_price(self, symbol: str) -> float | None:
+        """Close of the newest candle streamed for `symbol` on any interval, or None when it isn't streamed."""
+        return self._last_price.get(symbol.upper())
+
     def stats(self) -> list[dict]:
         return [{"symbol": s.symbol, "interval": s.interval, "subscribers": len(s.subscribers), "source": s.source}
                 for s in self._streams.values()]
 
     # ----------------------------------------------------------- internals
     def _publish(self, stream: _Stream, msg: dict) -> None:
+        if msg.get("type") == "kline":
+            self._last_price[stream.symbol] = msg["candle"]["close"]
         for q in list(stream.subscribers):
             if q.full():  # slow consumer: drop its oldest message rather than block everyone
                 with contextlib.suppress(asyncio.QueueEmpty):

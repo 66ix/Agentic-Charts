@@ -108,6 +108,7 @@ const ChartCell = forwardRef<AgenticChartHandle, Props>(function ChartCell(p, re
           onError={active?.onError}
           onAlertMove={active?.onAlertMove}
           onCrosshairTime={p.onCrosshairTime}
+          layers={p.visibility}
         />
       </div>
     </div>

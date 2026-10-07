@@ -12,6 +12,8 @@ REST
   *    /api/alerts*              price alerts, signal alerts and the alert history
   *    /api/brief*               the scheduled market brief
   *    /api/market-scan*         best long / short setups across the top coins by volume
+  GET  /api/levels/sessions      session (Asia/London/NY), previous day/week/month and opening-range levels
+  GET  /api/orderbook/heatmap    resting order-book liquidity over time (sampled while someone polls it)
 WebSocket
   /ws/klines?symbol=INJUSDT&interval=4h   live candle updates
   /ws/alerts                              alert snapshots, fires and history items
@@ -45,8 +47,10 @@ from .market_index import MarketIndexService
 from .market_metrics import MarketMetricsService
 from .model_choice import ModelChoice, ModelChooser
 from .market_scanner import MarketScanner
+from .orderbook_heatmap import OrderbookHeatmapService
 from .ratelimit import RateLimitMiddleware
 from .scanner import WatchlistCache, tickers
+from .session_levels import SessionLevelsService
 from .schemas import (INTERVALS, AnalyzeRequest, AnalyzeResponse, CreateAlertsRequest, KimiResponse, MarketMetrics,
                       ScanResult)
 from .signal_alerts import SIGNALS, CreateSignalAlertsRequest, SignalAlertPatch, SignalAlertService
@@ -91,6 +95,9 @@ async def lifespan(app: FastAPI):
     # Market-wide setup scanner (market_scanner.py) with plan track records (track_record.py), shared with the agent.
     app.state.market_scanner = MarketScanner(market, TrackRecordService(market), app.state.alerts)
     app.state.market_scanner.start()
+    # Session/period levels (session_levels.py) and the order-book heatmap (orderbook_heatmap.py).
+    app.state.session_levels = SessionLevelsService(market)
+    app.state.heatmap = OrderbookHeatmapService(market, app.state.hub)
     log.info("Data source: %s | LLM provider: %s %s", market.settings.data_source,
              app.state.llm.provider, app.state.llm.model)
     yield
@@ -98,6 +105,7 @@ async def lifespan(app: FastAPI):
     await app.state.brief.close()
     await app.state.models.close()
     await app.state.trades.close()
+    await app.state.heatmap.close()
     await app.state.signal_alerts.close()
     await asyncio.gather(app.state.futures.close(), app.state.events.close(), app.state.indexes.close())
     await app.state.alerts.close()
@@ -203,7 +211,7 @@ async def agent_analyze(req: AnalyzeRequest, request: Request) -> AnalyzeRespons
         st = request.app.state
         return await run_analysis(req, st.market, st.llm, st.derivatives, st.kimi,
                                   getattr(st, "futures", None), getattr(st, "events", None),
-                                  getattr(st, "market_scanner", None))
+                                  getattr(st, "market_scanner", None), levels=getattr(st, "session_levels", None))
     except MarketDataError as exc:
         raise HTTPException(502, str(exc)) from exc
     except ValueError as exc:
@@ -765,3 +773,28 @@ async def market_scan_run(request: Request, interval: str = Query("4h"),
     except MarketDataError as exc:
         raise HTTPException(502, str(exc)) from exc
     return scanner.status(iv)
+# ------------------------------------------------------ session and period levels, order-book heatmap --
+#   GET /api/levels/sessions?symbol=BTCUSDT&interval=1h&or_minutes=30
+#       {source, price, sessions: [{key, name, label, which, open, close, live, high, low, high_taken_at,
+#        low_taken_at}], periods: [...same, day/week/month], opening_ranges: [{key, label, open, close, until, live,
+#        high, low}]}; levels that don't belong on `interval` (sessions on D and above, ...) are left out
+#   GET /api/orderbook/heatmap?symbol=BTCUSDT&step=60&since=1700000000
+#       {source, note, bin_size, cadence, step, started_at, collecting, price, walls,
+#        columns: [[time, mid, first_bin, [notional per bin]]]}; polling it keeps the symbol sampled
+
+
+@app.get("/api/levels/sessions")
+async def session_levels(request: Request, symbol: str = Query("BTCUSDT"), interval: str | None = Query(None),
+                         or_minutes: int = Query(30, ge=5, le=240)) -> dict:
+    try:
+        return await request.app.state.session_levels.get(_norm_symbol(symbol),
+                                                          _check_interval(interval) if interval else None, or_minutes)
+    except MarketDataError as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+
+@app.get("/api/orderbook/heatmap")
+async def orderbook_heatmap(request: Request, symbol: str = Query("BTCUSDT"),
+                            step: int = Query(0, ge=0, le=86400, description="Column width in seconds"),
+                            since: int | None = Query(None, ge=0, description="Columns from this time on")) -> dict:
+    return await request.app.state.heatmap.get(_norm_symbol(symbol), step or None, since)

@@ -48,6 +48,12 @@ class Settings:
     oi_top_symbols: int = field(default_factory=lambda: int(_env("OI_TOP_SYMBOLS", "40")))
     liquidations_store: str = field(default_factory=lambda: _env(
         "LIQUIDATIONS_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "liquidations.json")))
+    # Order-book heatmap (orderbook_heatmap.py): spot depth snapshots every N seconds while someone views the symbol,
+    # `limit` levels each (Binance weight 50 at 1000, 250 at 5000), kept for M minutes, ±R% around the mid.
+    heatmap_interval_seconds: float = field(default_factory=lambda: float(_env("HEATMAP_INTERVAL_SECONDS", "10")))
+    heatmap_depth_limit: int = field(default_factory=lambda: int(_env("HEATMAP_DEPTH_LIMIT", "1000")))
+    heatmap_history_minutes: int = field(default_factory=lambda: int(_env("HEATMAP_HISTORY_MINUTES", "240")))
+    heatmap_range_pct: float = field(default_factory=lambda: float(_env("HEATMAP_RANGE_PCT", "3")))
 
     llm_provider: str = field(default_factory=lambda: _env("LLM_PROVIDER", "ollama").lower())
     llm_timeout: float = field(default_factory=lambda: float(_env("LLM_TIMEOUT_SECONDS", "30")))

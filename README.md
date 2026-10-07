@@ -61,6 +61,8 @@ agentic-charts/
 │   │   ├── market_metrics.py  Header metrics (CoinGecko, Fear & Greed, Binance futures)
 │   │   ├── derivatives.py     Open interest + rolling 24h liquidations from Binance futures
 │   │   ├── alerts.py          Server-side price alerts, Telegram / Discord notifications
+│   │   ├── session_levels.py  Asia / London / NY session highs and lows, PDH/PWH/PMH, opening range
+│   │   ├── orderbook_heatmap.py  Order-book sampler and rolling depth history for the heatmap
 │   │   ├── schemas.py         Pydantic models (overlay contract)
 │   │   └── config.py          Env configuration
 │   ├── tests/                 pytest: detectors, API, conversation, payloads (mocked) + opt-in live checks
@@ -208,6 +210,9 @@ scores are kept in `LLM_CHOICE_STORE` (default `.cache/llm_choice.json`). The sa
 | `MARKET_SCAN_SCHEDULE` | empty | Timed scans as `timeframe=minutes`, e.g. `15m=10,4h=60` (at least 5 minutes; empty = on demand only) |
 | `MARKET_SCAN_NOTIFY_TOP` | `0` | Send this many of the best setups to Telegram / Discord after each timed scan (`0` = off) |
 | `MARKET_SCAN_STORE` | `backend/.cache/market_scan.json` | The last scan per timeframe; `memory` = not saved |
+| `HEATMAP_INTERVAL_SECONDS` | `10` | How often the order-book heatmap samples the book of a symbol someone is viewing |
+| `HEATMAP_DEPTH_LIMIT` | `1000` | Levels per snapshot (Binance request weight 50; `5000` reaches further but weighs 250) |
+| `HEATMAP_HISTORY_MINUTES` / `HEATMAP_RANGE_PCT` | `240`, `3` | Heatmap history kept per symbol (in memory) and how far from the mid it reaches |
 | `NEXT_PUBLIC_API_URL` | `http://localhost:8000` | Frontend → backend |
 | `NEXT_PUBLIC_WS_URL` | derived from API URL | Override for proxies |
 
@@ -274,6 +279,39 @@ Restart the backend, open the bell panel in the header and press **Send test**, 
 the token) and never block other alerts. Alerts created before this version lived in the browser;
 they are uploaded once the first time the app connects to a backend that has none.
 
+## Session and period levels
+
+**Session levels** in the Indicators menu draws the Asia, London and New York session highs and lows (the
+latest session and the one before), the previous day, week and month high and low (`PDH`, `PWL`, …) and the
+opening range (the first 30 minutes of the UTC day, or of each session). **Lengths and colours…** picks which
+ones show, whether session ranges are shaded, the opening-range length (5 to 240 minutes) and whether levels
+price has already traded through stay on the chart (as a faint stub ending in a cross where price took them).
+Untaken levels run to the right edge with a short label; only the previous day / week / month get price tags on
+the axis. The levels of a session that is still running follow the live candle.
+
+Sessions are local exchange hours, converted to UTC per date so they stay right across daylight saving:
+Asia 09:00–18:00 Tokyo (00:00–09:00 UTC), London 08:00–16:30 London time (07:00 UTC in summer time, 08:00 in
+winter), New York 09:30–16:00 New York time (13:30 or 14:30 UTC). Only weekday sessions count. Days, weeks
+(from Monday) and months are UTC, like Binance's candles. The backend (`session_levels.py`) computes everything
+from 30m, 4h and (for opening ranges that aren't a multiple of 30 minutes) 15m or 5m candles, whatever the chart's
+timeframe. Sessions and opening ranges are hidden on D and above, the previous day on D, the previous week on W.
+The chart agent gets the same levels in its facts, so it can say "price is at the London high" or name the
+nearest untaken level each side. On the synthetic feed they are computed from demo candles and marked as demo
+data on the chart.
+
+## Order-book heatmap
+
+**Order-book heatmap** in the Indicators menu paints resting liquidity behind the candles, Bookmap-style: one
+column per time step (two per candle), one cell per price bin, brighter for more resting size, so a wall shows
+as a bright band that starts when it is placed and ends when it is pulled or eaten. The biggest walls in the
+newest snapshot are tagged with their size at the right end. The backend (`orderbook_heatmap.py`) samples the
+spot order book (`/api/v3/depth`, 1,000 levels) of a symbol every 10 seconds only while a chart polls it, buckets
+it into fixed price bins and keeps up to 4 hours per symbol in memory; nobody polling for 45 seconds stops the
+sampling (a hidden tab stops polling), and the history goes 15 minutes later. Binance only serves the book as it
+is now, so the heatmap starts when you turn it on ("Order book since 14:02" on the chart). Without Binance it
+shows a synthetic book with walls that come and go, with 45 minutes of made-up history, marked **Heatmap: demo
+order book**. It has a layer in the Layers tab, like the session levels.
+
 ## API
 
 | Method | Path | Purpose |
@@ -315,6 +353,8 @@ they are uploaded once the first time the app connects to a backend that has non
 | GET | `/api/futures/funding`, `/open-interest`, `/long-short`, `/liquidation-levels` `?symbol=` | Futures data for the market data tab (`source`: `binance`, `synthetic` or `unavailable`) |
 | GET | `/api/cvd?symbol=&interval=` | Spot taker buy and sell volume per bar and its running sum |
 | GET | `/api/orderbook/walls?symbol=&range_pct=5` | Large resting orders near price |
+| GET | `/api/orderbook/heatmap?symbol=&step=60&since=` | Resting liquidity over time: `columns` of `[time, mid, first_bin, [notional per bin]]`, `bin_size`, current `walls`; polling it keeps the symbol sampled |
+| GET | `/api/levels/sessions?symbol=&interval=1h&or_minutes=30` | Asia / London / New York session highs and lows (latest and previous), previous day / week / month, opening ranges, each with when price took it |
 | GET | `/api/calendar?days=7&impact=high` | Economic events |
 | GET | `/api/news?symbol=` | Crypto headlines, tagged with the coins they mention |
 | GET | `/api/index/klines?name=TOTAL2&interval=4h` | TOTAL, TOTAL2, TOTAL3 market-cap index candles (top 20 coins) |
