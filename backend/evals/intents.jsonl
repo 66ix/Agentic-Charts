@@ -55,3 +55,6 @@
 {"prompt": "show my kimi indicator", "expect": {"indicators_on": ["kimi"], "remove": [], "custom_levels_count": 0}}
 {"prompt": "hide kimi cooked", "expect": {"indicators_off": ["kimi"], "remove": []}}
 {"prompt": "turn on kimi and the rsi", "expect": {"indicators_on": ["kimi", "rsi"]}}
+{"prompt": "plan a grid bot on SOL", "expect": {"grid_plan": true, "symbol": "SOLUSDT", "trade_plan": null}}
+{"prompt": "what grid settings would you use here?", "expect": {"grid_plan": true, "trade_plan": null}}
+{"prompt": "hide the grid lines", "expect": {"grid_plan": false}}

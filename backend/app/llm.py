@@ -49,7 +49,7 @@ INTENT_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["features", "timeframe", "window_timeframes", "max_zones", "answer_hint", "custom_levels",
                  "remove", "keep_existing", "alert_prices", "alert_targets", "symbol", "switch_chart",
-                 "scan_watchlist", "scan_filter", "trade_plan", "indicators_on", "indicators_off"],
+                 "scan_watchlist", "scan_filter", "trade_plan", "grid_plan", "indicators_on", "indicators_off"],
     "properties": {
         "features": {
             "type": "array",
@@ -140,6 +140,11 @@ INTENT_SCHEMA: dict[str, Any] = {
             "description": "Build an entry/stop/targets plan from the detected zones ('give me a long setup' → long, "
                            "'what's the trade here?' → auto). null otherwise.",
         },
+        "grid_plan": {
+            "type": "boolean",
+            "description": "true when the user wants a Spot Grid bot planned ('plan a grid bot on INJ', 'what grid "
+                           "settings for SOL?'): the app suggests the range, number of grids and grid type.",
+        },
         "indicators_on": {"type": "array", "items": {"type": "string", "enum": list(INDICATORS)},
                           "description": "Chart indicators to show ('add RSI' → rsi; 'show my Kimi' or 'turn on "
                                          "Kimi Cooked' → kimi, the user's own indicator)."},
@@ -162,6 +167,7 @@ INTENT_SYSTEM = (
     "'Kimi' or 'Kimi Cooked' is the user's own indicator: 'show Kimi' → indicators_on kimi; a question about what "
     "Kimi says needs no detectors (its facts are read separately) and keeps the chart as it is (keep_existing true). "
     "Keep what is on the chart (keep_existing true) whenever the request doesn't ask for a new analysis. "
+    "'Grid bot' or 'grid trading' means grid_plan (a Binance Spot Grid bot), not a trade plan. "
     "Respond with JSON only."
 )
 
@@ -182,6 +188,8 @@ NARRATE_SYSTEM = (
     "walls and estimated liquidation clusters (call them estimates); use what the question needs. "
     "FACTS.upcoming_events lists high-impact economic events by hours from now: with a trade plan, warn about any "
     "inside it; an empty list means nothing high-impact is scheduled. FACTS.headlines are recent news titles. "
+    "FACTS.grid_plan is a Spot Grid bot plan: give its range and what it is built on, the grids and grid type and "
+    "the profit per grid after fees, and say it can be tested on history in the Grid bots tab. "
     "No disclaimers, no markdown."
 )
 
@@ -244,6 +252,11 @@ _PLAN = (r"\b(?:trade plan|trade idea|(?:long|short|trade) setup|setup|plan (?:a
          r"where (?:should|would|do|can) i (?:buy|enter|long|short|sell|get in)|should i (?:long|short|buy|sell)|"
          r"(?:long|short) (?:entry|idea|trade|position)|give me (?:a|an) (?:long|short|entry|trade)|"
          r"what(?:'s| is) the trade)\b")
+# "plan a grid bot on INJ", "grid trading settings for SOL", "suggest a grid": a Spot Grid bot plan (not grid lines).
+_GRID = (r"\bgrid[ -]?(?:bots?|trading|strateg(?:y|ies))\b(?:\s+(?:setup|settings?|plan|range))?|"
+         r"\bgrid (?:setup|settings?|parameters|params)\b|"
+         r"\b(?:plan|set ?up|suggest|design|build|make|create|recommend)\b[^.?!]{0,20}?\bgrids?\b(?! ?lines?)"
+         r"(?:\s+(?:setup|settings?|plan|range))?")
 
 
 def _num(token: str) -> float:
@@ -371,6 +384,10 @@ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases
     for span in spans:  # "support at 24.1" is a drawing, not a request for the S/R detector
         scan = scan.replace(span, " ")
 
+    grid_plan = bool(re.search(_GRID, scan))
+    if grid_plan:
+        scan = re.sub(_GRID, " ", scan)
+
     trade_plan = None
     if re.search(_PLAN, scan):
         trade_plan = ("long" if re.search(r"\b(?:long|buy|bull)", scan)
@@ -421,7 +438,7 @@ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases
         re.search(r"\b(?:chart|timeframe|tf)\b", p)) and not feats)
 
     acting = bool(custom or remove or alert_prices or alert_targets or indicators_on or indicators_off
-                  or scan_watchlist or trade_plan)
+                  or scan_watchlist or trade_plan or grid_plan)
     navigating = symbol is not None or switch_chart
     # "What does Kimi say?" is read from Kimi's own facts: no detectors, and the chart stays as it is.
     asks_kimi = not feats and bool(re.search(r"\bkimi\b", p))
@@ -443,7 +460,8 @@ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases
                           answer_hint=prompt.strip()[:200], custom_levels=custom, remove=remove,
                           keep_existing=keep, alert_prices=alert_prices[:10], alert_targets=alert_targets,
                           symbol=symbol, switch_chart=switch_chart, scan_watchlist=scan_watchlist,
-                          scan_filter=scan_filter, trade_plan=trade_plan, indicators_on=indicators_on,
+                          scan_filter=scan_filter, trade_plan=trade_plan, grid_plan=grid_plan,
+                          indicators_on=indicators_on,
                           indicators_off=indicators_off)
 
 

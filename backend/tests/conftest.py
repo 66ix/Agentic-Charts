@@ -15,3 +15,7 @@ for _key in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "DISCORD_WEBHOOK_URL"):
     os.environ[_key] = ""  # set (even empty) so python-dotenv will not fill it from .env
 os.environ["AGENT_RATE_LIMIT"] = "0"
 os.environ["API_RATE_LIMIT"] = "0"
+os.environ["BINANCE_KEY_STORE"] = "memory"
+os.environ["BINANCE_IMPORT_STORE"] = "memory"
+for _key in ("BINANCE_API_KEY", "BINANCE_API_SECRET"):
+    os.environ[_key] = ""  # tests never see a real key from .env

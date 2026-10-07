@@ -18,6 +18,11 @@ drifts from the market and editing an entry simply re-evaluates it. The rules ar
 
 Trades older than the range cache allows on 1m (about 13 months) are tracked on 5m or 15m candles and say so. While
 Binance is unreachable the last real evaluation is kept rather than replaced by synthetic demo prices.
+
+Trades imported from the user's Binance fills (binance_import.py, `source="binance"`) carry `imported`: their
+entry, exit and PnL are what Binance filled, not a candle replay. They have no stop unless the user gives one, so
+they count in the dollar PnL but not in the R statistics. Re-imports update them in place (by `external_id`), and
+one the user deletes is not imported again.
 """
 
 from __future__ import annotations
@@ -52,7 +57,7 @@ RESOLUTIONS = ("1m", "5m", "15m")
 
 Direction = Literal["long", "short"]
 Status = Literal["pending", "open", "closed", "cancelled"]
-ExitKind = Literal["T1", "T2", "T3", "T4", "T5", "stop", "breakeven", "manual"]
+ExitKind = Literal["T1", "T2", "T3", "T4", "T5", "stop", "breakeven", "manual", "exchange"]
 
 
 # ------------------------------------------------------------------ models --
@@ -63,6 +68,23 @@ class ManualClose(BaseModel):
     price: float = Field(..., gt=0)
 
 
+class ImportedTrade(BaseModel):
+    """A round trip rebuilt from the user's Binance fills (binance_import.py). Its result comes from the fills."""
+
+    external_id: str = Field(..., max_length=120, description="Stable id of the round trip, for re-imports")
+    market: Literal["spot", "futures"]
+    opened_at: int
+    closed_at: Optional[int] = None
+    qty: float = Field(..., gt=0, description="Largest position size in the round trip, in coins")
+    entry_price: float = Field(..., gt=0, description="Average entry")
+    exit_price: Optional[float] = Field(None, description="Average exit")
+    realized_pnl: float = Field(..., description="In the quote asset, after fees")
+    fees: float = Field(0.0, description="In the quote asset")
+    fills: int = Field(..., ge=1)
+    quote_asset: str = "USDT"
+    notes: list[str] = Field(default_factory=list)
+
+
 class NewJournalEntry(BaseModel):
     """What POST /api/journal takes. Prices are validated against the direction."""
 
@@ -70,10 +92,10 @@ class NewJournalEntry(BaseModel):
     interval: str = Field("4h", description="Chart timeframe the trade was taken on")
     direction: Direction
     entry: float = Field(..., gt=0, description="Limit price, or the reference price of a market order")
-    stop: float = Field(..., gt=0)
-    targets: list[float] = Field(..., min_length=1, max_length=MAX_TARGETS)
+    stop: Optional[float] = Field(None, gt=0, description="Required, except on trades imported from Binance")
+    targets: list[float] = Field(default_factory=list, max_length=MAX_TARGETS)
     setup: str = Field("manual", max_length=60, description="e.g. 'H4 demand', 'Kimi B+', 'manual'")
-    source: Literal["agent_plan", "kimi", "manual"] = "manual"
+    source: Literal["agent_plan", "kimi", "manual", "binance"] = "manual"
     notes: str = Field("", max_length=2000)
     tags: list[str] = Field(default_factory=list, max_length=10)
     entry_type: Literal["limit", "market"] = "limit"
@@ -82,6 +104,7 @@ class NewJournalEntry(BaseModel):
     fee_pct: float = Field(0.1, ge=0, le=1, description="Fee per side, % of notional")
     manage: Literal["breakeven_after_t1", "none"] = "breakeven_after_t1"
     taken_at: Optional[int] = Field(None, ge=0, description="UNIX seconds; default now")
+    imported: Optional[ImportedTrade] = Field(None, description="Set on trades imported from Binance fills")
 
     @field_validator("symbol")
     @classmethod
@@ -110,10 +133,15 @@ class NewJournalEntry(BaseModel):
 
     @model_validator(mode="after")
     def _prices(self) -> "NewJournalEntry":
-        if not all(math.isfinite(x) for x in (self.entry, self.stop, *self.targets)):
+        if self.imported is None and self.stop is None:
+            raise ValueError("a trade needs a stop")
+        if self.imported is None and not self.targets:
+            raise ValueError("a trade needs at least one target")
+        stops = () if self.stop is None else (self.stop,)
+        if not all(math.isfinite(x) for x in (self.entry, *stops, *self.targets)):
             raise ValueError("prices must be finite numbers")
         long = self.direction == "long"
-        if (self.stop >= self.entry) if long else (self.stop <= self.entry):
+        if self.stop is not None and ((self.stop >= self.entry) if long else (self.stop <= self.entry)):
             raise ValueError(f"a {self.direction} needs its stop {'below' if long else 'above'} the entry")
         bad = [t for t in self.targets if (t <= self.entry if long else t >= self.entry)]
         if bad:
@@ -234,6 +262,8 @@ def evaluate_entry(e: JournalEntry, df: pd.DataFrame, data_source: str = "binanc
     if e.cancelled:
         out.status = "cancelled"
         return out
+    if e.imported is not None:
+        return evaluate_imported(e, out)
     if resolution != "1m":
         out.notes.append(f"Tracked on {resolution} candles (the trade is older than the 1m history kept), so fills "
                          f"and exits inside one candle are less exact.")
@@ -253,6 +283,7 @@ def evaluate_entry(e: JournalEntry, df: pd.DataFrame, data_source: str = "binanc
         out.last_price = float(df["close"].iloc[-1])
     long = e.direction == "long"
     sign = 1.0 if long else -1.0
+    assert e.stop is not None  # only imported trades go without one
     risk = abs(e.entry - e.stop)
     n = len(t)
 
@@ -371,6 +402,38 @@ def evaluate_entry(e: JournalEntry, df: pd.DataFrame, data_source: str = "binanc
     return out
 
 
+def evaluate_imported(e: JournalEntry, out: JournalEvaluation) -> JournalEvaluation:
+    """A trade imported from Binance fills: the fills are the result. R only when the user gave a stop."""
+    im = e.imported
+    assert im is not None
+    long = e.direction == "long"
+    out.data_source, out.resolution = "binance", "fills"
+    out.status = "closed" if im.closed_at is not None else "open"
+    out.filled_at, out.fill_price = im.opened_at, im.entry_price
+    out.pnl_usd = round(im.realized_pnl, 2)
+    risk = abs(im.entry_price - e.stop) if e.stop is not None else 0.0
+    if risk > 0:
+        gross = im.realized_pnl + im.fees
+        out.gross_r = round(gross / (im.qty * risk), 4)
+        out.fees_r = round(im.fees / (im.qty * risk), 4)
+        out.realized_r = round(im.realized_pnl / (im.qty * risk), 4)
+    if im.closed_at is not None and im.exit_price:
+        r = (im.exit_price - im.entry_price) * (1 if long else -1) / risk if risk > 0 else 0.0
+        out.exits = [JournalExit(time=im.closed_at, price=im.exit_price, kind="exchange", fraction=1.0, r=round(r, 4))]
+        out.closed_at, out.remaining = im.closed_at, 0.0
+        if risk > 0:
+            out.outcome = ("win" if out.realized_r > BREAKEVEN_BAND_R else "loss"
+                           if out.realized_r < -BREAKEVEN_BAND_R else "breakeven")
+        else:  # no stop: within 0.1% of the position's value counts as breakeven
+            band = im.qty * im.entry_price * 0.001
+            out.outcome = "win" if im.realized_pnl > band else "loss" if im.realized_pnl < -band else "breakeven"
+    out.notes = [f"Imported from your Binance {im.market} fills ({im.fills} fill{'s' if im.fills != 1 else ''}): "
+                 f"entry, exit and PnL ({im.quote_asset}, after fees) are what Binance filled."] + list(im.notes)
+    if e.stop is None:
+        out.notes.append("No stop, so this trade counts in the PnL but not in the R statistics.")
+    return out
+
+
 # ------------------------------------------------------------------- stats --
 
 
@@ -395,7 +458,11 @@ def journal_stats(rows: list[tuple[JournalEntry, JournalEvaluation]], symbol: Op
              if (not symbol or e.symbol == symbol) and (not setup or e.setup.lower() == setup.lower())
              and (not direction or e.direction == direction)]
     sel = [(e, ev) for e, ev in match if ev.status != "cancelled"]
-    closed = sorted([(e, ev) for e, ev in sel if ev.status == "closed"], key=lambda x: (x[1].closed_at or 0, x[0].id))
+    all_closed = [(e, ev) for e, ev in sel if ev.status == "closed"]
+    # R needs a stop: imported trades without one count in the dollar PnL only.
+    closed = sorted([(e, ev) for e, ev in all_closed if e.stop is not None], key=lambda x: (x[1].closed_at or 0,
+                                                                                             x[0].id))
+    no_r = len(all_closed) - len(closed)
     rs = [ev.realized_r for _, ev in closed]
     wins = [r for r in rs if r > BREAKEVEN_BAND_R]
     losses = [r for r in rs if r < -BREAKEVEN_BAND_R]
@@ -416,6 +483,10 @@ def journal_stats(rows: list[tuple[JournalEntry, JournalEvaluation]], symbol: Op
         notes.append("Some trades are tracked on synthetic demo data (Binance unreachable).")
     if 0 < n < 20:
         notes.append(f"Only {n} closed trade{'s' if n != 1 else ''}: too few to trust these numbers yet.")
+    if no_r:
+        notes.append(f"{no_r} imported trade{'s have' if no_r != 1 else ' has'} no stop, so "
+                     f"{'they count' if no_r != 1 else 'it counts'} in the PnL but not in the R numbers.")
+    pnl = [ev.pnl_usd for _, ev in all_closed if ev.pnl_usd is not None]
 
     def rnd(x: Optional[float]) -> Optional[float]:
         return None if x is None else round(x, 4)
@@ -433,6 +504,8 @@ def journal_stats(rows: list[tuple[JournalEntry, JournalEvaluation]], symbol: Op
         "by_setup": _group(closed, lambda e: e.setup), "by_symbol": _group(closed, lambda e: e.symbol),
         "by_direction": _group(closed, lambda e: e.direction),
         "equity": equity, "notes": notes,
+        "imported_closed": sum(1 for e, _ in all_closed if e.imported is not None), "no_r": no_r,
+        "pnl_usd": round(sum(pnl), 2) if pnl else None,
     }
 
 
@@ -463,6 +536,8 @@ def entry_from_plan(plan: TradePlan, symbol: str, interval: str, **extra) -> New
 
 # ----------------------------------------------------------------- service --
 
+_NO_CANDLES = pd.DataFrame({k: pd.Series(dtype=float) for k in ("time", "open", "high", "low", "close")})
+
 
 @dataclass
 class _Cached:
@@ -481,6 +556,7 @@ class JournalService:
         self._store = None if store.lower() in ("memory", "none", "off") else Path(store)
         self._entries: dict[str, JournalEntry] = {}
         self._evals: dict[str, _Cached] = {}
+        self._dismissed: set[str] = set()  # imported trades the user deleted: not imported again
         self._load()
 
     # -------------------------------------------------------------- CRUD
@@ -518,6 +594,8 @@ class JournalService:
         upd: dict = {k: v for k, v in patch.model_dump(include={"notes", "tags", "setup"}).items() if v is not None}
         if "setup" in upd:
             upd["setup"] = upd["setup"].strip() or "manual"
+        if (patch.cancel is not None or patch.close is not None) and entry.imported is not None:
+            raise ValueError("Imported trades follow your Binance fills; they can't be closed or cancelled here")
         if patch.cancel is not None or patch.close is not None:
             ev = await self.evaluate(entry)
             if patch.cancel:
@@ -547,11 +625,48 @@ class JournalService:
         return entry, await self.evaluate(entry)
 
     async def remove(self, entry_id: str) -> bool:
-        if self._entries.pop(entry_id, None) is None:
+        entry = self._entries.pop(entry_id, None)
+        if entry is None:
             return False
+        if entry.imported is not None:
+            self._dismissed.add(entry.imported.external_id)
         self._evals.pop(entry_id, None)
         self._save()
         return True
+
+    def sync_imported(self, trades: list[NewJournalEntry]) -> dict:
+        """Make the imported trades in the journal match `trades` (all of them carry `imported`): add new ones,
+        refresh changed ones (keeping the user's notes, tags and setup), and remove imported entries that are no
+        longer in the list (e.g. their fills were re-classified as a bot's). Trades the user deleted stay out."""
+        now = time.time()
+        have = {e.imported.external_id: e for e in self._entries.values() if e.imported is not None}
+        want = {t.imported.external_id: t for t in trades if t.imported is not None}
+        added = updated = removed = 0
+        for ext, new in want.items():
+            if ext in self._dismissed:
+                continue
+            old = have.get(ext)
+            if old is None:
+                if len(self._entries) >= MAX_ENTRIES:
+                    break
+                taken = new.taken_at if new.taken_at is not None else int(now)
+                entry = JournalEntry(**new.model_dump(exclude={"taken_at"}), id=uuid.uuid4().hex[:12],
+                                     taken_at=taken, created_at=int(now), updated_at=now)
+                self._entries[entry.id] = entry
+                added += 1
+            elif old.imported != new.imported or old.direction != new.direction or old.entry != new.entry:
+                self._entries[old.id] = old.model_copy(update={
+                    "imported": new.imported, "direction": new.direction, "entry": new.entry,
+                    "size_qty": new.size_qty, "taken_at": new.taken_at or old.taken_at, "updated_at": now})
+                updated += 1
+        for ext, old in have.items():
+            if ext not in want and old.source == "binance":
+                self._entries.pop(old.id, None)
+                self._evals.pop(old.id, None)
+                removed += 1
+        if added or updated or removed:
+            self._save()
+        return {"added": added, "updated": updated, "removed": removed}
 
     # --------------------------------------------------------- evaluation
     def _cached(self, e: JournalEntry, now: float) -> Optional[JournalEvaluation]:
@@ -579,6 +694,10 @@ class JournalService:
             hit = self._cached(e, now)
             if hit is not None:
                 out[e.id] = hit
+            elif e.imported is not None:  # the fills are the result: no candles needed
+                ev = evaluate_entry(e, _NO_CANDLES, "binance", "1m", now)
+                self._remember(e, ev, now)
+                out[e.id] = ev
             elif e.cancelled or e.taken_at > now:
                 ev = JournalEvaluation(status="cancelled" if e.cancelled else "pending", evaluated_at=int(now))
                 if e.cancelled:
@@ -634,7 +753,9 @@ class JournalService:
         if not self._store or not self._store.exists():
             return
         try:
-            rows = json.loads(self._store.read_text()).get("entries", [])
+            data = json.loads(self._store.read_text())
+            rows = data.get("entries", [])
+            self._dismissed = set(data.get("dismissed_imports", []))
         except (OSError, ValueError, AttributeError) as exc:
             log.warning("Could not read %s (%s); starting with an empty journal", self._store, exc)
             return
@@ -654,7 +775,8 @@ class JournalService:
         try:
             self._store.parent.mkdir(parents=True, exist_ok=True)
             tmp = self._store.with_suffix(".tmp")
-            tmp.write_text(json.dumps({"entries": [e.model_dump() for e in self._entries.values()]}))
+            tmp.write_text(json.dumps({"entries": [e.model_dump() for e in self._entries.values()],
+                                       "dismissed_imports": sorted(self._dismissed)}))
             tmp.replace(self._store)
         except OSError as exc:
             log.warning("Could not save the journal to %s: %s", self._store, exc)

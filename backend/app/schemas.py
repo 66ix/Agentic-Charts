@@ -7,7 +7,7 @@ can draw is described here and mirrored in `frontend/lib/types.ts`.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Annotated, Literal, Optional, Union
+from typing import Annotated, Any, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -195,6 +195,7 @@ class AnalysisIntent(BaseModel):
     scan_watchlist: bool = Field(False, description="Scan every watchlist symbol instead of one chart")
     scan_filter: ScanFilter = "any"
     trade_plan: Optional[Literal["long", "short", "auto"]] = Field(None, description="Build a trade plan")
+    grid_plan: bool = Field(False, description="Plan a Spot Grid bot: range, grids, type (grid_planner.py)")
     indicators_on: list[IndicatorName] = Field(default_factory=list)
     indicators_off: list[IndicatorName] = Field(default_factory=list)
 
@@ -224,7 +225,7 @@ class AnalysisIntent(BaseModel):
     def has_actions(self) -> bool:
         return bool(self.custom_levels or self.remove or self.alert_prices or self.alert_targets or self.symbol
                     or self.switch_chart or self.scan_watchlist or self.trade_plan or self.indicators_on
-                    or self.indicators_off)
+                    or self.indicators_off or self.grid_plan)
 
     @model_validator(mode="after")
     def _default_features(self) -> "AnalysisIntent":
@@ -370,6 +371,7 @@ class AnalyzeResponse(BaseModel):
     indicators: dict[str, bool] = Field(default_factory=dict, description="Indicator toggles to apply")
     scan: list[ScanResult] = Field(default_factory=list)
     plan: Optional[TradePlan] = None
+    grid_plan: Optional[dict[str, Any]] = Field(None, description="A grid bot plan (grid_planner.GridPlan)")
     steps: list[str] = Field(default_factory=list, description="What the agent looked at, in order")
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
