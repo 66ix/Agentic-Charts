@@ -49,7 +49,7 @@ INTENT_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["features", "timeframe", "window_timeframes", "max_zones", "answer_hint", "custom_levels",
                  "remove", "keep_existing", "alert_prices", "alert_targets", "symbol", "switch_chart",
-                 "scan_watchlist", "scan_filter", "trade_plan", "indicators_on", "indicators_off"],
+                 "scan_watchlist", "scan_filter", "scan_market", "trade_plan", "indicators_on", "indicators_off"],
     "properties": {
         "features": {
             "type": "array",
@@ -133,12 +133,19 @@ INTENT_SCHEMA: dict[str, Any] = {
                            "'scan my watchlist', 'anything oversold?'.",
         },
         "scan_filter": {"type": "string", "enum": list(SCAN_FILTERS),
-                        "description": "What the scan ranks by; 'any' when it is not a scan."},
+                        "description": "What the scan ranks by; 'any' when it is not a scan. For a market scan: "
+                                       "bullish for longs only, bearish for shorts only, any for both."},
+        "scan_market": {
+            "type": "boolean",
+            "description": "true for the best trade setups across the whole market (the top coins by volume), not "
+                           "just the watchlist: 'best 5m setups right now', 'scan the market for longs', 'top short "
+                           "setups on the 1h'. The timeframe is the scan's. false for 'my coins' or 'my watchlist'.",
+        },
         "trade_plan": {
             "type": ["string", "null"],
             "enum": ["long", "short", "auto", None],
             "description": "Build an entry/stop/targets plan from the detected zones ('give me a long setup' → long, "
-                           "'what's the trade here?' → auto). null otherwise.",
+                           "'what's the trade here?' → auto). null for a market scan. null otherwise.",
         },
         "indicators_on": {"type": "array", "items": {"type": "string", "enum": list(INDICATORS)},
                           "description": "Chart indicators to show ('add RSI' → rsi; 'show my Kimi' or 'turn on "
@@ -161,6 +168,8 @@ INTENT_SYSTEM = (
     "overlays, sets alerts, switches the chart, toggles indicators or scans the watchlist, features may be empty. "
     "'Kimi' or 'Kimi Cooked' is the user's own indicator: 'show Kimi' → indicators_on kimi; a question about what "
     "Kimi says needs no detectors (its facts are read separately) and keeps the chart as it is (keep_existing true). "
+    "'Best setups right now' or 'scan the market' is scan_market (the whole market, not the watchlist) with no "
+    "features and keep_existing true. "
     "Keep what is on the chart (keep_existing true) whenever the request doesn't ask for a new analysis. "
     "Respond with JSON only."
 )
@@ -174,7 +183,11 @@ NARRATE_SYSTEM = (
     "If FACTS lists actions (levels you drew, overlays removed, alerts set, chart switched), confirm them briefly. "
     "Lead with what matters for a decision: where price sits relative to the nearest zones (distance in ATR), "
     "higher-timeframe confluence, structure breaks, divergences, sweeps, and funding/open interest when given. "
-    "For a trade plan give entry, stop, targets and reward-to-risk. For a scan name the best few coins and why. "
+    "For a trade plan give entry, stop, targets and reward-to-risk, and its track record (FACTS.plan.track_record: "
+    "how this setup type did on this coin and timeframe in the backtest) in one short clause; when its status is "
+    "too_few_trades, short_history, no_match or unavailable say that instead of a win rate, and mention demo data. "
+    "For a scan name the best few coins and why. FACTS.market_scan ranks setups across the top coins by volume: "
+    "name the best two or three with direction, entry, reward-to-risk and their track record. "
     "FACTS.kimi is the user's own indicator, Kimi Cooked: name it, and give its levels with odds_pct (the chance "
     "price reaches that level within the forecast window), its latest signals and its forecast when they answer "
     "the question. "
@@ -244,6 +257,11 @@ _PLAN = (r"\b(?:trade plan|trade idea|(?:long|short|trade) setup|setup|plan (?:a
          r"where (?:should|would|do|can) i (?:buy|enter|long|short|sell|get in)|should i (?:long|short|buy|sell)|"
          r"(?:long|short) (?:entry|idea|trade|position)|give me (?:a|an) (?:long|short|entry|trade)|"
          r"what(?:'s| is) the trade)\b")
+# The whole market (market_scanner.py), unless the request is about "my" coins, this chart or a named coin.
+_MARKET_SCAN = (r"\b(?:(?:scan|screen|search|sweep|check) (?:the |across the )?(?:whole |entire |crypto |broader )?market|"
+                r"market[- ]wide|across the (?:whole |entire )?market|(?:any|good|best|top)(?: \d+)?(?: \w+){0,2} setups|"
+                r"best(?: \w+){0,2} (?:setups?|trades?) (?:right now|now|today|out there))\b")
+_NOT_MARKET = r"\b(?:my|watch ?list|here|this (?:chart|coin|pair|one))\b"
 
 
 def _num(token: str) -> float:
@@ -371,14 +389,18 @@ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases
     for span in spans:  # "support at 24.1" is a drawing, not a request for the S/R detector
         scan = scan.replace(span, " ")
 
+    scan_market = symbol is None and bool(re.search(_MARKET_SCAN, scan)) and not re.search(_NOT_MARKET, scan)
+    if scan_market:
+        scan = re.sub(_MARKET_SCAN, " ", scan)
+
     trade_plan = None
-    if re.search(_PLAN, scan):
+    if re.search(_PLAN, scan) and not scan_market:
         trade_plan = ("long" if re.search(r"\b(?:long|buy|bull)", scan)
                       else "short" if re.search(r"\b(?:short|sell|bear)", scan) else "auto")
         scan = re.sub(_PLAN, " ", scan)
 
-    scan_watchlist = bool(re.search(_SCAN, scan))
-    scan_filter = _scan_filter(scan) if scan_watchlist else "any"
+    scan_watchlist = bool(re.search(_SCAN, scan)) and not scan_market
+    scan_filter = _scan_filter(scan) if scan_watchlist else _scan_filter(p_ind) if scan_market else "any"
     if scan_watchlist:
         scan = re.sub(_SCAN, " ", scan)
 
@@ -405,7 +427,7 @@ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases
         feats.append("patterns")
     if re.search(r"volume profile|\bpoc\b|value area|\bvpvr\b|\bvah\b|\bval\b", scan):
         feats.append("volume_profile")
-    if scan_watchlist and not re.search(r"\b(?:this|the) chart\b|\bhere\b", scan):
+    if (scan_watchlist and not re.search(r"\b(?:this|the) chart\b|\bhere\b", scan)) or scan_market:
         feats = []  # "which coins are near demand" ranks the scan; it doesn't ask for zones on this chart
     if alert_targets == ["new"] and not feats and not custom and not trade_plan:
         alert_targets = ["all"]
@@ -418,10 +440,10 @@ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases
     single = bool(re.search(r"\b(the|current|nearest|key)\b.*\b(zone|level|high|low)\b(?!s)", scan))
     max_zones = 1 if single else 2
     switch_chart = bool(re.search(_SWITCH, p)) or (timeframe is not None and bool(
-        re.search(r"\b(?:chart|timeframe|tf)\b", p)) and not feats)
+        re.search(r"\b(?:chart|timeframe|tf)\b", p)) and not feats and not scan_market)
 
     acting = bool(custom or remove or alert_prices or alert_targets or indicators_on or indicators_off
-                  or scan_watchlist or trade_plan)
+                  or scan_watchlist or scan_market or trade_plan)
     navigating = symbol is not None or switch_chart
     # "What does Kimi say?" is read from Kimi's own facts: no detectors, and the chart stays as it is.
     asks_kimi = not feats and bool(re.search(r"\bkimi\b", p))
@@ -443,7 +465,7 @@ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases
                           answer_hint=prompt.strip()[:200], custom_levels=custom, remove=remove,
                           keep_existing=keep, alert_prices=alert_prices[:10], alert_targets=alert_targets,
                           symbol=symbol, switch_chart=switch_chart, scan_watchlist=scan_watchlist,
-                          scan_filter=scan_filter, trade_plan=trade_plan, indicators_on=indicators_on,
+                          scan_filter=scan_filter, scan_market=scan_market, trade_plan=trade_plan, indicators_on=indicators_on,
                           indicators_off=indicators_off)
 
 

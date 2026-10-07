@@ -55,3 +55,9 @@
 {"prompt": "show my kimi indicator", "expect": {"indicators_on": ["kimi"], "remove": [], "custom_levels_count": 0}}
 {"prompt": "hide kimi cooked", "expect": {"indicators_off": ["kimi"], "remove": []}}
 {"prompt": "turn on kimi and the rsi", "expect": {"indicators_on": ["kimi", "rsi"]}}
+{"prompt": "best 5m setups right now", "expect": {"scan_market": true, "timeframe": "5m", "scan_watchlist": false, "trade_plan": null, "features": [], "switch_chart": false}}
+{"prompt": "scan the market for longs", "expect": {"scan_market": true, "scan_filter": "bullish", "scan_watchlist": false, "trade_plan": null}}
+{"prompt": "what are the best short setups across the market on the 1h", "expect": {"scan_market": true, "scan_filter": "bearish", "timeframe": "1h", "trade_plan": null}}
+{"prompt": "any good setups right now?", "expect": {"scan_market": true, "scan_filter": "any", "symbol": null}}
+{"prompt": "best setups on my watchlist", "expect": {"scan_market": false, "scan_watchlist": true}}
+{"prompt": "best long setup on SOL", "expect": {"scan_market": false, "trade_plan": "long", "symbol": "SOLUSDT"}}

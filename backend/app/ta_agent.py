@@ -478,7 +478,7 @@ def analyze(
                 color=rgba(color, 0.22), border_color=rgba(color, 0.7), time_start=z.first_time,
                 strength=round(min(z.score, 1.0), 2),
             ))
-            levels.append(Level(z.kind, z.price_low, z.price_high, label, z.score))
+            levels.append(Level(z.kind, z.price_low, z.price_high, label, z.score, htf=tuple(z.meta.get("htf") or ())))
         facts["resistance"] = sorted([_zone_fact(z, last, atr_v, "touches", z.touches) for z in sr_zones
                                       if z.kind == "resistance"], key=lambda f: f["low"])
         facts["support"] = sorted([_zone_fact(z, last, atr_v, "touches", z.touches) for z in sr_zones
@@ -496,7 +496,8 @@ def analyze(
                 label=label, kind=z.kind, price_high=z.price_high, price_low=z.price_low, color=rgba(color, 0.18),
                 border_color=rgba(color, 0.65), time_start=z.first_time, strength=round(min(z.score, 1.0), 2),
             ))
-            levels.append(Level(z.kind, z.price_low, z.price_high, label, z.score))
+            levels.append(Level(z.kind, z.price_low, z.price_high, label, z.score, tests=z.tests,
+                                htf=tuple(z.meta.get("htf") or ())))
         facts["supply"] = sorted([_zone_fact(z, last, atr_v, "tests", z.tests) for z in sd if z.kind == "supply"],
                                  key=lambda f: f["low"])
         facts["demand"] = sorted([_zone_fact(z, last, atr_v, "tests", z.tests) for z in sd if z.kind == "demand"],
@@ -771,6 +772,8 @@ def describe(facts: dict, symbol: str) -> str:
         lines.append(f"{p['direction'].title()} plan from {p['basis']}: entry {_fmt(p['entry'])}, "
                      f"stop {_fmt(p['stop'])}, targets {tgts}.")
         lines += p.get("notes", [])
+        if (p.get("track_record") or {}).get("summary"):
+            lines.append(f"Track record: {p['track_record']['summary']}.")
     elif "plan" in facts:
         lines.append("No clean trade plan here: no zone or swing to put a stop behind.")
     if facts.get("scan"):
@@ -779,6 +782,16 @@ def describe(facts: dict, symbol: str) -> str:
                                                for r in best) + ".")
     elif "scan" in facts:
         lines.append("Couldn't scan the watchlist.")
+    if "market_scan" in facts:
+        ms = facts["market_scan"]
+        if ms.get("setups"):
+            demo = " (demo data)" if ms.get("data_source") == "synthetic" else ""
+            lines.append(f"Best {ms['timeframe']} setups across {ms['coins']} coins{demo}: " + "; ".join(
+                f"{s['direction']} {s['symbol']} entry {_fmt(s['entry'])}, stop {_fmt(s['stop'])}, T1 "
+                f"{_fmt(s['target'])} ({s['rr']}R, {s['distance_pct']}% away)"
+                + (f", {s['track_record']}" if s.get("track_record") else "") for s in ms["setups"][:3]) + ".")
+        else:
+            lines.append(ms.get("note") or f"No {ms['timeframe']} setups across the market right now.")
     if facts.get("kimi"):
         lines += _kimi_lines(facts["kimi"])
     lines += facts.get("actions", [])

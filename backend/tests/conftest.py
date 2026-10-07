@@ -15,3 +15,4 @@ for _key in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "DISCORD_WEBHOOK_URL"):
     os.environ[_key] = ""  # set (even empty) so python-dotenv will not fill it from .env
 os.environ["AGENT_RATE_LIMIT"] = "0"
 os.environ["API_RATE_LIMIT"] = "0"
+os.environ["MARKET_SCAN_STORE"] = "memory"

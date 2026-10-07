@@ -11,6 +11,7 @@ REST
   POST /api/agent/analyze        prompt → structured chart overlays
   *    /api/alerts*              price alerts, signal alerts and the alert history
   *    /api/brief*               the scheduled market brief
+  *    /api/market-scan*         best long / short setups across the top coins by volume
 WebSocket
   /ws/klines?symbol=INJUSDT&interval=4h   live candle updates
   /ws/alerts                              alert snapshots, fires and history items
@@ -42,12 +43,14 @@ from .llm import LLMClient
 from .market_data import MarketData, MarketDataError
 from .market_index import MarketIndexService
 from .market_metrics import MarketMetricsService
+from .market_scanner import MarketScanner
 from .ratelimit import RateLimitMiddleware
 from .scanner import WatchlistCache, tickers
 from .schemas import (INTERVALS, AnalyzeRequest, AnalyzeResponse, CreateAlertsRequest, KimiResponse, MarketMetrics,
                       ScanResult)
 from .signal_alerts import SIGNALS, CreateSignalAlertsRequest, SignalAlertPatch, SignalAlertService
 from .stream_hub import StreamHub
+from .track_record import TrackRecordService
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("agentic-charts")
@@ -79,9 +82,13 @@ async def lifespan(app: FastAPI):
     app.state.brief = BriefService(market, app.state.kimi, app.state.derivatives, app.state.alerts,
                                    events_provider=app.state.events.upcoming_events)
     app.state.brief.start()
+    # Market-wide setup scanner (market_scanner.py) with plan track records (track_record.py), shared with the agent.
+    app.state.market_scanner = MarketScanner(market, TrackRecordService(market), app.state.alerts)
+    app.state.market_scanner.start()
     log.info("Data source: %s | LLM provider: %s %s", market.settings.data_source,
              app.state.llm.provider, app.state.llm.model)
     yield
+    await app.state.market_scanner.close()
     await app.state.brief.close()
     await app.state.signal_alerts.close()
     await asyncio.gather(app.state.futures.close(), app.state.events.close(), app.state.indexes.close())
@@ -187,7 +194,8 @@ async def agent_analyze(req: AnalyzeRequest, request: Request) -> AnalyzeRespons
     try:
         st = request.app.state
         return await run_analysis(req, st.market, st.llm, st.derivatives, st.kimi,
-                                  getattr(st, "futures", None), getattr(st, "events", None))
+                                  getattr(st, "futures", None), getattr(st, "events", None),
+                                  getattr(st, "market_scanner", None))
     except MarketDataError as exc:
         raise HTTPException(502, str(exc)) from exc
     except ValueError as exc:
@@ -639,3 +647,26 @@ async def index_klines(request: Request, name: str = Query("TOTAL", description=
         raise HTTPException(502, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+# ------------------------------------------------------------ market-wide setup scanner --
+#   GET  /api/market-scan?interval=4h            {interval, result (last scan or null), running, schedule, next_run,
+#                                                 top, notify_top, channels}
+#   POST /api/market-scan/run?interval=4h&top=   scans now (or joins the scan already running) → the same shape
+
+
+@app.get("/api/market-scan")
+async def market_scan_status(request: Request, interval: str = Query("4h")) -> dict:
+    return request.app.state.market_scanner.status(_check_interval(interval))
+
+
+@app.post("/api/market-scan/run")
+async def market_scan_run(request: Request, interval: str = Query("4h"),
+                          top: int | None = Query(None, ge=5, le=300)) -> dict:
+    scanner: MarketScanner = request.app.state.market_scanner
+    iv = _check_interval(interval)
+    try:
+        await scanner.run(iv, top)
+    except MarketDataError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    return scanner.status(iv)

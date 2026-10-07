@@ -54,6 +54,20 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "scan_market",
+        "description": "Rank the best long and short trade setups across the top coins by 24h volume (not just the "
+                       "watchlist) on a timeframe: entry, stop, T1, reward-to-risk, distance from price, how many "
+                       "timeframes agree and each setup's backtested track record. Use it for 'best setups right "
+                       "now', 'scan the market for longs', 'what's moving that I could trade?'.",
+        "parameters": {
+            "type": "object", "additionalProperties": False, "required": ["timeframe", "direction"],
+            "properties": {
+                "timeframe": {"type": "string", "enum": list(INTERVALS)},
+                "direction": {"type": "string", "enum": ["long", "short", "any"]},
+            },
+        },
+    },
+    {
         "name": "market_context",
         "description": "24h change, futures funding (now and 24h average), open interest and its 24h change, long/short "
                        "ratio, 24h spot CVD, the nearest order-book walls, estimated liquidation clusters, and "
@@ -88,7 +102,7 @@ TOOLS: list[dict[str, Any]] = [
 
 LOOP_SYSTEM = (
     "You are the planning step of a crypto charting agent. {chart} You can call look_at_chart, scan_watchlist, "
-    "read_kimi and market_context to gather facts (at most {steps} calls in total), then you must call "
+    "scan_market, read_kimi and market_context to gather facts (at most {steps} calls in total), then you must call "
     "draw_on_chart exactly once with the plan for what to show. Only look first when the answer depends on "
     "something you can't see yet: another timeframe ('does the daily agree?'), another coin ('compare with ETH'), "
     "several coins, funding/open interest, or the user's Kimi Cooked indicator on another coin or timeframe. For a "
@@ -104,6 +118,7 @@ class Toolbox:
     scan: Callable[[str, str], Awaitable[list[dict]]]
     context: Callable[[str], Awaitable[dict]]
     kimi: Callable[[str, str], Awaitable[dict]] | None = None
+    market_scan: Callable[[str, str], Awaitable[dict]] | None = None
 
 
 @dataclass
@@ -130,6 +145,11 @@ async def _run_tool(box: Toolbox, name: str, args: dict, chart: ChartContext) ->
         filt = args.get("filter") if args.get("filter") in SCAN_FILTERS else "any"
         rows = await box.scan(tf, filt)
         return rows, f"Scanned {len(rows)} watchlist coins on {tf}"
+    if name == "scan_market" and box.market_scan is not None:
+        tf = args.get("timeframe") if args.get("timeframe") in INTERVALS else chart.interval
+        direction = args.get("direction") if args.get("direction") in ("long", "short") else "any"
+        res = await box.market_scan(tf, direction)
+        return res, f"Scanned the top {res.get('coins', 0)} coins for {tf} setups"
     if name == "read_kimi" and box.kimi is not None:
         sym = str(args.get("symbol") or chart.symbol).upper()
         tf = args.get("timeframe") if args.get("timeframe") in INTERVALS else chart.interval

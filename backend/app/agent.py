@@ -25,7 +25,8 @@ from .events import EventsService
 from .futures_data import FuturesDataService
 from .kimi_service import KimiService, summarize
 from .llm import ChartContext, LLMClient
-from .market_data import MarketData, candles_to_df
+from .market_data import INTERVAL_SECONDS, MarketData, candles_to_df
+from .market_scanner import MarketScanner, MarketScanResult
 from .scanner import DEFAULT_WATCHLIST, scan, tickers
 from .schemas import (
     FEATURE_KINDS,
@@ -36,6 +37,7 @@ from .schemas import (
     AnalyzeResponse,
     BoxOverlay,
     HorizontalLineOverlay,
+    MarketSetup,
     Navigate,
     is_custom_symbol,
 )
@@ -150,7 +152,7 @@ def _compact(facts: dict) -> dict:
 
 def make_toolbox(market: MarketData, derivatives: DerivativesService | None, watchlist: list[str],
                  kimi: KimiService | None = None, futures: FuturesDataService | None = None,
-                 events: EventsService | None = None) -> Toolbox:
+                 events: EventsService | None = None, scanner: MarketScanner | None = None) -> Toolbox:
     async def look(symbol: str, tf: str, features: list[str]) -> dict:
         candles, source = await market.get_klines(symbol, tf, 400)
         frames = await _confluence_frames(market, symbol, tf, features)
@@ -180,7 +182,19 @@ def make_toolbox(market: MarketData, derivatives: DerivativesService | None, wat
             return {"error": "Kimi Cooked is not available"}
         return {"data_source": (k := await kimi.get(symbol, tf)).data_source, **summarize(k)}
 
-    return Toolbox(look=look, scan=scan_tool, context=context, kimi=read_kimi if kimi else None)
+    async def market_scan_tool(tf: str, direction: str) -> dict:
+        if scanner is None:
+            return {"error": "the market scanner is not available"}
+        try:
+            res = await asyncio.wait_for(scanner.fresh_or_run(tf, scan_max_age(tf)), MARKET_SCAN_WAIT)
+        except asyncio.TimeoutError:
+            return {"error": "the market scan is still running; its results will be ready in a minute"}
+        except Exception as exc:  # network: the planner carries on without it
+            return {"error": f"the market scan failed: {exc}"}
+        return market_scan_facts(res, None if direction == "any" else direction, 8)
+
+    return Toolbox(look=look, scan=scan_tool, context=context, kimi=read_kimi if kimi else None,
+                   market_scan=market_scan_tool if scanner else None)
 
 
 async def _none() -> None:
@@ -253,6 +267,40 @@ async def _confluence_frames(market: MarketData, symbol: str, tf: str, features:
 
 KIMI_WORDS = re.compile(r"\bkimi\b", re.I)
 
+# Market-wide scans (market_scanner.py): results younger than one candle (5 to 30 minutes) are reused; a new scan
+# is waited for this long, then the answer says it is still running (it finishes in the background and is kept).
+MARKET_SCAN_WAIT = 45.0
+TRACK_RECORD_WAIT = 15.0
+SCAN_DIRECTIONS = {"bullish": "long", "near_support": "long", "oversold": "long", "bearish": "short",
+                   "near_resistance": "short", "overbought": "short"}
+
+
+def plan_facts(plan) -> dict:
+    """The plan for the narrator: its track record cut to the line to quote and the caveats."""
+    out = plan.model_dump(exclude={"zone_kind", "zone_fresh", "zone_htf", "track_record"})
+    if tr := plan.track_record:
+        out["track_record"] = {"summary": tr.summary, "status": tr.status, "data_source": tr.data_source,
+                               "caveats": [n for n in tr.notes if not n.startswith("Backtest of")]}
+    return out
+
+
+def scan_max_age(tf: str) -> float:
+    return max(300.0, min(1800.0, float(INTERVAL_SECONDS.get(tf, 1800))))
+
+
+def market_scan_facts(res: MarketScanResult, direction: str | None, n: int = 6) -> dict:
+    """The best setups of a market scan, trimmed for the narrator and the tool loop."""
+    rows = res.best(n, direction)
+    return {
+        "timeframe": res.interval, "coins": res.scanned, "direction": direction or "both",
+        "age_minutes": round(max(0.0, time.time() * 1000 - res.generated_at) / 60000, 1),
+        "data_source": res.data_source, "notes": res.notes,
+        "setups": [{"symbol": r.symbol, "direction": r.direction, "entry": r.entry, "stop": r.stop, "target": r.target,
+                    "rr": r.rr, "distance_pct": r.distance_pct, "basis": r.basis,
+                    "timeframes_agreeing": f"{r.agreement.aligned:g}/{r.agreement.total}",
+                    "track_record": r.track_record.summary if r.track_record else None} for r in rows],
+    }
+
 
 async def _kimi_facts(kimi: KimiService | None, symbol: str, tf: str) -> dict | None:
     if kimi is None:
@@ -267,14 +315,16 @@ async def _kimi_facts(kimi: KimiService | None, symbol: str, tf: str) -> dict | 
 async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
                        derivatives: DerivativesService | None = None, kimi: KimiService | None = None,
                        futures: FuturesDataService | None = None,
-                       events: EventsService | None = None) -> AnalyzeResponse:
+                       events: EventsService | None = None,
+                       scanner: MarketScanner | None = None) -> AnalyzeResponse:
     settings = get_settings()
+    scanner = scanner or MarketScanner(market)
     chart = ChartContext(req.symbol, req.interval, req.watchlist)
     steps: list[str] = []
     research: list[dict] = []
     loop = None
     if req.prompt.strip() and llm.available() and settings.agent_mode == "tools":
-        box = make_toolbox(market, derivatives, req.watchlist, kimi, futures, events)
+        box = make_toolbox(market, derivatives, req.watchlist, kimi, futures, events, scanner)
         loop = await plan_with_tools(llm, req.prompt, req.history, req.overlays, req.previous_intent, chart, box,
                                      settings.agent_max_steps)
     if loop:
@@ -321,6 +371,19 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
             return []
         return await scan(market, req.watchlist or DEFAULT_WATCHLIST, tf, intent.scan_filter)
 
+    scan_direction = SCAN_DIRECTIONS.get(intent.scan_filter)
+
+    async def market_scan() -> MarketScanResult | str | None:
+        if not intent.scan_market:
+            return None
+        try:
+            return await asyncio.wait_for(scanner.fresh_or_run(tf, scan_max_age(tf)), MARKET_SCAN_WAIT)
+        except asyncio.TimeoutError:
+            return "still_running"
+        except Exception as exc:  # the answer goes out without it
+            log.warning("Market scan for the agent failed: %s", exc)
+            return "failed"
+
     want_deriv = derivatives is not None and bool(req.prompt.strip()) and not custom_chart
     # The user's own indicator: read it when they name it or switch it on.
     want_kimi = ("kimi" in intent.indicators_on or bool(KIMI_WORDS.search(req.prompt))) and not custom_chart
@@ -329,14 +392,14 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         bool(intent.trade_plan) or bool(FUTURES_WORDS.search(req.prompt)))
     want_events = bool(intent.trade_plan) or bool(EVENT_WORDS.search(req.prompt))
     want_news = bool(NEWS_WORDS.search(req.prompt)) and not custom_chart
-    (candles, source), higher, frames, rows, deriv, kimi_facts, fut, upcoming, headlines = await asyncio.gather(
+    (candles, source), higher, frames, rows, deriv, kimi_facts, fut, upcoming, headlines, mscan = await asyncio.gather(
         candles_for_chart(), windows(),
         _confluence_frames(market, symbol, tf, [] if custom_chart else features), scan_rows(),
         derivatives.symbol_snapshot(symbol) if want_deriv else _none(),
         _kimi_facts(kimi, symbol, tf) if want_kimi else _none(),
         _guarded(futures.futures_context(symbol), "futures context") if want_futures else _none(),
         _upcoming(events, EVENT_HOURS) if want_events else _none(),
-        _headlines(events, symbol) if want_news else _empty())
+        _headlines(events, symbol) if want_news else _empty(), market_scan())
 
     df = candles_to_df(candles)
     # Detection is CPU-bound (SciPy); keep the event loop free for streams.
@@ -352,7 +415,9 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
                           result.levels, result.swing_lows, result.swing_highs, result.bias)
         if plan and (note := _event_note(upcoming)):
             plan.notes.append(note)
-        facts["plan"] = plan.model_dump() if plan else None
+        if plan and not custom_chart:  # how this kind of setup did on this coin and timeframe (track_record.py)
+            plan.track_record = await scanner.track.for_plan(symbol, tf, plan, timeout=TRACK_RECORD_WAIT)
+        facts["plan"] = plan_facts(plan) if plan else None
         if plan:
             plan_ovs = plan_overlays(plan, int(df["time"].iloc[-1]))
             for ov in plan_ovs:
@@ -377,6 +442,14 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
     if intent.scan_watchlist:
         facts["scan"] = [r.model_dump(include={"symbol", "last_price", "change_pct", "trend", "rsi", "signals",
                                                "nearest_kind", "distance_pct"}) for r in rows[:6]]
+    setups: list[MarketSetup] = []
+    if isinstance(mscan, MarketScanResult):
+        facts["market_scan"] = market_scan_facts(mscan, scan_direction)
+        setups = mscan.best(10, scan_direction)
+    elif intent.scan_market:
+        facts["market_scan"] = {"timeframe": tf, "setups": [], "note": (
+            "The market scan is still running; ask again in a minute or open the Scanner tab." if mscan ==
+            "still_running" else "The market scan could not run right now.")}
     if research:
         facts["research"] = [{"step": s, "result": r["result"]} for s, r in zip(steps, research)]
     nav = []
@@ -413,5 +486,6 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         indicators={**toggles, **({"kimi": True} if show_kimi else {})},
         scan=rows[:10],
         plan=plan,
+        setups=setups,
         steps=steps,
     )
