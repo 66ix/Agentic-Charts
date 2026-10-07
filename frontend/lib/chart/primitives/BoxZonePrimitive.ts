@@ -1,4 +1,4 @@
-import type { AutoscaleInfo, ISeriesPrimitivePaneView } from "lightweight-charts";
+import type { AutoscaleInfo, ISeriesPrimitivePaneView, Logical } from "lightweight-charts";
 
 import type { BoxOverlay } from "../../types";
 import type { TimeMapper } from "../timeMapper";
@@ -30,10 +30,10 @@ export class BoxZonePrimitive extends PrimitiveBase {
     return this.axisViews;
   }
 
-  /** Keep AI zones in view: the price scale expands to include them. */
-  autoscaleInfo(): AutoscaleInfo | null {
+  /** Keep AI zones near the candles in view: the price scale expands to include them (far ones stay off-screen). */
+  autoscaleInfo(start: Logical, end: Logical): AutoscaleInfo | null {
     if (this.box.autoscale === false) return null;
-    return { priceRange: { minValue: this.box.price_low, maxValue: this.box.price_high } };
+    return this.nearAutoscale(this.box.price_low, this.box.price_high, start, end);
   }
 
   private bounds(width: number) {

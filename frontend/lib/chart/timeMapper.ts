@@ -11,11 +11,30 @@ import type { IChartApi, Logical } from "lightweight-charts";
  */
 export class TimeMapper {
   private times: number[] = [];
+  private bars: readonly { high: number; low: number }[] = [];
   constructor(private step: number) {}
 
-  setData(times: number[], step: number) {
+  /** `bars` is kept by reference, so a live candle updated in place is seen without another setData. */
+  setData(times: number[], step: number, bars: readonly { high: number; low: number }[] = []) {
     this.times = times;
     this.step = step;
+    this.bars = bars;
+  }
+
+  /** Lowest low and highest high of the bars between two logical indexes (the visible candles), null if none. */
+  priceRange(from: number, to: number): { lo: number; hi: number } | null {
+    const n = this.bars.length;
+    const a = Math.max(0, Math.floor(from));
+    const b = Math.min(n - 1, Math.ceil(to));
+    if (a > b) return null;
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (let i = a; i <= b; i++) {
+      const bar = this.bars[i];
+      if (bar.low < lo) lo = bar.low;
+      if (bar.high > hi) hi = bar.high;
+    }
+    return lo <= hi ? { lo, hi } : null;
   }
 
   get length() {

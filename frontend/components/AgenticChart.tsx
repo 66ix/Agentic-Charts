@@ -679,7 +679,7 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
       if (last && c.time === last.time) data[data.length - 1] = c;
       else {
         data.push(c);
-        mapperRef.current.setData(data.map((d) => d.time), INTERVAL_SECONDS[interval]);
+        mapperRef.current.setData(data.map((d) => d.time), INTERVAL_SECONDS[interval], data);
         setBarCount((n) => n + 1);
         if (last && propsRef.current.indicators.kimi) {
           // The previous candle just closed: Kimi Cooked has a new run.
@@ -742,7 +742,7 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
         candlesRef.current = data;
         const lastBar = data[data.length - 1];
         setLegend(lastBar ? { c: lastBar, change: ((lastBar.close - lastBar.open) / lastBar.open) * 100 } : null);
-        mapperRef.current.setData(data.map((d) => d.time), INTERVAL_SECONDS[interval]);
+        mapperRef.current.setData(data.map((d) => d.time), INTERVAL_SECONDS[interval], data);
         const precision = pricePrecision(data[data.length - 1]?.close ?? 1);
         candleRef.current?.applyOptions({
           priceFormat: { type: "price", precision, minMove: 1 / 10 ** precision },

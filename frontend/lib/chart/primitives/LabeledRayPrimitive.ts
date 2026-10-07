@@ -1,4 +1,4 @@
-import type { AutoscaleInfo, ISeriesPrimitiveAxisView, ISeriesPrimitivePaneView } from "lightweight-charts";
+import type { AutoscaleInfo, ISeriesPrimitiveAxisView, ISeriesPrimitivePaneView, Logical } from "lightweight-charts";
 
 import { formatPrice } from "../../format";
 import type { HorizontalLineOverlay } from "../../types";
@@ -42,9 +42,9 @@ export class LabeledRayPrimitive extends PrimitiveBase {
     return this.line.axis_label === false ? [] : this.axis;
   }
 
-  autoscaleInfo(): AutoscaleInfo | null {
+  autoscaleInfo(start: Logical, end: Logical): AutoscaleInfo | null {
     if (this.line.autoscale === false) return null;
-    return { priceRange: { minValue: this.line.price, maxValue: this.line.price } };
+    return this.nearAutoscale(this.line.price, this.line.price, start, end);
   }
 
   private draw(ctx: CanvasRenderingContext2D, size: { width: number; height: number }) {
