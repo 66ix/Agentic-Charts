@@ -37,3 +37,11 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: npm run build
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose build
+      # The eval set is imported on demand (Settings → AI model), so check it made it into the image.
+      - run: docker compose run --rm --no-deps backend python -c "import app.main, evals.run"
