@@ -12,6 +12,7 @@ import { alertFromDrawing, alertOverlays } from "@/lib/alerts";
 import { analyze } from "@/lib/api";
 import { DEFAULT_INTERVAL, DEFAULT_SYMBOL } from "@/lib/config";
 import { isCustom } from "@/lib/customSymbols";
+import { CHAT_ID_KEY, CHATS_KEY, toSession, upsertSession, worthKeeping, type ChatSession } from "@/lib/chatHistory";
 import { createJournalEntry, planToJournalEntry } from "@/lib/journal";
 import { DEFAULT_SIZING, sizePlan, type SizingSettings } from "@/lib/sizing";
 import type { DockPanelProps } from "@/lib/dock";
@@ -377,6 +378,40 @@ export default function ChartWorkspace() {
   const [dialog, setDialog] = useState<"settings" | "indicators" | "shortcuts" | null>(null);
   const analysisCtrl = useRef<AbortController | null>(null);
 
+  // Past conversations: "New chat" files the current one here, and opening one brings it back to continue.
+  const [chats, setChats] = usePersistentState<ChatSession[]>(CHATS_KEY, []);
+  const [chatId, setChatId] = usePersistentState<string>(CHAT_ID_KEY, "");
+  const archiveChat = useCallback(() => {
+    if (worthKeeping(messages)) setChats((list) => upsertSession(list, toSession(chatId || uid(), messages, lastIntent)));
+  }, [messages, lastIntent, chatId, setChats]);
+  const stopAnswer = useCallback(() => {
+    // An answer still on its way belongs to the conversation it was asked in, not the next one.
+    analysisCtrl.current?.abort();
+    setBusy(false);
+  }, []);
+  const newChat = useCallback(() => {
+    stopAnswer();
+    archiveChat();
+    setMessages(() => []);
+    setLastIntent(null);
+    setChatId(uid());
+  }, [stopAnswer, archiveChat, setMessages, setLastIntent, setChatId]);
+  const openChat = useCallback(
+    (id: string) => {
+      const chat = chats.find((c) => c.id === id);
+      if (!chat) return;
+      stopAnswer();
+      archiveChat();
+      // The opened one is the current conversation now; it goes back in the history when it is left.
+      setChats((list) => list.filter((c) => c.id !== id));
+      setMessages(() => chat.messages);
+      setLastIntent(chat.intent);
+      setChatId(chat.id);
+    },
+    [chats, stopAnswer, archiveChat, setChats, setMessages, setLastIntent, setChatId],
+  );
+  const deleteChat = useCallback((id: string) => setChats((list) => list.filter((c) => c.id !== id)), [setChats]);
+
   // Latest conversation state for the request, without re-creating runAnalysis on every message.
   const convoRef = useRef({ messages, overlays, lastIntent, watchlist });
   convoRef.current = { messages, overlays, lastIntent, watchlist };
@@ -677,10 +712,10 @@ export default function ChartWorkspace() {
           pinned={pinnedSet}
           onSubmit={(p) => void runAnalysis(p)}
           onClearOverlays={() => changeOverlays(overlaysKey, [], "clear AI levels")}
-          onClearChat={() => {
-            setMessages(() => []);
-            setLastIntent(null);
-          }}
+          onNewChat={newChat}
+          chats={chats}
+          onOpenChat={openChat}
+          onDeleteChat={deleteChat}
           onPickSymbol={setSymbol}
           onTogglePin={togglePin}
           onLogTrade={logTrade}

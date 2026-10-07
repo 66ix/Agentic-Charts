@@ -7,12 +7,16 @@ import {
   Check,
   ClipboardCopy,
   Eraser,
+  ArrowLeft,
   Footprints,
+  History,
   Loader2,
   NotebookPen,
   Pin,
   PinOff,
+  Search,
   SendHorizontal,
+  SquarePen,
   Target,
   Trash2,
   User,
@@ -20,9 +24,10 @@ import {
 import { Fragment, useEffect, useImperativeHandle, useRef, useState, type ReactNode, type Ref } from "react";
 
 import { usePersistentState } from "@/hooks/usePersistentState";
+import { searchSessions, type ChatSession } from "@/lib/chatHistory";
 import { displaySymbol, formatPct, formatPrice } from "@/lib/format";
 import { DEFAULT_SIZING, orderText, qtyText, sizePlan, type SizingSettings } from "@/lib/sizing";
-import type { Interval, Overlay, ScanResult, TradePlan } from "@/lib/types";
+import { TIMEFRAMES, type Interval, type Overlay, type ScanResult, type TradePlan } from "@/lib/types";
 
 export interface AgentMessage {
   id: string;
@@ -188,7 +193,11 @@ interface Props {
   pinned: Set<string>;
   onSubmit(prompt: string): void;
   onClearOverlays(): void;
-  onClearChat(): void;
+  /** Files the conversation in the history and starts an empty one. */
+  onNewChat(): void;
+  chats: ChatSession[];
+  onOpenChat(id: string): void;
+  onDeleteChat(id: string): void;
   onPickSymbol(symbol: string): void;
   onTogglePin(message: AgentMessage): void;
   /** Adds an answer's plan to the trade journal → saved. */
@@ -199,6 +208,7 @@ interface Props {
 /** The chart agent as a dock tab: the conversation fills the height, the prompt sits at the bottom. */
 export default function AgentPanel(p: Props) {
   const [value, setValue] = useState("");
+  const [showHistory, setShowHistory] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -225,141 +235,238 @@ export default function AgentPanel(p: Props) {
             <Eraser className="h-3.5 w-3.5" /> Clear {p.overlayCount}
           </button>
         )}
+        <button
+          type="button"
+          onClick={() => setShowHistory((v) => !v)}
+          className={clsx("btn-ghost h-6 shrink-0 gap-1 px-1.5 text-[11px]", showHistory && "text-accent")}
+          title="Past conversations"
+          aria-pressed={showHistory}
+        >
+          <History className="h-3.5 w-3.5" /> {p.chats.length || ""}
+        </button>
         {p.messages.length > 0 && (
-          <button type="button" onClick={p.onClearChat} className="btn-ghost h-6 w-6 shrink-0 p-0" title="Start a new conversation" aria-label="Clear conversation">
-            <Trash2 className="h-3.5 w-3.5" />
+          <button
+            type="button"
+            onClick={() => {
+              p.onNewChat();
+              setShowHistory(false);
+            }}
+            className="btn-ghost h-6 w-6 shrink-0 p-0"
+            title="New conversation (this one is kept in the history)"
+            aria-label="New conversation"
+          >
+            <SquarePen className="h-3.5 w-3.5" />
           </button>
         )}
       </div>
 
-      <div ref={listRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3 text-[13px] leading-relaxed">
-        {p.messages.length === 0 && !p.busy && (
-          <p className="text-[12px] text-mute">
-            Ask in plain English. The agent finds zones, swings and liquidity, builds trade plans, sets alerts, reads
-            Kimi Cooked and your watchlist. Every price it draws comes from the detectors, never from the model.
+      {showHistory ? (
+        <ChatHistory
+          chats={p.chats}
+          onBack={() => setShowHistory(false)}
+          onOpen={(id) => {
+            p.onOpenChat(id);
+            setShowHistory(false);
+          }}
+          onDelete={p.onDeleteChat}
+        />
+      ) : (
+        <>
+
+          <div ref={listRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3 text-[13px] leading-relaxed">
+            {p.messages.length === 0 && !p.busy && (
+              <p className="text-[12px] text-mute">
+                Ask in plain English. The agent finds zones, swings and liquidity, builds trade plans, sets alerts, reads
+                Kimi Cooked and your watchlist. Every price it draws comes from the detectors, never from the model.
+              </p>
+            )}
+            {p.messages.map((m) => {
+              const isPinned = p.pinned.has(m.id);
+              const drawable = m.role === "agent" && !!m.overlays?.length && !!m.symbol;
+              return (
+                <div key={m.id} className="group flex gap-2">
+                  <div
+                    className={clsx(
+                      "mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded-full",
+                      m.role === "user" ? "bg-panel2 text-mute" : m.role === "error" ? "bg-down/20 text-down" : "bg-accent/20 text-accent",
+                    )}
+                  >
+                    {m.role === "user" ? <User className="h-3 w-3" /> : <Bot className="h-3 w-3" />}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    {m.steps && (
+                      <ul className="mb-1 space-y-0.5 text-[11px] text-mute">
+                        {m.steps.map((s, i) => (
+                          <li key={i} className="flex items-center gap-1">
+                            <Footprints className="h-3 w-3" /> {s}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    <p className={clsx(m.role === "user" ? "text-mute" : m.role === "error" ? "text-down" : "text-ink")}>
+                      {m.role === "agent" ? emphasize(m.text, m.lastPrice) : m.text}
+                    </p>
+                    {m.plan && (
+                      <PlanCard plan={m.plan} symbol={m.symbol} onLog={p.onLogTrade ? () => p.onLogTrade!(m) : undefined} />
+                    )}
+                    {m.scan && <ScanTable rows={m.scan} onPick={p.onPickSymbol} />}
+                    {m.overlays && m.overlays.length > 0 && (
+                      <div className="mt-1.5 flex flex-wrap gap-1">
+                        {m.overlays
+                          .filter((o) => o.type !== "marker" && o.label)
+                          .map((o, i) => (
+                            <span key={o.id ?? i} className="inline-flex items-center gap-1 rounded bg-panel2 px-1.5 py-0.5 text-[11px] text-ink/80">
+                              <span className="h-2 w-2 rounded-sm" style={{ background: swatch(o) }} />
+                              {o.label}
+                            </span>
+                          ))}
+                      </div>
+                    )}
+                    {m.alerts ? (
+                      <p className="mt-1 inline-flex items-center gap-1 text-[11px] text-yellow-300">
+                        <Bell className="h-3 w-3" /> {m.alerts} alert{m.alerts === 1 ? "" : "s"} armed
+                      </p>
+                    ) : null}
+                    <div className="mt-1 flex items-center gap-2">
+                      {m.meta && <p className="text-[10px] text-mute">{m.meta}</p>}
+                      {drawable && (
+                        <button
+                          type="button"
+                          onClick={() => p.onTogglePin(m)}
+                          className={clsx(
+                            "ml-auto inline-flex shrink-0 items-center gap-1 rounded px-1 py-0.5 text-[10px]",
+                            isPinned ? "bg-accent/15 text-accent" : "text-mute opacity-70 hover:bg-panel2 hover:text-ink group-hover:opacity-100",
+                          )}
+                          title={isPinned ? "Unpin: these drawings go when the next answer replaces them" : `Keep these drawings on ${displaySymbol(m.symbol!)} when you ask something else`}
+                        >
+                          {isPinned ? <PinOff className="h-3 w-3" /> : <Pin className="h-3 w-3" />}
+                          {isPinned ? "Pinned" : "Pin"}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+            {p.busy && (
+              <div className="flex items-center gap-2 text-mute">
+                <Loader2 className="h-4 w-4 animate-spin" /> Analysing market structure…
+              </div>
+            )}
+          </div>
+
+          {!p.busy && (
+            <div className="flex shrink-0 flex-wrap gap-1.5 px-3 pt-2">
+              {(p.messages.length === 0 ? SUGGESTIONS : FOLLOW_UPS).map((s) => (
+                <button
+                  key={s}
+                  type="button"
+                  onClick={() => submit(s)}
+                  className="rounded-full border border-line px-2.5 py-1 text-[11px] text-mute transition-colors hover:border-accent/50 hover:text-ink"
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
+          )}
+
+          <form
+            className="flex shrink-0 items-end gap-2 p-3"
+            onSubmit={(e) => {
+              e.preventDefault();
+              submit(value);
+            }}
+          >
+            <textarea
+              ref={inputRef}
+              rows={2}
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  submit(value);
+                }
+              }}
+              placeholder={p.messages.length ? 'Follow up, e.g. "same on ETH", "line at 25.4" or "alert me at the entry"' : 'Ask the agent, e.g. "Which of my coins are near demand?"'}
+              className="min-h-9 flex-1 resize-none rounded-lg border border-line bg-base px-3 py-2 text-sm text-ink outline-none placeholder:text-mute focus:border-accent/60"
+              aria-label="Agent prompt"
+            />
+            <button
+              type="submit"
+              disabled={p.busy || !value.trim()}
+              className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-accent text-white transition-opacity disabled:opacity-40"
+              aria-label="Send"
+            >
+              {p.busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <SendHorizontal className="h-4 w-4" />}
+            </button>
+          </form>
+        </>
+      )}
+    </div>
+  );
+}
+
+function ago(ms: number): string {
+  const s = Math.max(0, (Date.now() - ms) / 1000);
+  if (s < 60) return "just now";
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  if (s < 7 * 86400) return `${Math.floor(s / 86400)}d ago`;
+  return new Date(ms).toLocaleDateString();
+}
+
+/** Past conversations, newest first: open one to read it and carry on, or delete it. */
+function ChatHistory(p: { chats: ChatSession[]; onBack(): void; onOpen(id: string): void; onDelete(id: string): void }) {
+  const [query, setQuery] = useState("");
+  const shown = searchSessions(p.chats, query);
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex shrink-0 items-center gap-2 px-3 py-2">
+        <button type="button" onClick={p.onBack} className="btn-ghost h-7 w-7 shrink-0 p-0" title="Back to the conversation" aria-label="Back">
+          <ArrowLeft className="h-4 w-4" />
+        </button>
+        <label className="flex h-7 min-w-0 flex-1 items-center gap-1.5 rounded-md border border-line bg-base px-2 focus-within:border-accent/60">
+          <Search className="h-3.5 w-3.5 shrink-0 text-mute" />
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search conversations"
+            className="min-w-0 flex-1 bg-transparent text-[12px] text-ink outline-none placeholder:text-mute"
+            aria-label="Search conversations"
+          />
+        </label>
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
+        {shown.length === 0 && (
+          <p className="pt-2 text-[12px] text-mute">
+            {p.chats.length ? "No conversation matches." : "No past conversations yet. Starting a new one keeps the current one here."}
           </p>
         )}
-        {p.messages.map((m) => {
-          const isPinned = p.pinned.has(m.id);
-          const drawable = m.role === "agent" && !!m.overlays?.length && !!m.symbol;
+        {shown.map((c) => {
+          const tf = TIMEFRAMES.find((t) => t.value === c.interval)?.label ?? c.interval;
           return (
-            <div key={m.id} className="group flex gap-2">
-              <div
-                className={clsx(
-                  "mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded-full",
-                  m.role === "user" ? "bg-panel2 text-mute" : m.role === "error" ? "bg-down/20 text-down" : "bg-accent/20 text-accent",
-                )}
-              >
-                {m.role === "user" ? <User className="h-3 w-3" /> : <Bot className="h-3 w-3" />}
-              </div>
-              <div className="min-w-0 flex-1">
-                {m.steps && (
-                  <ul className="mb-1 space-y-0.5 text-[11px] text-mute">
-                    {m.steps.map((s, i) => (
-                      <li key={i} className="flex items-center gap-1">
-                        <Footprints className="h-3 w-3" /> {s}
-                      </li>
-                    ))}
-                  </ul>
-                )}
-                <p className={clsx(m.role === "user" ? "text-mute" : m.role === "error" ? "text-down" : "text-ink")}>
-                  {m.role === "agent" ? emphasize(m.text, m.lastPrice) : m.text}
+            <div key={c.id} className="group flex items-start gap-1 border-b border-line last:border-b-0">
+              <button type="button" onClick={() => p.onOpen(c.id)} className="min-w-0 flex-1 py-2 text-left hover:text-white" title="Open and continue this conversation">
+                <p className="truncate text-[12px] text-ink">{c.title}</p>
+                <p className="text-[10px] text-mute">
+                  {c.symbol ? `${displaySymbol(c.symbol)}${tf ? ` ${tf}` : ""} · ` : ""}
+                  {c.messages.length} messages · {ago(c.updatedAt)}
                 </p>
-                {m.plan && (
-                  <PlanCard plan={m.plan} symbol={m.symbol} onLog={p.onLogTrade ? () => p.onLogTrade!(m) : undefined} />
-                )}
-                {m.scan && <ScanTable rows={m.scan} onPick={p.onPickSymbol} />}
-                {m.overlays && m.overlays.length > 0 && (
-                  <div className="mt-1.5 flex flex-wrap gap-1">
-                    {m.overlays
-                      .filter((o) => o.type !== "marker" && o.label)
-                      .map((o, i) => (
-                        <span key={o.id ?? i} className="inline-flex items-center gap-1 rounded bg-panel2 px-1.5 py-0.5 text-[11px] text-ink/80">
-                          <span className="h-2 w-2 rounded-sm" style={{ background: swatch(o) }} />
-                          {o.label}
-                        </span>
-                      ))}
-                  </div>
-                )}
-                {m.alerts ? (
-                  <p className="mt-1 inline-flex items-center gap-1 text-[11px] text-yellow-300">
-                    <Bell className="h-3 w-3" /> {m.alerts} alert{m.alerts === 1 ? "" : "s"} armed
-                  </p>
-                ) : null}
-                <div className="mt-1 flex items-center gap-2">
-                  {m.meta && <p className="text-[10px] text-mute">{m.meta}</p>}
-                  {drawable && (
-                    <button
-                      type="button"
-                      onClick={() => p.onTogglePin(m)}
-                      className={clsx(
-                        "ml-auto inline-flex shrink-0 items-center gap-1 rounded px-1 py-0.5 text-[10px]",
-                        isPinned ? "bg-accent/15 text-accent" : "text-mute opacity-70 hover:bg-panel2 hover:text-ink group-hover:opacity-100",
-                      )}
-                      title={isPinned ? "Unpin: these drawings go when the next answer replaces them" : `Keep these drawings on ${displaySymbol(m.symbol!)} when you ask something else`}
-                    >
-                      {isPinned ? <PinOff className="h-3 w-3" /> : <Pin className="h-3 w-3" />}
-                      {isPinned ? "Pinned" : "Pin"}
-                    </button>
-                  )}
-                </div>
-              </div>
+              </button>
+              <button
+                type="button"
+                onClick={() => p.onDelete(c.id)}
+                className="btn-ghost mt-1.5 h-6 w-6 shrink-0 p-0 opacity-60 group-hover:opacity-100"
+                title="Delete this conversation"
+                aria-label="Delete conversation"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
             </div>
           );
         })}
-        {p.busy && (
-          <div className="flex items-center gap-2 text-mute">
-            <Loader2 className="h-4 w-4 animate-spin" /> Analysing market structure…
-          </div>
-        )}
       </div>
-
-      {!p.busy && (
-        <div className="flex shrink-0 flex-wrap gap-1.5 px-3 pt-2">
-          {(p.messages.length === 0 ? SUGGESTIONS : FOLLOW_UPS).map((s) => (
-            <button
-              key={s}
-              type="button"
-              onClick={() => submit(s)}
-              className="rounded-full border border-line px-2.5 py-1 text-[11px] text-mute transition-colors hover:border-accent/50 hover:text-ink"
-            >
-              {s}
-            </button>
-          ))}
-        </div>
-      )}
-
-      <form
-        className="flex shrink-0 items-end gap-2 p-3"
-        onSubmit={(e) => {
-          e.preventDefault();
-          submit(value);
-        }}
-      >
-        <textarea
-          ref={inputRef}
-          rows={2}
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              submit(value);
-            }
-          }}
-          placeholder={p.messages.length ? 'Follow up, e.g. "same on ETH", "line at 25.4" or "alert me at the entry"' : 'Ask the agent, e.g. "Which of my coins are near demand?"'}
-          className="min-h-9 flex-1 resize-none rounded-lg border border-line bg-base px-3 py-2 text-sm text-ink outline-none placeholder:text-mute focus:border-accent/60"
-          aria-label="Agent prompt"
-        />
-        <button
-          type="submit"
-          disabled={p.busy || !value.trim()}
-          className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-accent text-white transition-opacity disabled:opacity-40"
-          aria-label="Send"
-        >
-          {p.busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <SendHorizontal className="h-4 w-4" />}
-        </button>
-      </form>
     </div>
   );
 }

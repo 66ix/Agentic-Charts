@@ -254,6 +254,8 @@ export function gridOverlays(bot: Pick<GridBot, "id" | "params">, result: GridBo
     border_color: "rgba(59, 130, 246, 0.35)",
     time_start: start,
     time_end: result?.stopped_at ?? null,
+    // A wide range would zoom the price scale out to fit it; the chart keeps scaling to the candles.
+    autoscale: false,
   };
   out.push(box);
 
@@ -271,6 +273,7 @@ export function gridOverlays(bot: Pick<GridBot, "id" | "params">, result: GridBo
       time_start: start,
       // Hundreds of price tags would bury the axis; tag only the range ends.
       axis_label: k === 0 || k === lines.length - 1,
+      autoscale: false,
     };
     out.push(line);
   });

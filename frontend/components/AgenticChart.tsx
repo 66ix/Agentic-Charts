@@ -716,6 +716,9 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
     const load = async () => {
       // Puts a full dataset on the chart: the cached bars at once, then the network's.
       const render = (data: Candle[], src: DataSource) => {
+        // A second render of the same chart (cached bars, then the network's; a retry) keeps the view the user zoomed to.
+        const prevLen = candlesRef.current.length;
+        const prevRange = prevLen ? chartRef.current?.timeScale().getVisibleLogicalRange() : null;
         candlesRef.current = data;
         const lastBar = data[data.length - 1];
         setLegend(lastBar ? { c: lastBar, change: ((lastBar.close - lastBar.open) / lastBar.open) * 100 } : null);
@@ -735,9 +738,15 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
           })),
         );
         refreshIndicators(true);
+        // Anchored to the newest bar, so bars that arrived in between scroll in as they do live.
+        const shift = data.length - prevLen;
         chartRef.current
           ?.timeScale()
-          .setVisibleLogicalRange({ from: Math.max(0, data.length - 160), to: data.length - 2 + rightOffsetRef.current });
+          .setVisibleLogicalRange(
+            prevRange
+              ? { from: prevRange.from + shift, to: prevRange.to + shift }
+              : { from: Math.max(0, data.length - 160), to: data.length - 2 + rightOffsetRef.current },
+          );
         source = src;
         emitFeed(source, true);
         setBarCount(data.length);
@@ -838,8 +847,10 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
     refreshIndicators(true);
   }, [props.indicators, settings, refreshIndicators]);
 
+  // Re-applying percentage mode turns the price scale's auto-scale back on, so only apply on a real change.
+  const comparing = (props.compare ?? []).length > 0;
   useEffect(() => {
-    const compare = (props.compare ?? []).length > 0;
+    const compare = comparing;
     chartRef.current?.applyOptions({
       grid: {
         vertLines: { visible: props.layout.grid },
@@ -849,7 +860,7 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
         mode: compare ? PriceScaleMode.Percentage : props.layout.logScale ? PriceScaleMode.Logarithmic : PriceScaleMode.Normal,
       },
     });
-  }, [props.layout.grid, props.layout.logScale, props.compare]);
+  }, [props.layout.grid, props.layout.logScale, comparing]);
 
   // Timezone of the time axis and crosshair label.
   useEffect(() => {
@@ -1093,9 +1104,16 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
     const ts = chartRef.current?.timeScale();
     if (!ts) return;
     const offset = kimiHorizon ? kimiHorizon + 36 : 12;
+    const prev = rightOffsetRef.current;
+    if (offset === prev) return;
+    // Only follow the new room on the right while the user is looking at the newest bars; a chart they
+    // scrolled back through stays where it is when Kimi re-runs on a closed candle.
+    const atLiveEdge = ts.scrollPosition() >= prev - 2;
+    const range = ts.getVisibleLogicalRange();
     rightOffsetRef.current = offset;
     ts.applyOptions({ rightOffset: offset });
-    ts.scrollToPosition(offset, false);
+    if (atLiveEdge) ts.scrollToPosition(offset, false);
+    else if (range) ts.setVisibleLogicalRange(range);
   }, [kimiHorizon]);
 
   // ---------------------------------------------------- user drawings

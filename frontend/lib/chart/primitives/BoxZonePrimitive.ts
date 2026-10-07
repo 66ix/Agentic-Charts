@@ -31,7 +31,8 @@ export class BoxZonePrimitive extends PrimitiveBase {
   }
 
   /** Keep AI zones in view: the price scale expands to include them. */
-  autoscaleInfo(): AutoscaleInfo {
+  autoscaleInfo(): AutoscaleInfo | null {
+    if (this.box.autoscale === false) return null;
     return { priceRange: { minValue: this.box.price_low, maxValue: this.box.price_high } };
   }
 
