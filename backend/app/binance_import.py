@@ -723,6 +723,7 @@ class BinanceImportService:
                    "value": round(own * price, 2) if price else None,
                    "unrealized_pnl": round(min(tracked, own) * (price - avg), 2) if price and avg else None,
                    "kind": ov.kind if ov else "manual", "bot_id": ov.bot_id if ov else None,
+                   "overridden": ov is not None,
                    "reason": ("You marked it " + ov.kind) if ov else (
                        "In the spot wallet (bots hold their coins in the Trading Bots wallet)"
                        + ("; average entry from your own fills" if avg else "; no own buys imported for it"))}
@@ -749,6 +750,7 @@ class BinanceImportService:
                    "mark_price": float(p.get("markPrice") or 0) or prices.get(sym),
                    "unrealized_pnl": float(p.get("unRealizedProfit") or 0), "leverage": p.get("leverage"),
                    "liquidation_price": float(p.get("liquidationPrice") or 0) or None, "kind": kind,
+                   "overridden": ov is not None,
                    "bot_id": ov.bot_id if ov else (last.bot_id if last is not None and kind == "bot" else None),
                    "reason": reason}
             (bot_fut if kind == "bot" else manual_fut).append(row)

@@ -9,7 +9,8 @@ export const JOURNAL_EVENT = "ac-journal-changed";
 
 export type JournalStatus = "pending" | "open" | "closed" | "cancelled";
 export type JournalDirection = "long" | "short";
-export type JournalExitKind = "T1" | "T2" | "T3" | "T4" | "T5" | "stop" | "breakeven" | "manual";
+/** "exchange" = a trade imported from Binance, closed by the user's own fills. */
+export type JournalExitKind = "T1" | "T2" | "T3" | "T4" | "T5" | "stop" | "breakeven" | "manual" | "exchange";
 
 /** What POST /api/journal takes. Mirrors NewJournalEntry in journal.py. */
 export interface NewJournalEntry {
@@ -35,6 +36,24 @@ export interface NewJournalEntry {
   manage?: "breakeven_after_t1" | "none";
   /** UNIX seconds; default now. */
   taken_at?: number | null;
+}
+
+/** A round trip rebuilt from the user's Binance fills (Account tab). Its result comes from the fills. */
+export interface ImportedTrade {
+  external_id: string;
+  market: "spot" | "futures";
+  opened_at: number;
+  closed_at: number | null;
+  /** Largest position size in the round trip, in coins. */
+  qty: number;
+  entry_price: number;
+  exit_price: number | null;
+  /** Quote asset, after fees. */
+  realized_pnl: number;
+  fees: number;
+  fills: number;
+  quote_asset: string;
+  notes: string[];
 }
 
 export interface JournalExit {
@@ -78,8 +97,12 @@ export interface JournalEvaluation {
 }
 
 /** A stored entry with its evaluation, as GET /api/journal returns it. */
-export interface JournalEntry extends Required<Omit<NewJournalEntry, "taken_at" | "size_qty" | "risk_usd">> {
+export interface JournalEntry extends Required<Omit<NewJournalEntry, "taken_at" | "size_qty" | "risk_usd" | "stop" | "source">> {
   id: string;
+  /** null on trades imported from Binance (they have no stop unless the user gives one; no R then). */
+  stop: number | null;
+  source: NonNullable<NewJournalEntry["source"]> | "binance";
+  imported: ImportedTrade | null;
   taken_at: number;
   size_qty: number | null;
   risk_usd: number | null;
@@ -132,6 +155,11 @@ export interface JournalStats {
   best_r: number | null;
   worst_r: number | null;
   open_r: number;
+  /** Closed trades imported from Binance, and how many of them have no stop (left out of the R numbers). */
+  imported_closed: number;
+  no_r: number;
+  /** Realized PnL of the closed trades that have one, after fees; null when none has. */
+  pnl_usd: number | null;
   by_setup: JournalGroupStats[];
   by_symbol: JournalGroupStats[];
   by_direction: JournalGroupStats[];
@@ -232,7 +260,9 @@ const EXIT_COLOR: Record<string, string> = { stop: RED, breakeven: SLATE, manual
 export function journalOverlays(e: JournalEntry): Overlay[] {
   const ev = e.evaluation;
   const long = e.direction === "long";
-  const risk = Math.abs(e.entry - e.stop);
+  if (e.stop == null) return importedOverlays(e);
+  const stop = e.stop;
+  const risk = Math.abs(e.entry - stop);
   const riskPct = e.entry ? ((risk / e.entry) * 100).toFixed(2) : "0";
   const start = e.taken_at;
   const end = ev.status === "closed" || ev.status === "cancelled" ? (ev.closed_at ?? e.manual_close?.time ?? null) : null;
@@ -247,7 +277,7 @@ export function journalOverlays(e: JournalEntry): Overlay[] {
 
   const out: Overlay[] = [
     {
-      type: "box", label: "", kind: "plan_risk", price_low: Math.min(e.entry, e.stop), price_high: Math.max(e.entry, e.stop),
+      type: "box", label: "", kind: "plan_risk", price_low: Math.min(e.entry, stop), price_high: Math.max(e.entry, stop),
       color: "rgba(239, 68, 68, 0.10)", border_color: null, time_start: start, time_end: end,
     },
     {
@@ -256,13 +286,13 @@ export function journalOverlays(e: JournalEntry): Overlay[] {
       color: "rgba(34, 197, 94, 0.08)", border_color: null, time_start: start, time_end: end,
     },
     line(e.entry, `${tag} entry`, BLUE, "plan_entry"),
-    line(e.stop, `Stop (−${riskPct}%)`, RED, "plan_stop"),
+    line(stop, `Stop (−${riskPct}%)`, RED, "plan_stop"),
   ];
   e.targets.forEach((t, i) => {
     const rr = risk ? Math.abs(t - e.entry) / risk : 0;
     out.push(line(t, `T${i + 1} (${rr.toFixed(1)}R)`, GREEN, "plan_target", true));
   });
-  if (ev.status === "open" && ev.current_stop != null && ev.current_stop !== e.stop) {
+  if (ev.status === "open" && ev.current_stop != null && ev.current_stop !== stop) {
     out.push(line(ev.current_stop, "Stop at breakeven", SLATE, "plan_stop", true, 1));
   }
   if (ev.filled_at != null && ev.fill_price != null) {
@@ -277,6 +307,37 @@ export function journalOverlays(e: JournalEntry): Overlay[] {
       type: "marker", time: x.time, price: x.price, position: long ? "above" : "below", shape: "circle",
       label: `${name} ${x.r >= 0 ? "+" : ""}${x.r.toFixed(2)}R`, color: EXIT_COLOR[x.kind] ?? GREEN, kind: "journal_exit",
     });
+  }
+  return out.map((o, i) => ({ ...o, id: `journal-${e.id}-${i}` }));
+}
+
+/** A trade imported from Binance (no stop or targets): its entry and exit fills, joined by a dashed line. */
+function importedOverlays(e: JournalEntry): Overlay[] {
+  const ev = e.evaluation;
+  const im = e.imported;
+  const long = e.direction === "long";
+  const entry = ev.fill_price ?? e.entry;
+  const start = ev.filled_at ?? e.taken_at;
+  const exit = ev.exits[ev.exits.length - 1];
+  const tag = `${long ? "Long" : "Short"} (Binance ${im?.market ?? "fills"})`;
+  const out: Overlay[] = [
+    {
+      type: "marker", time: start, price: entry, position: long ? "below" : "above", shape: long ? "arrowUp" : "arrowDown",
+      label: `${tag} ${formatPrice(entry)}`, color: BLUE, kind: "journal_fill",
+    },
+  ];
+  if (exit) {
+    const win = (im?.realized_pnl ?? 0) >= 0;
+    const pnl = im ? ` ${im.realized_pnl >= 0 ? "+" : ""}${im.realized_pnl.toFixed(2)} ${im.quote_asset}` : "";
+    out.push(
+      { type: "trendline", time1: start, price1: entry, time2: exit.time, price2: exit.price, label: "",
+        color: win ? GREEN : RED, kind: "journal_exit", line_style: "dashed" },
+      { type: "marker", time: exit.time, price: exit.price, position: long ? "above" : "below", shape: "circle",
+        label: `Closed ${formatPrice(exit.price)}${pnl}`, color: win ? GREEN : RED, kind: "journal_exit" },
+    );
+  } else {
+    out.push({ type: "horizontal_line", price: entry, label: `${tag} entry`, color: BLUE, kind: "plan_entry",
+      line_style: "solid", line_width: 1, time_start: start });
   }
   return out.map((o, i) => ({ ...o, id: `journal-${e.id}-${i}` }));
 }

@@ -410,6 +410,7 @@ def test_import_classify_journal_positions_and_bot_compare(tmp_path):
         await svc.set_classification(ClassifyRequest(keys=["position:futures:SOLUSDT:BOTH"], kind="bot"))
         pos = await svc.positions()
         assert pos["manual"]["futures"] == [] and pos["bots"]["futures"][0]["symbol"] == "SOLUSDT"
+        assert pos["bots"]["futures"][0]["overridden"] and not spot["BTC"]["overridden"]
 
         cmp = await svc.compare_bot(bot.id)
         assert cmp["real_fills"] == 2 and cmp["spot_grid_api"] is False and "no public API" in cmp["notes"][0]
