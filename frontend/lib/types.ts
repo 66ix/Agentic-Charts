@@ -685,6 +685,8 @@ export interface IndicatorState {
   sessions?: boolean;
   /** Order-book heatmap behind the candles. */
   heatmap?: boolean;
+  /** Estimated liquidation clusters as shaded bands (backend/app/futures_data.py), refreshed every minute. */
+  liqZones?: boolean;
 }
 
 /** One chart in the multi-chart grid. */

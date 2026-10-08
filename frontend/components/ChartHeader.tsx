@@ -146,6 +146,7 @@ export default function ChartHeader(p: Props) {
         <MenuToggle label="Volume profile" hint="visible range" checked={!!ind.vprofile} onChange={(v) => set({ vprofile: v })} />
         <MenuToggle label="Session levels" hint="PDH, OR" checked={!!ind.sessions} onChange={(v) => set({ sessions: v })} />
         <MenuToggle label="Order-book heatmap" hint="depth" checked={!!ind.heatmap} onChange={(v) => set({ heatmap: v })} />
+        <MenuToggle label="Liquidation zones" hint="estimated" checked={!!ind.liqZones} onChange={(v) => set({ liqZones: v })} />
         <div className="my-1 h-px bg-line" />
         <MenuToggle label="RSI" hint={`${st.rsi.length}`} checked={!!ind.rsi} onChange={(v) => set({ rsi: v })} />
         <MenuToggle label="MACD" hint={`${st.macd.fast} ${st.macd.slow} ${st.macd.signal}`} checked={!!ind.macd} onChange={(v) => set({ macd: v })} />

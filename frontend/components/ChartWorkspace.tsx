@@ -15,6 +15,7 @@ import { imageToDataUrl, readScreenshot } from "@/lib/screenshot";
 import { composeSnapshot, shareSnapshot } from "@/lib/snapshot";
 import { DEFAULT_INTERVAL, DEFAULT_SYMBOL } from "@/lib/config";
 import { isCustom } from "@/lib/customSymbols";
+import { fetchLiquidationLevels, liquidationOverlays } from "@/lib/marketdata";
 import { CHAT_ID_KEY, CHATS_KEY, lastAnswerOn, toSession, upsertSession, worthKeeping, type ChatSession } from "@/lib/chatHistory";
 import { createJournalEntry, planToJournalEntry } from "@/lib/journal";
 import { DEFAULT_SIZING, sizePlan, type SizingSettings } from "@/lib/sizing";
@@ -363,6 +364,24 @@ export default function ChartWorkspace() {
       }),
     [setPanels],
   );
+
+  // Liquidation zones from the Indicators menu: estimated clusters as shaded bands, refreshed every minute.
+  const liqZonesOn = !!indicators.liqZones && !isCustom(symbol) && !/^TOTAL\d?$/.test(symbol);
+  useEffect(() => {
+    if (!liqZonesOn) return;
+    const ctrl = new AbortController();
+    const load = () =>
+      fetchLiquidationLevels(symbol, ctrl.signal)
+        .then((d) => onChartOverlays("liqzones", symbol, liquidationOverlays(d)))
+        .catch(() => undefined);
+    void load();
+    const timer = window.setInterval(load, 60_000);
+    return () => {
+      ctrl.abort();
+      window.clearInterval(timer);
+      onChartOverlays("liqzones", symbol, []);
+    };
+  }, [liqZonesOn, symbol, onChartOverlays]);
 
   // ------------------------------------------------------------------ alerts
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -1196,6 +1215,7 @@ export default function ChartWorkspace() {
                           onDataReady,
                           onError: setError,
                           onAlertMove: (id, patch) => void updateAlert(id, patch),
+                          onAskAgent: (prompt) => void runAnalysis(prompt),
                         }
                       : null
                   }

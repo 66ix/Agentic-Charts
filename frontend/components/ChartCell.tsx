@@ -30,6 +30,7 @@ export interface ActiveProps {
   onDataReady(candles: Candle[]): void;
   onError(message: string | null): void;
   onAlertMove?(alertId: string, patch: { price?: number; price_low?: number; price_high?: number }): void;
+  onAskAgent?(prompt: string): void;
 }
 
 interface Props {
@@ -113,6 +114,7 @@ const ChartCell = forwardRef<AgenticChartHandle, Props>(function ChartCell(p, re
           onDataReady={active?.onDataReady}
           onError={active?.onError}
           onAlertMove={active?.onAlertMove}
+          onAskAgent={active?.onAskAgent}
           onCrosshairTime={p.onCrosshairTime}
           layers={p.visibility}
         />
