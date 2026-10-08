@@ -24,6 +24,7 @@ export type LayerId =
   | "kimiHarmonics"
   | "gridbots"
   | "journal"
+  | "paper"
   | "backtest"
   | "walls"
   | "liqs"
@@ -58,6 +59,7 @@ export const LAYERS: LayerInfo[] = [
   { id: "custom", label: "Levels you asked for", group: "Yours" },
   { id: "alerts", label: "Alert lines", group: "Yours" },
   { id: "journal", label: "Journal trades", group: "Yours" },
+  { id: "paper", label: "Paper orders and average cost", group: "Yours" },
   { id: "gridbots", label: "Grid bots", group: "Tools and data" },
   { id: "backtest", label: "Backtest trades", group: "Tools and data" },
   { id: "walls", label: "Order-book walls", group: "Tools and data" },
@@ -98,6 +100,7 @@ export function panelLayer(key: string): LayerId {
     gridbot: "gridbots",
     journal: "journal",
     trade: "journal",
+    paper: "paper",
     backtest: "backtest",
     walls: "walls",
     liqs: "liqs",

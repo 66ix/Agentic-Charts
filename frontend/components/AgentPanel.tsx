@@ -6,6 +6,7 @@ import {
   Bot,
   Check,
   ClipboardCopy,
+  Coins,
   Eraser,
   ArrowLeft,
   Footprints,
@@ -29,6 +30,8 @@ import { usePersistentState } from "@/hooks/usePersistentState";
 import { searchSessions, type ChatSession } from "@/lib/chatHistory";
 import { displaySymbol, formatPct, formatPrice } from "@/lib/format";
 import { DEFAULT_SIZING, orderText, qtyText, sizePlan, type SizingSettings } from "@/lib/sizing";
+import { openDockPanel } from "@/lib/dock";
+import { ladderToPaperOrders, planToPaperOrders, placePaperOrders, type NewPaperOrder } from "@/lib/paper";
 import { ladderTestLine } from "@/lib/spot";
 import {
   TIMEFRAMES,
@@ -198,6 +201,12 @@ function PlanCard({
             {copied ? <Check className="h-3.5 w-3.5 text-up" /> : <ClipboardCopy className="h-3.5 w-3.5" />}
             {copied ? "Copied" : "Copy order"}
           </button>
+          {long && sized && sized.qty > 0 && (
+            <PaperBuyButton
+              orders={() => planToPaperOrders(plan, symbol, sized.qty)}
+              title={`Paper trade it: limit buy ${qtyText(sized.qty)} at ${formatPrice(plan.entry)}, stop and targets as sell orders`}
+            />
+          )}
           {onLog && (
             <button
               type="button"
@@ -329,7 +338,46 @@ function LadderCard({ ladder }: { ladder: LadderResult }) {
       {pl.notes.map((n) => (
         <p key={n} className="mt-1 text-mute">{n}</p>
       ))}
+      <div className="mt-1.5 flex flex-wrap gap-1">
+        <PaperBuyButton
+          orders={() => ladderToPaperOrders(ladder)}
+          title={`Paper trade it: ${pl.rungs.length} limit buys for $${pl.budget.toLocaleString()} and a sell at ${formatPrice(pl.take_profit)}`}
+          label="Paper buy ladder"
+        />
+      </div>
     </div>
+  );
+}
+
+/** Places a plan or ladder in the paper wallet and opens the Paper trading tab. */
+function PaperBuyButton({ orders, title, label = "Paper buy" }: { orders(): NewPaperOrder[]; title: string; label?: string }) {
+  const [state, setState] = useState<"idle" | "busy" | "done">("idle");
+  const [error, setError] = useState<string | null>(null);
+  return (
+    <>
+      <button
+        type="button"
+        disabled={state !== "idle"}
+        className="btn-ghost h-6 border border-line px-1.5 text-[11px] disabled:opacity-60"
+        title={title}
+        onClick={async () => {
+          setState("busy");
+          try {
+            await placePaperOrders(orders());
+            setState("done");
+            setError(null);
+            openDockPanel("paper");
+          } catch (err) {
+            setState("idle");
+            setError((err as Error).message);
+          }
+        }}
+      >
+        {state === "done" ? <Check className="h-3.5 w-3.5 text-up" /> : <Coins className="h-3.5 w-3.5" />}
+        {state === "done" ? "In paper wallet" : label}
+      </button>
+      {error && <p className="w-full text-down">{error}</p>}
+    </>
   );
 }
 

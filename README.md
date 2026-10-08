@@ -202,6 +202,7 @@ scores are kept in `LLM_CHOICE_STORE` (default `.cache/llm_choice.json`). The sa
 | `ALERT_HISTORY_STORE` / `SIGNAL_ALERTS_STORE` / `BRIEF_STORE` | `backend/.cache/*.json` | Alert history, signal alerts and brief settings; `memory` = not saved |
 | `GRIDBOTS_STORE` | `backend/.cache/gridbots.json` | Saved grid bots; `memory` = not saved |
 | `JOURNAL_STORE` | `backend/.cache/journal.json` | Trade journal; `memory` = not saved |
+| `PAPER_STORE` | `backend/.cache/paper.json` | Paper trading wallet; `memory` = not saved |
 | `JOURNAL_REVIEW_STORE` | `backend/.cache/journal_review.json` | Weekly trade review schedule; `memory` = not saved |
 | `BINANCE_API_KEY` / `BINANCE_API_SECRET` | empty | A **read-only** Binance key for the account import (see [Binance account](#binance-account-read-only-key)); wins over a key entered in the app |
 | `BINANCE_KEY_STORE` / `BINANCE_IMPORT_STORE` | `backend/.cache/binance_key.json`, `binance_import.json` | Key entered in the app, and imported fills with their classifications (both file mode 600); `memory` = not saved |

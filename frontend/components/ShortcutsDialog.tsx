@@ -46,6 +46,7 @@ export const SHORTCUTS: Array<{ group: string; keys: Array<[string, string]> }> 
       ["L", "Layers"],
       ["Q", "Live trades (trade manager)"],
       ["J", "Trade journal"],
+      ["Y", "Paper trading"],
       ["X", "Backtest a setup"],
       ["B", "Grid bots"],
       ["E", "Calendar and news"],
