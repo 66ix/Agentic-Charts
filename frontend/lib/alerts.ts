@@ -389,6 +389,12 @@ export interface BriefSections {
   derivatives: boolean;
   events: boolean;
   levels: boolean;
+  /** Fear & Greed, BTC dominance and market cap (live values only). */
+  market: boolean;
+  /** Your Binance holdings and futures positions (needs a read-only key). */
+  holdings: boolean;
+  /** Your note on each coin. */
+  notes: boolean;
 }
 
 /** Mirrors BriefSettings in backend/app/brief.py. */
@@ -402,6 +408,12 @@ export interface BriefSettings {
   symbols: string[];
   interval: Interval;
   sections: BriefSections;
+  /** Also cover the coins held on Binance. */
+  include_holdings: boolean;
+  /** Once a week, check whether the agent's zones held. */
+  weekly_review: boolean;
+  /** 0 = Monday … 6 = Sunday; sent at the first brief time that day. */
+  review_day: number;
 }
 
 export interface BriefStatus {
@@ -409,6 +421,7 @@ export interface BriefStatus {
   channels: { telegram: boolean; discord: boolean };
   last_sent_at: number | null; // ms
   default_symbols: string[];
+  holdings_available?: boolean;
 }
 
 export interface BriefPreview {
@@ -428,6 +441,9 @@ export const BRIEF_SECTION_NAMES: Record<keyof BriefSections, string> = {
   derivatives: "Funding & OI",
   events: "Economic events",
   levels: "Key levels",
+  market: "Market mood",
+  holdings: "My holdings",
+  notes: "My coin notes",
 };
 
 export function fetchBriefSettings(signal?: AbortSignal) {
@@ -457,6 +473,29 @@ export function sendBrief(symbols?: string[], interval?: Interval) {
     `/api/brief/send${briefQuery(symbols, interval)}`,
     { method: "POST", timeoutMs: 180_000 },
   );
+}
+
+/** The coin notes the brief shows (the app's note per coin, kept in this browser and copied to the server). */
+export function saveBriefNotes(notes: Record<string, string>) {
+  return apiRequest<{ notes: Record<string, string> }>("/api/brief/notes", { method: "PUT", body: JSON.stringify({ notes }) });
+}
+
+export interface LevelReview {
+  days: number;
+  text: string;
+  totals: { drawn: number; tested: number; held: number; broke: number; untested: number; held_pct: number | null };
+}
+
+/** Did the agent's zones hold? The zones it drew in the last `days` days and how price treated each. */
+export function fetchLevelReview(days = 7, signal?: AbortSignal) {
+  return apiRequest<LevelReview>(`/api/levels/review?days=${days}`, { signal, timeoutMs: 120_000 });
+}
+
+export function sendLevelReview(days = 7) {
+  return apiRequest<LevelReview & { results: Record<string, boolean> }>(`/api/levels/review/send?days=${days}`, {
+    method: "POST",
+    timeoutMs: 120_000,
+  });
 }
 
 /** The browser's IANA time zone, e.g. "Europe/London". */

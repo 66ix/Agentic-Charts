@@ -9,13 +9,15 @@ import { useHigherTfOverlays } from "@/hooks/useHigherTfOverlays";
 import { useIsMobile } from "@/hooks/useMediaQuery";
 import { readStored, usePersistentState, writeStored } from "@/hooks/usePersistentState";
 import { useUndo } from "@/hooks/useUndo";
-import { alertFromDrawing, alertOverlays, chartZones, SELL_SIGNALS } from "@/lib/alerts";
+import { alertFromDrawing, alertOverlays, chartZones, saveBriefNotes, SELL_SIGNALS } from "@/lib/alerts";
+import { fetchAccountPositions, fetchBinanceKey, positionOverlays } from "@/lib/binance";
 import { analyzeStream } from "@/lib/api";
 import { imageToDataUrl, readScreenshot } from "@/lib/screenshot";
 import { composeSnapshot, shareSnapshot } from "@/lib/snapshot";
 import { DEFAULT_INTERVAL, DEFAULT_SYMBOL } from "@/lib/config";
 import { isCustom } from "@/lib/customSymbols";
-import { CHAT_ID_KEY, CHATS_KEY, toSession, upsertSession, worthKeeping, type ChatSession } from "@/lib/chatHistory";
+import { fetchLiquidationLevels, liquidationOverlays } from "@/lib/marketdata";
+import { CHAT_ID_KEY, CHATS_KEY, lastAnswerOn, toSession, upsertSession, worthKeeping, type ChatSession } from "@/lib/chatHistory";
 import { createJournalEntry, planToJournalEntry } from "@/lib/journal";
 import { DEFAULT_SIZING, sizePlan, type SizingSettings } from "@/lib/sizing";
 import { apiRequest } from "@/lib/api";
@@ -43,6 +45,7 @@ import type {
   GridCoin,
   GridMode,
   IndicatorSettings,
+  AnswerDetail,
   IndicatorState,
   Interval,
   LayoutState,
@@ -55,7 +58,7 @@ import type {
 } from "@/lib/types";
 import { CURRENT_WORKSPACE_KEY, saveWorkspace, WORKSPACES_KEY, type SavedWorkspace } from "@/lib/workspaces";
 
-import AgentPanel, { type AgentMessage, type AgentPanelHandle } from "./AgentPanel";
+import AgentPanel, { placeholderFor, type AgentMessage, type AgentPanelHandle } from "./AgentPanel";
 import { type AgenticChartHandle, type CompareLine, type FeedInfo, type KimiVisibility } from "./AgenticChart";
 import AlertsPanel from "./AlertsPanel";
 import AlertToasts, { signalToast, type Toast } from "./AlertToasts";
@@ -363,6 +366,49 @@ export default function ChartWorkspace() {
     [setPanels],
   );
 
+  // Liquidation zones from the Indicators menu: estimated clusters as shaded bands, refreshed every minute.
+  const liqZonesOn = !!indicators.liqZones && !isCustom(symbol) && !/^TOTAL\d?$/.test(symbol);
+  useEffect(() => {
+    if (!liqZonesOn) return;
+    const ctrl = new AbortController();
+    const load = () =>
+      fetchLiquidationLevels(symbol, ctrl.signal)
+        .then((d) => onChartOverlays("liqzones", symbol, liquidationOverlays(d)))
+        .catch(() => undefined);
+    void load();
+    const timer = window.setInterval(load, 60_000);
+    return () => {
+      ctrl.abort();
+      window.clearInterval(timer);
+      onChartOverlays("liqzones", symbol, []);
+    };
+  }, [liqZonesOn, symbol, onChartOverlays]);
+
+  // Your own Binance position on this coin (average entry, futures entry and liquidation), when a read-only key
+  // is set; refreshed every minute.
+  const myEntryOn = indicators.myEntry !== false && !isCustom(symbol);
+  useEffect(() => {
+    if (!myEntryOn) return;
+    const ctrl = new AbortController();
+    let timer = 0;
+    const load = () =>
+      fetchAccountPositions(false, ctrl.signal)
+        .then((pos) => onChartOverlays("myentry", symbol, positionOverlays(pos, symbol)))
+        .catch(() => undefined);
+    fetchBinanceKey(ctrl.signal)
+      .then((k) => {
+        if (!k.configured || ctrl.signal.aborted) return;
+        void load();
+        timer = window.setInterval(load, 60_000);
+      })
+      .catch(() => undefined);
+    return () => {
+      ctrl.abort();
+      window.clearInterval(timer);
+      onChartOverlays("myentry", symbol, []);
+    };
+  }, [myEntryOn, symbol, onChartOverlays]);
+
   // ------------------------------------------------------------------ alerts
   const [toasts, setToasts] = useState<Toast[]>([]);
   const onAlertsFired = useCallback((fired: FiredAlert[]) => {
@@ -449,8 +495,26 @@ export default function ChartWorkspace() {
   const deleteChat = useCallback((id: string) => setChats((list) => list.filter((c) => c.id !== id)), [setChats]);
 
   // Latest conversation state for the request, without re-creating runAnalysis on every message.
-  const convoRef = useRef({ messages, overlays, lastIntent, watchlist, spotOnly });
-  convoRef.current = { messages, overlays, lastIntent, watchlist, spotOnly };
+  // Answer length, and the user's own note on each coin (keyed by symbol), both read by the agent.
+  const [answerDetail, setAnswerDetail] = usePersistentState<AnswerDetail>("ac:answer-detail", "normal");
+  const [coinNotes, setCoinNotes] = usePersistentState<Record<string, string>>("ac:coin-notes", {});
+  const setCoinNote = useCallback(
+    (sym: string, text: string) =>
+      setCoinNotes((all) => {
+        const next = { ...all };
+        if (text.trim()) next[sym] = text.trim();
+        else delete next[sym];
+        return next;
+      }),
+    [setCoinNotes],
+  );
+    // The daily brief shows your note on each coin: keep the server's copy in step (brief.py).
+  useEffect(() => {
+    const id = window.setTimeout(() => void saveBriefNotes(coinNotes).catch(() => undefined), 1500);
+    return () => window.clearTimeout(id);
+  }, [coinNotes]);
+const convoRef = useRef({ messages, overlays, lastIntent, watchlist, spotOnly, indicatorSettings, answerDetail, coinNotes, chats, chatId });
+  convoRef.current = { messages, overlays, lastIntent, watchlist, spotOnly, indicatorSettings, answerDetail, coinNotes, chats, chatId };
 
   // Cancel in-flight analysis when the market changes (unless a top-down walk is the one changing it).
   useEffect(() => {
@@ -511,13 +575,28 @@ export default function ChartWorkspace() {
           previous_intent: opts.silent ? null : convo.lastIntent,
           watchlist: convo.watchlist,
           spot_only: convo.spotOnly,
+          detail: convo.answerDetail,
+          coin_note: convo.coinNotes[symbol] || undefined,
+          previous_answer: opts.silent ? null : lastAnswerOn(convo.chats, symbol, convo.chatId),
+          // The agent reads every indicator with the lengths the chart uses.
+          indicator_settings: {
+            ema_fast: convo.indicatorSettings.ema1.length,
+            ema_slow: convo.indicatorSettings.ema2.length,
+            rsi: convo.indicatorSettings.rsi.length,
+            macd: convo.indicatorSettings.macd,
+            bb: { length: convo.indicatorSettings.bb.length, mult: convo.indicatorSettings.bb.mult },
+            atr: convo.indicatorSettings.atr.length,
+            stoch_rsi: convo.indicatorSettings.stochRsi,
+          },
         };
         const id = uid();
+        const at = Date.now();
         const lead = opts.silent ? "Auto-detected levels. " : "";
         const toMessage = (res: AnalyzeResponse, text: string, streaming: boolean): AgentMessage => {
           const target = res.navigate ?? { symbol, interval };
           return {
             id,
+            at,
             role: "agent",
             text: lead + text,
             streaming: streaming || undefined,
@@ -531,6 +610,7 @@ export default function ChartWorkspace() {
             walk: res.top_down ?? undefined,
             ladder: res.ladder ?? undefined,
             sources: res.sources?.length ? res.sources : undefined,
+            facts: streaming || !res.facts || !Object.keys(res.facts).length ? undefined : res.facts,
             sells: res.sells?.length ? res.sells : undefined,
             sellWatch: res.sell_watch?.symbols.length ? res.sell_watch : undefined,
             steps: res.steps?.length ? res.steps : undefined,
@@ -965,6 +1045,10 @@ export default function ChartWorkspace() {
           messages={messages}
           overlayCount={overlays.length}
           pinned={pinnedSet}
+          symbol={symbol}
+          interval={interval}
+          detail={answerDetail}
+          onDetail={setAnswerDetail}
           onSubmit={(p) => void runAnalysis(p)}
           onImage={(f) => void readShot(f)}
           onClearOverlays={() => changeOverlays(overlaysKey, [], "clear AI levels")}
@@ -1092,6 +1176,8 @@ export default function ChartWorkspace() {
         onSettings={() => setDialog("settings")}
         onShortcuts={() => setDialog("shortcuts")}
         onGridMode={setGridMode}
+        note={coinNotes[symbol]}
+        onNote={(t) => setCoinNote(symbol, t)}
       />
       <div className="relative flex min-h-0 flex-1">
         {!mobile && (
@@ -1160,6 +1246,7 @@ export default function ChartWorkspace() {
                           onDataReady,
                           onError: setError,
                           onAlertMove: (id, patch) => void updateAlert(id, patch),
+                          onAskAgent: (prompt) => void runAnalysis(prompt),
                         }
                       : null
                   }
@@ -1216,6 +1303,7 @@ export default function ChartWorkspace() {
               onExpanded={setQuickbar}
               busy={busy}
               answer={quickAnswer}
+              placeholder={placeholderFor([...messages].reverse().find((m) => m.role === "agent"), symbol, interval, messages.length, spotOnly)}
               onSubmit={(p) => void runAnalysis(p)}
               onOpen={focusAgent}
               onDismissAnswer={() => setQuickAnswer(null)}
@@ -1324,6 +1412,7 @@ function QuickPrompt(p: {
   onExpanded(v: boolean): void;
   busy: boolean;
   answer: AgentMessage | null;
+  placeholder: string;
   onSubmit(prompt: string): void;
   onOpen(): void;
   onDismissAnswer(): void;
@@ -1374,7 +1463,7 @@ function QuickPrompt(p: {
             if (e.key === "Enter") submit();
             if (e.key === "Escape") (e.target as HTMLInputElement).blur();
           }}
-          placeholder="Ask the chart agent, e.g. “key levels on the daily”"
+          placeholder={p.placeholder}
           className="h-9 min-w-0 flex-1 bg-transparent text-[13px] text-ink outline-none placeholder:text-mute"
         />
         {p.busy ? (

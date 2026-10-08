@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
+import MarketAlerts from "@/components/MarketAlerts";
 import { requestNotificationPermission, type AlertsApi, type ChannelTestResult } from "@/hooks/useAlerts";
 import { usePersistentState } from "@/hooks/usePersistentState";
 import {
@@ -33,6 +34,7 @@ import {
   describeAlert,
   describeTrigger,
   expiryLabel,
+  fetchLevelReview,
   formatWhen,
   signalName,
   timeAgo,
@@ -44,6 +46,7 @@ import {
   type BriefSections,
   type BriefSettings,
   type BriefStatus,
+  type LevelReview,
   type ChartZone,
   type SignalAlert,
   type SignalId,
@@ -257,6 +260,7 @@ function PriceTab({ p }: { p: AlertsPanelProps }) {
           />
         ),
       )}
+      {api && <MarketAlerts />}
       <p className="px-3 py-2 text-[10px] text-mute">Alerts are checked on the server, so they fire even with this tab closed.</p>
     </div>
   );
@@ -1324,8 +1328,13 @@ const DEFAULT_BRIEF: BriefSettings = {
   timezone: "UTC",
   symbols: [],
   interval: "4h",
-  sections: { zones: true, kimi: true, derivatives: true, events: true, levels: true },
+  sections: { zones: true, kimi: true, derivatives: true, events: true, levels: true, market: true, holdings: true, notes: true },
+  include_holdings: false,
+  weekly_review: false,
+  review_day: 6,
 };
+
+const WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 
 const sameList = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
 
@@ -1338,6 +1347,8 @@ function BriefTab({ p, api }: { p: AlertsPanelProps; api: AlertsApi }) {
   const [busy, setBusy] = useState<"load" | "save" | "preview" | "send" | null>("load");
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
   const [preview, setPreview] = useState<BriefPreview | null>(null);
+  const [review, setReview] = useState<LevelReview | null>(null);
+  const [reviewBusy, setReviewBusy] = useState(false);
   const zones = useMemo(() => timeZones(), []);
   const { brief } = api;
 
@@ -1351,7 +1362,7 @@ function BriefTab({ p, api }: { p: AlertsPanelProps; api: AlertsApi }) {
         const tz = browserTimeZone();
         // A brief that was never set up starts in the browser's time zone.
         const fresh = !s.settings.enabled && s.last_sent_at == null && s.settings.timezone === "UTC";
-        setForm({ ...s.settings, timezone: fresh ? tz : s.settings.timezone });
+        setForm({ ...DEFAULT_BRIEF, ...s.settings, sections: { ...DEFAULT_BRIEF.sections, ...s.settings.sections }, timezone: fresh ? tz : s.settings.timezone });
       })
       .catch((err: Error) => live && setMessage({ ok: false, text: `Could not load the brief settings: ${err.message}` }))
       .finally(() => live && setBusy(null));
@@ -1397,6 +1408,17 @@ function BriefTab({ p, api }: { p: AlertsPanelProps; api: AlertsApi }) {
     }
   };
 
+  const checkLevels = async () => {
+    setReviewBusy(true);
+    try {
+      setReview(await fetchLevelReview(7));
+    } catch (err) {
+      setMessage({ ok: false, text: `Could not check the levels: ${(err as Error).message}` });
+    } finally {
+      setReviewBusy(false);
+    }
+  };
+
   const setSection = (k: keyof BriefSections, v: boolean) => setForm((f) => ({ ...f, sections: { ...f.sections, [k]: v } }));
   const addTime = () => {
     if (!/^\d{2}:\d{2}$/.test(newTime) || form.times.includes(newTime) || form.times.length >= 8) return;
@@ -1407,9 +1429,9 @@ function BriefTab({ p, api }: { p: AlertsPanelProps; api: AlertsApi }) {
   return (
     <div className="space-y-3 px-3 py-2.5">
       <p className="text-[11px] leading-relaxed text-mute">
-        A message to Telegram / Discord at the times you choose: price and 24h change per coin, change since the last
-        brief, trend and RSI, the nearest zone, Kimi&apos;s latest signal and forecast, funding and open interest, key
-        levels, and the day&apos;s economic events.
+        A message to Telegram / Discord at the times you choose: the market mood, your Binance holdings, then per coin
+        price and 24h change, change since the last brief, trend and RSI, the nearest zone, Kimi&apos;s latest signal
+        and forecast, funding and open interest, key levels and your note, and the day&apos;s economic events.
       </p>
       {status && !hasChannel && (
         <div className="rounded border border-yellow-400/30 bg-yellow-400/5 px-2 py-1.5 text-[11px] text-yellow-200">
@@ -1466,6 +1488,11 @@ function BriefTab({ p, api }: { p: AlertsPanelProps; api: AlertsApi }) {
             ? symbols.map(displaySymbol).join(", ")
             : `Default list: ${(status?.default_symbols ?? []).map(displaySymbol).join(", ")}`}
         </div>
+        <Checkbox
+          checked={form.include_holdings}
+          onChange={(v) => setForm((f) => ({ ...f, include_holdings: v }))}
+          label={status?.holdings_available === false ? "Also the coins I hold on Binance (no key set)" : "Also the coins I hold on Binance"}
+        />
         {useWatchlist && status && !sameList(status.settings.symbols, symbols) && (
           <div className="text-[11px] text-yellow-200">Your watchlist changed since the last save. Save to update the brief.</div>
         )}
@@ -1478,6 +1505,51 @@ function BriefTab({ p, api }: { p: AlertsPanelProps; api: AlertsApi }) {
           ))}
         </div>
         {sectionsChanged && <div className="text-[11px] text-mute">Section changes show in the preview after you save.</div>}
+      </div>
+      <div className="space-y-1">
+        <div className={LABEL}>Weekly level check</div>
+        <p className="text-[11px] leading-relaxed text-mute">
+          Did the agent&apos;s zones hold? Every support, resistance, demand and supply zone it draws is checked against
+          price since: held, broke, or not reached yet.
+        </p>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Checkbox
+            checked={form.weekly_review}
+            onChange={(v) => setForm((f) => ({ ...f, weekly_review: v }))}
+            label="Send it every"
+          />
+          <select
+            className={clsx(INPUT, "w-28")}
+            value={form.review_day}
+            onChange={(e) => setForm((f) => ({ ...f, review_day: Number(e.target.value) }))}
+          >
+            {WEEKDAYS.map((d, i) => (
+              <option key={d} value={i}>
+                {d}
+              </option>
+            ))}
+          </select>
+          <span className="text-[11px] text-mute">at {form.times[0]}</span>
+          <button type="button" onClick={() => void checkLevels()} disabled={reviewBusy} className="btn-ghost h-7 px-2 text-[12px] disabled:opacity-50">
+            <Eye className="h-3.5 w-3.5" />
+            {reviewBusy ? "Checking…" : "Check now"}
+          </button>
+        </div>
+        {review && (
+          <div className="rounded border border-line bg-panel2/60">
+            <div className="flex items-center gap-2 border-b border-line px-2 py-1 text-[11px] text-mute">
+              <span className="flex-1">
+                {review.totals.tested
+                  ? `${review.totals.held} of ${review.totals.tested} zones price reached held (${review.totals.held_pct?.toFixed(0)}%)`
+                  : `${review.totals.drawn} zones, none reached yet`}
+              </span>
+              <button type="button" onClick={() => setReview(null)} className="hover:text-ink" aria-label="Close level check">
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+            <pre className="max-h-72 overflow-y-auto whitespace-pre-wrap break-words p-2 font-mono text-[10px] leading-4 text-ink">{review.text}</pre>
+          </div>
+        )}
       </div>
       <div className="flex items-center gap-1.5">
         <button

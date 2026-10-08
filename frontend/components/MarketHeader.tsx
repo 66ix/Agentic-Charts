@@ -7,6 +7,8 @@ import { useMarketMetrics } from "@/hooks/useMarketMetrics";
 import { formatPct } from "@/lib/format";
 import type { Metric } from "@/lib/types";
 
+import SessionClock from "./SessionClock";
+
 function fngColor(v: number) {
   if (v < 25) return "text-down";
   if (v < 45) return "text-orange-400";
@@ -43,6 +45,9 @@ export default function MarketHeader() {
       {data?.metrics.map((m) => <MetricItem key={m.key} m={m} />)}
       {!data && !error && <span className="text-mute">Loading market data…</span>}
       {error && !data && <span className="text-down">{error}</span>}
+      <div className="ml-auto flex shrink-0 items-center pl-4">
+        <SessionClock />
+      </div>
     </header>
   );
 }

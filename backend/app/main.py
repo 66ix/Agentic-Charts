@@ -13,6 +13,7 @@ REST
   *    /api/brief*               the scheduled market brief
   *    /api/market-scan*         best long / short setups across the top coins by volume
   GET  /api/levels/sessions      session (Asia/London/NY), previous day/week/month and opening-range levels
+  GET  /api/sessions/clock       which sessions are open now, and when each next opens or closes
   GET  /api/orderbook/heatmap    resting order-book liquidity over time (sampled while someone polls it)
 WebSocket
   /ws/klines?symbol=INJUSDT&interval=4h   live candle updates
@@ -66,7 +67,7 @@ from .market_scanner import MarketScanner
 from .orderbook_heatmap import OrderbookHeatmapService
 from .ratelimit import RateLimitMiddleware
 from .scanner import DEFAULT_WATCHLIST, WatchlistCache, tickers
-from .session_levels import SessionLevelsService
+from .session_levels import SessionLevelsService, session_clock
 from .schemas import AnalysisIntent
 from .schemas import norm_symbol as schemas_norm
 from .screenshot import SCHEMA as SHOT_SCHEMA
@@ -76,6 +77,8 @@ from .symbols import find_symbol
 from .ta_agent import analyze as analyze_chart
 from .schemas import (INTERVALS, AnalyzeRequest, AnalyzeResponse, CreateAlertsRequest, KimiResponse, MarketMetrics,
                       ScanResult, ZoneTriggerSpec)
+from .level_review import LevelLog
+from .metric_alerts import CreateMetricAlertsRequest, MetricAlertService
 from .signal_alerts import SIGNALS, CreateSignalAlertsRequest, SignalAlertPatch, SignalAlertService
 from .stream_hub import StreamHub
 from .trade_manager import NewManagedTrade, TradeManager, TradePatch, from_journal
@@ -116,8 +119,21 @@ async def lifespan(app: FastAPI):
     app.state.holdings_watch = HoldingsWatch(app.state.binance, app.state.signal_alerts)
     app.state.holdings_watch.start()
     await app.state.signal_alerts.start()
+    # Alerts on the header bar: Fear & Greed, BTC dominance, market cap... (metric_alerts.py).
+    app.state.metric_alerts = MetricAlertService(app.state.metrics, app.state.alerts,
+                                                 get_settings().metric_alerts_store)
+    app.state.metric_alerts.start()
+    # Zones the agent draws, checked weekly: did they hold? (level_review.py)
+    app.state.levels = LevelLog(market, get_settings().level_log_store)
+
+    async def holdings() -> dict | None:
+        if not app.state.binance.account.status().get("configured"):
+            return None
+        return await app.state.binance.positions()
+
     app.state.brief = BriefService(market, app.state.kimi, app.state.derivatives, app.state.alerts,
-                                   events_provider=app.state.events.upcoming_events)
+                                   events_provider=app.state.events.upcoming_events, metrics=app.state.metrics,
+                                   holdings_provider=holdings, levels=app.state.levels)
     app.state.brief.start()
     # Trade manager: live trades it watches on closed candles, advising through the same channels.
     app.state.trades = TradeManager(market, app.state.alerts)
@@ -146,6 +162,7 @@ async def lifespan(app: FastAPI):
     await app.state.binance.close()
     await app.state.binance.account.close()
     await app.state.signal_alerts.close()
+    await app.state.metric_alerts.close()
     await asyncio.gather(app.state.futures.close(), app.state.events.close(), app.state.indexes.close())
     await app.state.alerts.close()
     await app.state.hub.shutdown()
@@ -251,7 +268,9 @@ async def agent_analyze(req: AnalyzeRequest, request: Request) -> AnalyzeRespons
         return await run_analysis(req, st.market, st.llm, st.derivatives, st.kimi,
                                   getattr(st, "futures", None), getattr(st, "events", None),
                                   getattr(st, "market_scanner", None), levels=getattr(st, "session_levels", None),
-                                  gridbots=getattr(st, "gridbots", None))
+                                  gridbots=getattr(st, "gridbots", None), metrics=getattr(st, "metrics", None),
+                                  metric_alerts=getattr(st, "metric_alerts", None),
+                                  level_log=getattr(st, "levels", None), binance=getattr(st, "binance", None))
     except MarketDataError as exc:
         raise HTTPException(502, str(exc)) from exc
     except ValueError as exc:
@@ -278,7 +297,10 @@ async def agent_analyze_stream(req: AnalyzeRequest, request: Request) -> Streami
             res = await run_analysis(req, st.market, st.llm, st.derivatives, st.kimi,
                                      getattr(st, "futures", None), getattr(st, "events", None),
                                      getattr(st, "market_scanner", None), levels=getattr(st, "session_levels", None),
-                                     gridbots=getattr(st, "gridbots", None), on_result=on_result, on_delta=on_delta)
+                                     gridbots=getattr(st, "gridbots", None), metrics=getattr(st, "metrics", None),
+                                     metric_alerts=getattr(st, "metric_alerts", None),
+                                     level_log=getattr(st, "levels", None), binance=getattr(st, "binance", None),
+                                     on_result=on_result, on_delta=on_delta)
             await queue.put({"type": "done", "response": res.model_dump(mode="json")})
         except MarketDataError as exc:
             await queue.put({"type": "error", "status": 502, "detail": str(exc)})
@@ -307,6 +329,9 @@ async def agent_analyze_stream(req: AnalyzeRequest, request: Request) -> Streami
 #   PATCH  /api/alerts/{id}               edit price / zone / label / note / repeat / expires_at
 #   GET    /api/alerts/history?limit=     every fire (price, signal, brief), newest first
 #   DELETE /api/alerts/history            clear it
+#   GET    /api/metric-alerts             {alerts}: alerts on the header bar (Fear & Greed, BTC dominance...)
+#   POST   /api/metric-alerts             {alerts: [{metric, condition: above|below|moves, value, note?}]}
+#   DELETE /api/metric-alerts/{id}
 #   GET    /api/signal-alerts             {alerts, signals: [{id, name, description}]}
 #   POST   /api/signal-alerts             {symbols, interval, signal, repeat?, note?} → one alert per symbol
 #   PATCH  /api/signal-alerts/{id}        {armed?, repeat?, note?}
@@ -338,6 +363,27 @@ async def alert_history(request: Request, limit: int = Query(100, ge=1, le=500))
 @app.delete("/api/alerts/history")
 async def clear_alert_history(request: Request) -> dict:
     return {"removed": request.app.state.alerts.history.clear()}
+
+
+@app.get("/api/metric-alerts")
+async def list_metric_alerts(request: Request) -> dict:
+    return {"alerts": [a.model_dump() for a in request.app.state.metric_alerts.list()]}
+
+
+@app.post("/api/metric-alerts")
+async def create_metric_alerts(req: CreateMetricAlertsRequest, request: Request) -> dict:
+    try:
+        created = await request.app.state.metric_alerts.add(req.alerts)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"alerts": [a.model_dump() for a in created]}
+
+
+@app.delete("/api/metric-alerts/{alert_id}")
+async def delete_metric_alert(alert_id: str, request: Request) -> dict:
+    if not request.app.state.metric_alerts.remove(alert_id):
+        raise HTTPException(404, "No such market alert")
+    return {"ok": True}
 
 
 @app.get("/api/signal-alerts")
@@ -435,6 +481,29 @@ async def brief_preview(request: Request, symbols: str | None = Query(None, desc
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     return brief.model_dump(mode="json")
+
+
+@app.put("/api/brief/notes")
+async def save_brief_notes(request: Request, body: dict = Body(...)) -> dict:
+    """{notes: {symbol: text}} → the coin notes the brief shows (the app's note per coin)."""
+    notes = body.get("notes")
+    if not isinstance(notes, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in notes.items()):
+        raise HTTPException(422, "notes must map symbols to text")
+    return {"notes": request.app.state.brief.set_notes(notes)}
+
+
+@app.get("/api/levels/review")
+async def level_review(request: Request, days: int = Query(7, ge=1, le=30)) -> dict:
+    """The zones the agent drew in the last `days` days and whether each held, broke or hasn't been reached."""
+    return await request.app.state.levels.review(days)
+
+
+@app.post("/api/levels/review/send")
+async def level_review_send(request: Request, days: int = Query(7, ge=1, le=30)) -> dict:
+    try:
+        return await request.app.state.brief.send_review(days)
+    except NoChannelError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @app.post("/api/brief/send")
@@ -1246,6 +1315,13 @@ async def market_scan_run(request: Request, interval: str = Query("4h"),
 #   GET /api/orderbook/heatmap?symbol=BTCUSDT&step=60&since=1700000000
 #       {source, note, bin_size, cadence, step, started_at, collecting, price, walls,
 #        columns: [[time, mid, first_bin, [notional per bin]]]}; polling it keeps the symbol sampled
+
+
+@app.get("/api/sessions/clock")
+async def sessions_clock() -> dict:
+    """Asia, London and New York: open now (and when each closes) or when each next opens, for the header countdown."""
+    now = int(time.time())
+    return {"now": now, "sessions": session_clock(now)}
 
 
 @app.get("/api/levels/sessions")

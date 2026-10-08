@@ -18,6 +18,7 @@ import re
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 from . import general
 from .agent_loop import Toolbox, plan_with_tools
@@ -32,28 +33,38 @@ from .gridbot import GridBotService
 from .kimi_service import KimiService, summarize
 from .llm import ChartContext, LLMClient
 from .market_data import INTERVAL_SECONDS, MarketData, candles_to_df
+from .market_metrics import MarketMetricsService, overview_facts
 from .market_scanner import MarketScanner, MarketScanResult
 from .scanner import DEFAULT_WATCHLIST, scan, tickers
 from .sell_check import describe_sells, sell_facts, sell_scan, timeframe_for
-from .session_levels import SessionLevelsService, level_facts
+from .pricefmt import round_facts
+from .relative import vs_btc
+from .session_levels import SessionLevelsService, clock_facts, level_facts
 from .schemas import (
     FEATURE_KINDS,
     TARGET_KINDS,
     AlertSpec,
+    MetricAlertSpec,
     AnalysisIntent,
     AnalyzeRequest,
     AnalyzeResponse,
+    IndicatorLengths,
     BoxOverlay,
     HorizontalLineOverlay,
     MarketSetup,
     Navigate,
+    PastAnswer,
     SellWatch,
     ZoneTriggerSpec,
     is_custom_symbol,
 )
-from .ta_agent import GREEN, ORANGE, TEAL, _fmt, analyze, describe, higher_timeframes, htf_zones, rgba
+from .ta_agent import (GREEN, ORANGE, TEAL, _fmt, analyze, describe, higher_timeframes, htf_readings, htf_zones,
+                       rgba)
 from .top_down import TopDownResult, describe_walk, walk, walk_facts
 from .trade_plan import build_plan, plan_overlays
+from .level_review import LevelLog
+from .metric_alerts import MetricAlertService
+from .metric_alerts import describe as describe_metric_alert
 from .zone_triggers import describe_trigger, detect_now, spec_from_intent
 
 CUSTOM_COLOR = "#a78bfa"
@@ -158,19 +169,24 @@ def _action_lines(intent: AnalysisIntent, custom: list, removed: int, alerts: li
 
 
 def _compact(facts: dict) -> dict:
-    """Facts trimmed for a tool result: no overlays, no bar timestamps."""
-    return {k: v for k, v in facts.items() if k not in ("last_bar_time",)}
+    """Facts trimmed for a tool result: no overlays, no bar timestamps, and the indicator readings last so a long
+    result is clipped there rather than in the zones."""
+    out = {k: v for k, v in facts.items() if k not in ("last_bar_time", "indicators")}
+    if "indicators" in facts:
+        out["indicators"] = facts["indicators"]
+    return out
 
 
 def make_toolbox(market: MarketData, derivatives: DerivativesService | None, watchlist: list[str],
                  kimi: KimiService | None = None, futures: FuturesDataService | None = None,
                  events: EventsService | None = None, scanner: MarketScanner | None = None,
-                 spot_only: bool = False) -> Toolbox:
+                 spot_only: bool = False, metrics: MarketMetricsService | None = None,
+                 lengths: IndicatorLengths | None = None) -> Toolbox:
     async def look(symbol: str, tf: str, features: list[str]) -> dict:
         candles, source = await market.get_klines(symbol, tf, 400)
         frames = await _confluence_frames(market, symbol, tf, features)
         res = await asyncio.to_thread(analyze, candles_to_df(candles), AnalysisIntent(features=features), tf, None,
-                                      frames)
+                                      frames, lengths)
         return {"symbol": symbol, "data_source": source, **_compact(res.facts)}
 
     async def scan_tool(tf: str, filt: str) -> list[dict]:
@@ -178,16 +194,18 @@ def make_toolbox(market: MarketData, derivatives: DerivativesService | None, wat
         return [r.model_dump(exclude={"interval", "data_source"}) for r in rows[:10]]
 
     async def context(symbol: str) -> dict:
-        tick, deriv, fut, upcoming = await asyncio.gather(
+        tick, deriv, fut, upcoming, overview = await asyncio.gather(
             tickers(market, [symbol]), derivatives.symbol_snapshot(symbol) if derivatives else _none(),
             _guarded(futures.futures_context(symbol), "futures context") if futures else _none(),
-            _upcoming(events, 24))
+            _upcoming(events, 24), _market_overview(metrics))
         out: dict = {"symbol": symbol}
         if tick:
             out.update(price=tick[0]["price"], change_24h_pct=tick[0]["change_pct"])
         out["futures"] = fut or deriv or "unavailable"
         if upcoming is not None:
             out["upcoming_events"] = upcoming
+        if overview:
+            out["whole_market"] = overview
         return out
 
     async def read_kimi(symbol: str, tf: str) -> dict:
@@ -229,8 +247,135 @@ async def _guarded(coro, what: str, seconds: float = 8.0):
         return None
 
 
+async def _market_overview(metrics: MarketMetricsService | None) -> dict | None:
+    """The market header bar: total market cap, 24h volume, liquidations, open interest, Fear & Greed and BTC
+    dominance (cached by the service, so this is usually free)."""
+    if metrics is None:
+        return None
+    res = await _guarded(metrics.get(), "market overview", 5.0)
+    return overview_facts(res) if res else None
+
+
+async def _vs_btc(market: MarketData, symbol: str) -> dict | None:
+    """The coin against BTC on daily candles (relative.py): change vs BTC today and over 7 days, 30-day correlation
+    and beta. None for BTC itself, pairs not quoted in a dollar stablecoin, or when the candles can't be had."""
+    if symbol.startswith("BTC") or not symbol.endswith(("USDT", "USDC", "FDUSD")):
+        return None
+    try:
+        (coin, _), (btc, _) = await asyncio.wait_for(asyncio.gather(
+            market.get_klines(symbol, "1d", 60), market.get_klines("BTCUSDT", "1d", 60)), 8.0)
+    except Exception as exc:  # the answer goes out without it
+        log.info("Skipped vs BTC for %s: %s", symbol, exc)
+        return None
+    return vs_btc(candles_to_df(coin), candles_to_df(btc))
+
+
+HOLDINGS_WORDS = re.compile(r"\b(?:my|our)\s+(?:holdings?|portfolio|bags?|positions?|spot coins|coins|account|"
+                            r"balances?|wallet)\b|\bwhat (?:do )?i (?:hold|own)\b|\bi'?m holding\b", re.I)
+
+
+async def _positions(binance: Any) -> dict | None:
+    """The user's Binance holdings and positions (binance_import.positions, cached 30 s), or None without a
+    read-only key or on any error."""
+    if binance is None or not binance.account.status().get("configured"):
+        return None
+    try:
+        return await asyncio.wait_for(binance.positions(), 10.0)
+    except Exception as exc:  # the answer goes out without it
+        log.info("Skipped Binance holdings: %s", exc)
+        return None
+
+
+def _spot_row(r: dict) -> dict:
+    out = {"coin": r["asset"], "qty": r["own_qty"], "value_usd": r.get("value"), "price": r.get("price")}
+    if r.get("avg_entry"):
+        out["avg_entry"] = r["avg_entry"]
+        if r.get("price"):
+            out["pnl_pct"] = round((r["price"] / r["avg_entry"] - 1) * 100, 2)
+        if r.get("unrealized_pnl") is not None:
+            out["unrealized_pnl_usd"] = r["unrealized_pnl"]
+    if r.get("untracked_qty"):
+        out["qty_without_known_entry"] = r["untracked_qty"]
+    return out
+
+
+def _futures_row(p: dict) -> dict:
+    return {k: p.get(k) for k in ("symbol", "side", "qty", "entry_price", "mark_price", "leverage",
+                                  "liquidation_price", "unrealized_pnl") if p.get(k) is not None}
+
+
+def holding_facts(pos: dict, symbol: str) -> dict | None:
+    """What the user holds of `symbol` on Binance: their spot holding (with average entry from imported fills)
+    and any USD-M position on it."""
+    base = re.sub(r"(?:USDT|USDC|FDUSD|BUSD)$", "", symbol)
+    manual = pos.get("manual", {})
+    spot = next((r for r in manual.get("spot", []) if r["asset"] == base and (r.get("value") or 0) >= 5), None)
+    fut = [p for p in manual.get("futures", []) if p["symbol"] == symbol]
+    if not spot and not fut:
+        return None
+    out: dict = {}
+    if spot:
+        out["spot"] = _spot_row(spot)
+    if fut:
+        out["futures"] = [_futures_row(p) for p in fut]
+    return out
+
+
+def portfolio_facts(pos: dict) -> dict:
+    """All the user's own holdings and positions, biggest first."""
+    manual = pos.get("manual", {})
+    spot = sorted((r for r in manual.get("spot", []) if (r.get("value") or 0) >= 5), key=lambda r: -(r["value"] or 0))
+    cash = sum(c["qty"] for c in manual.get("cash", []))
+    out: dict = {"spot_value_usd": round(sum(r["value"] for r in spot), 2), "stablecoins_usd": round(cash, 2),
+                 "spot": [_spot_row(r) for r in spot[:20]]}
+    if manual.get("futures"):
+        out["futures"] = [_futures_row(p) for p in manual["futures"][:10]]
+    return out
+
+
+def past_answer_facts(prev: PastAnswer, price_now: float, now: float | None = None) -> dict | None:
+    """The agent's last answer on this coin (from the client's chat history) and how price moved since."""
+    age_h = ((now if now is not None else time.time()) * 1000 - prev.time) / 3_600_000
+    if age_h < 0.05 or not prev.summary.strip():  # the answer the user is following up on right now
+        return None
+    out: dict = {"when": f"{age_h:.0f} hours ago" if age_h < 48 else f"{age_h / 24:.0f} days ago",
+                 "question": prev.prompt[:200], "answer": prev.summary[:500]}
+    if prev.interval:
+        out["timeframe"] = prev.interval
+    if prev.price:
+        out.update(price_then=prev.price, price_now=price_now,
+                   change_since_pct=round((price_now / prev.price - 1) * 100, 2))
+    return out
+
+
+async def _chart_cvd(futures: FuturesDataService | None, symbol: str, tf: str) -> dict | None:
+    """Spot CVD on the chart's own timeframe (the chart's CVD pane): the latest bar's and last 20 bars' taker
+    delta, and so which way the running sum has moved over those 20 bars."""
+    if futures is None:
+        return None
+    res = await _guarded(futures.cvd(symbol, tf, 100), "chart CVD", 5.0)
+    rows = (res or {}).get("rows") or []
+    if len(rows) < 2:
+        return None
+    last20 = rows[-20:]
+    buy, sell = sum(r["buy"] for r in last20), sum(r["sell"] for r in last20)
+    out = {"timeframe": tf, "delta_last_bar": float(f"{rows[-1]['delta']:.4g}"),
+           "delta_last_20_bars": float(f"{buy - sell:.4g}"),
+           "buy_pct_last_20_bars": round(buy / (buy + sell) * 100, 1) if buy + sell else None,
+           "cvd_last_20_bars": "rising" if buy > sell else "falling" if buy < sell else "flat",
+           "units": "coins (taker buy minus sell volume)"}
+    if res.get("source") != "binance":
+        out["source"] = res.get("source")
+    return out
+
+
+# Left out of the "numbers used" view: tool transcripts and what the answer did rather than read.
+USED_SKIP = frozenset({"research", "actions", "navigation", "spot_note", "trading_style"})
+SHOW_VERBS = re.compile(r"\b(?:show|add|turn on|switch on|enable|display|plot|put|overlay|bring up|pull up|"
+                        r"draw|toggle|apply|equip|load)\b", re.I)
 FUTURES_WORDS = re.compile(r"\b(funding|open interest|oi|long[ /-]?short|l/s|liquidat\w*|order ?book|walls?|cvd|"
-                           r"order ?flow|delta|positioning|crowded|sentiment|squeeze)\b", re.I)
+                           r"order ?flow|delta|positioning|crowded|sentiment|squeeze|buyers?|sellers?|buying pressure|"
+                           r"selling pressure|money flow|more money)\b", re.I)
 EVENT_WORDS = re.compile(r"\b(news|events?|calendar|cpi|fomc|fed|nfp|payrolls|macro|data release|"
                          r"anything coming|coming up)\b", re.I)
 NEWS_WORDS = re.compile(r"\b(news|headlines?|why is .* (up|down|pumping|dumping)|what happened)\b", re.I)
@@ -454,6 +599,10 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
                        scanner: MarketScanner | None = None,
                        levels: SessionLevelsService | None = None,
                        gridbots: GridBotService | None = None,
+                       metrics: MarketMetricsService | None = None,
+                       metric_alerts: MetricAlertService | None = None,
+                       level_log: LevelLog | None = None,
+                       binance: Any = None,
                        on_result: Callable[[AnalyzeResponse], Awaitable[None]] | None = None,
                        on_delta: Callable[[str], Awaitable[None]] | None = None) -> AnalyzeResponse:
     """The agent's answer to one request. With `on_result` and `on_delta` (the streaming endpoint) the drawings,
@@ -465,7 +614,8 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
     research: list[dict] = []
     loop = None
     if req.prompt.strip() and llm.available() and settings.agent_mode == "tools":
-        box = make_toolbox(market, derivatives, req.watchlist, kimi, futures, events, scanner, req.spot_only)
+        box = make_toolbox(market, derivatives, req.watchlist, kimi, futures, events, scanner, req.spot_only, metrics,
+                           req.indicator_settings)
         loop = await plan_with_tools(llm, req.prompt, req.history, req.overlays, req.previous_intent, chart, box,
                                      settings.agent_max_steps)
     if loop:
@@ -473,6 +623,9 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
     else:
         intent, intent_engine = await llm.parse_intent(req.prompt, req.history, req.overlays, req.previous_intent,
                                                        chart)
+    # Asking about an indicator reads it; only "add", "show" or "turn on" puts it on the chart (Kimi has its own rule).
+    if intent.indicators_on and not SHOW_VERBS.search(req.prompt):
+        intent = intent.model_copy(update={"indicators_on": [k for k in intent.indicators_on if k == "kimi"]})
     # Spot only: a short plan becomes a note, "what's the trade?" a long.
     spot_note = None
     if req.spot_only and intent.trade_plan == "short":
@@ -559,10 +712,13 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         _sells(market, sell_symbols, sell_tf) if want_sell else _none(),
         _walk(market, symbol) if want_walk else _none(),
         _ladder(market, symbol, tf) if want_ladder else _none(),
-        general.context(events, req.prompt) if want_general else _none())
-    (candles, source), higher, frames, rows, deriv, kimi_facts, fut, upcoming, headlines, mscan, lvl, grid, extra = await asyncio.gather(
+        general.context(events, req.prompt) if want_general else _none(),
+        # The market header bar and the chart's CVD pane, read whether or not the user has them on screen.
+        _market_overview(metrics), _chart_cvd(futures, symbol, tf) if not custom_chart else _none(),
+        _vs_btc(market, symbol) if not custom_chart else _none(), _positions(binance))
+    (candles, source), higher, htf_frames, rows, deriv, kimi_facts, fut, upcoming, headlines, mscan, lvl, grid, extra = await asyncio.gather(
         candles_for_chart(), windows(),
-        _confluence_frames(market, symbol, tf, [] if custom_chart else features), scan_rows(),
+        _confluence_frames(market, symbol, tf, [] if custom_chart else ["support_resistance"]), scan_rows(),
         derivatives.symbol_snapshot(symbol) if want_deriv else _none(),
         _kimi_facts(kimi, symbol, tf) if want_kimi else _none(),
         _guarded(futures.futures_context(symbol), "futures context") if want_futures else _none(),
@@ -570,11 +726,17 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         _headlines(events, symbol) if want_news else _empty(), market_scan(),
         _guarded(levels.get(symbol, tf), "session levels") if want_levels else _none(),
         _grid_plan(gridbots, symbol) if want_grid else _none(), extras)
-    sells, walked, ladder, general_ctx = extra
+    sells, walked, ladder, general_ctx, overview, chart_cvd, vs_btc_facts, positions = extra
+    if general_ctx is not None and overview:
+        general_ctx["market_overview"] = overview
+    if general_ctx is not None and positions and HOLDINGS_WORDS.search(req.prompt):
+        general_ctx["your_holdings"] = portfolio_facts(positions)
 
+    # The next two timeframes up are always read (htf_readings); their zones only count when zones are drawn.
+    frames = htf_frames if {"support_resistance", "supply_demand"} & set(features) else {}
     df = candles_to_df(candles)
     # Detection is CPU-bound (SciPy); keep the event loop free for streams.
-    result = await asyncio.to_thread(analyze, df, run_intent, tf, higher, frames)
+    result = await asyncio.to_thread(analyze, df, run_intent, tf, higher, frames, req.indicator_settings)
     facts = dict(result.facts)
 
     for ov in result.overlays:
@@ -623,6 +785,24 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
     overlays, removed = merge_overlays(existing, new, run_intent)
     alerts = build_alerts(intent, overlays, new)
 
+    if chart_cvd:
+        facts["indicators"]["cvd"] = chart_cvd
+    if htf_frames and (htf := htf_readings(htf_frames, req.indicator_settings)):
+        facts["higher_timeframes"] = htf
+    if vs_btc_facts:
+        facts["vs_btc"] = vs_btc_facts
+    facts["session_clock"] = clock_facts(int(time.time()))
+    if req.coin_note and req.coin_note.strip():
+        facts["your_note_on_this_coin"] = req.coin_note.strip()
+    if positions:  # read-only Binance key set: what the user holds of this coin, and everything when asked
+        if not custom_chart and (mine := holding_facts(positions, symbol)):
+            facts["your_position"] = mine
+        if HOLDINGS_WORDS.search(req.prompt):
+            facts["your_holdings"] = portfolio_facts(positions)
+    if req.previous_answer and (past := past_answer_facts(req.previous_answer, result.stats.last_price)):
+        facts["last_time_you_asked"] = past
+    if overview:
+        facts["market_overview"] = overview
     if deriv:
         facts["derivatives"] = deriv
     if kimi_facts:
@@ -639,7 +819,7 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         facts["grid_plan"] = grid_plan_facts(grid) if grid else None
     if intent.scan_watchlist:
         facts["scan"] = [r.model_dump(include={"symbol", "last_price", "change_pct", "trend", "rsi", "signals",
-                                               "nearest_kind", "distance_pct"}) for r in rows[:6]]
+                                               "nearest_kind", "distance_pct", "unusual_volume"}) for r in rows[:6]]
     setups: list[MarketSetup] = []
     grid_coins = []
     if isinstance(mscan, MarketScanResult) and intent.scan_kind == "spot_buys":
@@ -670,6 +850,8 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         off = [INDICATOR_NAMES.get(k, k.upper()) for k, v in toggles.items() if not v]
         actions.append(" ".join(filter(None, [f"Turned on {', '.join(on)}." if on else "",
                                               f"Turned off {', '.join(off)}." if off else ""])))
+    if intent.metric_alerts:
+        actions.append(await _set_metric_alerts(intent.metric_alerts, metric_alerts))
     if nav:
         facts["navigation"] = nav
     if actions:
@@ -697,6 +879,8 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
                     "The sell check could not run right now.")
     if lead:
         fallback = " ".join(lead) + " " + fallback
+    if level_log is not None and not custom_chart:  # for the weekly "did the levels hold?" check
+        level_log.record(symbol, tf, overlays, result.stats.last_price, source)
     res = AnalyzeResponse(
         symbol=symbol,
         interval=chart_interval,
@@ -722,13 +906,14 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         sources=[],
         sells=sells or [],
         sell_watch=SellWatch(symbols=sell_symbols[:40], interval=sell_tf) if sells is not None else None,
+        facts=round_facts({k: v for k, v in narrate_facts.items() if k not in USED_SKIP}),
     )
     if on_result is not None:
         await on_result(res)
     sources: list[dict[str, str]] = []
     if want_general and general_ctx is not None:
         # Web-searched answers come back in one piece.
-        answered = await llm.answer(req.prompt, general_ctx, req.history, req.spot_only)
+        answered = await llm.answer(req.prompt, general_ctx, req.history, req.spot_only, req.detail)
         if answered:
             summary, narrate_engine, sources = answered
         else:
@@ -737,11 +922,24 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         if on_delta is not None:
             await on_delta(summary)
     elif on_delta is not None:
-        summary, narrate_engine = await llm.narrate_stream(req.prompt, narrate_facts, fallback, req.history, on_delta)
+        summary, narrate_engine = await llm.narrate_stream(req.prompt, narrate_facts, fallback, req.history, on_delta,
+                                                           detail=req.detail)
     else:
-        summary, narrate_engine = await llm.narrate(req.prompt, narrate_facts, fallback, req.history)
+        summary, narrate_engine = await llm.narrate(req.prompt, narrate_facts, fallback, req.history,
+                                                    detail=req.detail)
     return res.model_copy(update={"summary": summary, "sources": sources,
                                   "engine": {**res.engine, "summary": narrate_engine}})
+
+
+async def _set_metric_alerts(specs: list[MetricAlertSpec], service: MetricAlertService | None) -> str:
+    """"Alert me when Fear & Greed drops below 25" → the alert set, and its action line."""
+    if service is None:
+        return "Market alerts aren't available here."
+    try:
+        made = await service.add(specs)
+    except ValueError as exc:
+        return f"Couldn't set the market alert: {exc}."
+    return "Set a market alert: " + "; ".join(describe_metric_alert(a) for a in made) + "."
 
 
 async def _trigger_alerts(intent: AnalysisIntent, market: MarketData, symbol: str, tf: str, custom_chart: bool,

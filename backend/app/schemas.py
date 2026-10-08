@@ -143,9 +143,9 @@ INDICATORS: tuple[str, ...] = ("rsi", "macd", "vwap", "ema20", "ema50", "psar", 
 
 # What a watchlist scan looks for.
 ScanFilter = Literal["any", "near_support", "near_resistance", "bullish", "bearish", "oversold", "overbought",
-                     "breakout"]
+                     "breakout", "volume"]
 SCAN_FILTERS: tuple[str, ...] = ("any", "near_support", "near_resistance", "bullish", "bearish", "oversold",
-                                 "overbought", "breakout")
+                                 "overbought", "breakout", "volume")
 
 
 def norm_symbol(v: str) -> str:
@@ -248,6 +248,19 @@ ScanKind = Literal["setups", "spot_buys", "grid_coins"]
 SCAN_KINDS: tuple[str, ...] = ("setups", "spot_buys", "grid_coins")
 
 
+MetricKey = Literal["fear_greed", "btc_dominance", "market_cap", "volume_24h", "open_interest", "liquidations"]
+
+
+class MetricAlertSpec(BaseModel):
+    """An alert on a market header metric (metric_alerts.py)."""
+
+    metric: MetricKey
+    condition: Literal["above", "below", "moves"]
+    value: float = Field(..., gt=0, description="The level, or for moves the distance (points for Fear & Greed and "
+                                               "BTC dominance, percent for the dollar metrics)")
+    note: Optional[str] = Field(None, max_length=200)
+
+
 class AnalysisIntent(BaseModel):
     """What the user asked for, normalised. Produced by the LLM or the rule parser."""
 
@@ -271,6 +284,8 @@ class AnalysisIntent(BaseModel):
     indicators_on: list[IndicatorName] = Field(default_factory=list)
     indicators_off: list[IndicatorName] = Field(default_factory=list)
     zone_trigger: Optional[ZoneTriggerIntent] = Field(None, description="Set a lower-timeframe trigger alert")
+    metric_alerts: list[MetricAlertSpec] = Field(default_factory=list, max_length=5,
+                                                 description="Alerts on the market header (Fear & Greed, dominance...)")
     scan_kind: ScanKind = Field("setups", description="What a market scan ranks: trade setups, spot buys, grid coins")
     top_down: bool = Field(False, description="Walk 1D → 4H → 1H → 15m drawing only the valid levels (top_down.py)")
     take_profit: bool = Field(False, description="Where to sell spot holdings: the zones above price")
@@ -306,7 +321,7 @@ class AnalysisIntent(BaseModel):
         return bool(self.custom_levels or self.remove or self.alert_prices or self.alert_targets or self.symbol
                     or self.switch_chart or self.scan_watchlist or self.scan_market or self.trade_plan or self.indicators_on
                     or self.indicators_off or self.zone_trigger or self.grid_plan or self.top_down or self.dip_ladder
-                    or self.general_question or self.sell_check)
+                    or self.general_question or self.sell_check or self.metric_alerts)
 
     @model_validator(mode="after")
     def _default_features(self) -> "AnalysisIntent":
@@ -408,6 +423,8 @@ class ScanResult(BaseModel):
     signals: list[str] = Field(default_factory=list)
     score: float = 0.0
     data_source: str = "binance"
+    volume_ratio: Optional[float] = Field(None, description="Last bar's volume against the 20-bar average")
+    unusual_volume: bool = Field(False, description="Volume well above normal (3x on the last bar, or 2x over 5)")
 
 
 class SetupAgreement(BaseModel):
@@ -500,6 +517,46 @@ def is_custom_symbol(symbol: str) -> bool:
     return "/" in symbol or symbol.startswith("INDEX:")
 
 
+class MacdLengths(BaseModel):
+    fast: int = Field(12, ge=2, le=200)
+    slow: int = Field(26, ge=2, le=400)
+    signal: int = Field(9, ge=2, le=200)
+
+
+class BandLengths(BaseModel):
+    length: int = Field(20, ge=2, le=400)
+    mult: float = Field(2.0, gt=0, le=10)
+
+
+class StochRsiLengths(BaseModel):
+    rsiLength: int = Field(14, ge=2, le=200)
+    stochLength: int = Field(14, ge=2, le=200)
+    k: int = Field(3, ge=1, le=50)
+    d: int = Field(3, ge=1, le=50)
+
+
+class IndicatorLengths(BaseModel):
+    """The chart's indicator settings (IndicatorSettings in frontend/lib/types.ts), so the agent's readings match."""
+
+    ema_fast: int = Field(20, ge=2, le=400)
+    ema_slow: int = Field(50, ge=2, le=400)
+    rsi: int = Field(14, ge=2, le=200)
+    macd: MacdLengths = Field(default_factory=MacdLengths)
+    bb: BandLengths = Field(default_factory=BandLengths)
+    atr: int = Field(14, ge=2, le=200)
+    stoch_rsi: StochRsiLengths = Field(default_factory=StochRsiLengths)
+
+
+class PastAnswer(BaseModel):
+    """The agent's last answer on this coin, from the client's chat history, so it can follow up on it."""
+
+    time: int = Field(..., description="UNIX milliseconds")
+    prompt: str = Field("", max_length=500)
+    summary: str = Field("", max_length=1500)
+    interval: Optional[str] = None
+    price: Optional[float] = Field(None, description="Price when it answered")
+
+
 class AnalyzeRequest(BaseModel):
     symbol: str = Field("INJUSDT", min_length=2, max_length=40)
     interval: Interval = "4h"
@@ -513,6 +570,10 @@ class AnalyzeRequest(BaseModel):
     previous_intent: Optional[AnalysisIntent] = None
     watchlist: list[str] = Field(default_factory=list, max_length=40, description="The user's watchlist symbols")
     spot_only: bool = Field(True, description="The user trades spot only: no short plans, no short setups")
+    indicator_settings: IndicatorLengths = Field(default_factory=IndicatorLengths)
+    detail: Literal["short", "normal", "detailed"] = Field("normal", description="How long the answer should be")
+    coin_note: Optional[str] = Field(None, max_length=1000, description="The user's own note on this coin")
+    previous_answer: Optional[PastAnswer] = None
 
     @field_validator("symbol")
     @classmethod
@@ -582,6 +643,8 @@ class AnalyzeResponse(BaseModel):
     sells: list[SellSignal] = Field(default_factory=list, description="Sell or trim signals (sell_check.py)")
     sell_watch: Optional[SellWatch] = Field(None, description="The coins and timeframe a sell check covered, so the "
                                                               "client can offer to watch them with signal alerts")
+    facts: dict = Field(default_factory=dict, description="The numbers the answer was written from, rounded as the "
+                                                          "model saw them, for the 'numbers used' view")
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

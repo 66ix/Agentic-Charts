@@ -2,6 +2,7 @@ import { API_URL } from "./config";
 import type { AlertPatch } from "./alerts";
 import type {
   AlertChannels,
+  AnswerDetail,
   AlertSpec,
   AnalysisIntent,
   AnalyzeResponse,
@@ -11,6 +12,8 @@ import type {
   KimiResult,
   LadderResult,
   MarketMetrics,
+  MetricAlert,
+  MetricAlertSpec,
   Overlay,
   PriceAlert,
   ScanResult,
@@ -88,6 +91,22 @@ export function analyze(
     watchlist?: string[];
     /** Spot only: no short plans or short setups. */
     spot_only?: boolean;
+    /** The chart's indicator lengths, so the agent's readings match what the user sees. */
+    indicator_settings?: {
+      ema_fast: number;
+      ema_slow: number;
+      rsi: number;
+      macd: { fast: number; slow: number; signal: number };
+      bb: { length: number; mult: number };
+      atr: number;
+      stoch_rsi: { rsiLength: number; stochLength: number; k: number; d: number };
+    };
+    /** How long the answer should be. */
+    detail?: AnswerDetail;
+    /** The user's own note on this coin. */
+    coin_note?: string;
+    /** The agent's last answer on this coin in an earlier conversation. */
+    previous_answer?: { time: number; prompt: string; summary: string; interval?: Interval; price?: number } | null;
   },
   signal?: AbortSignal,
 ) {
@@ -250,4 +269,17 @@ export function updateAlert(id: string, patch: AlertPatch) {
 /** Sends a test message to every configured channel → which ones delivered it. */
 export function testAlertChannels() {
   return apiRequest<{ results: Partial<Record<keyof AlertChannels, boolean>> }>("/api/alerts/test", { method: "POST" });
+}
+
+/** Alerts on the market header bar: Fear & Greed, BTC dominance, market cap... */
+export function fetchMetricAlerts(signal?: AbortSignal) {
+  return apiRequest<{ alerts: MetricAlert[] }>("/api/metric-alerts", { signal });
+}
+
+export function createMetricAlert(spec: MetricAlertSpec) {
+  return apiRequest<{ alerts: MetricAlert[] }>("/api/metric-alerts", { method: "POST", body: JSON.stringify({ alerts: [spec] }) });
+}
+
+export function deleteMetricAlert(id: string) {
+  return apiRequest<{ ok: boolean }>(`/api/metric-alerts/${encodeURIComponent(id)}`, { method: "DELETE" });
 }

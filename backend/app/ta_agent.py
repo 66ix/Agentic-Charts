@@ -41,6 +41,7 @@ from .patterns import detect_double, detect_range, detect_triangle, fair_value_g
 from .schemas import (
     AnalysisIntent,
     AnalysisStats,
+    IndicatorLengths,
     BoxOverlay,
     HorizontalLineOverlay,
     MarkerOverlay,
@@ -107,6 +108,113 @@ def parabolic_sar(df: pd.DataFrame, step: float = 0.02, max_step: float = 0.2) -
                 ep, af = low[i], min(af + step, max_step)
         sar[i] = cur
     return pd.Series(sar, index=df.index)
+
+
+def _last(series: pd.Series) -> float | None:
+    v = float(series.iloc[-1]) if len(series) else float("nan")
+    return None if np.isnan(v) else v
+
+
+def _price(v: float | None) -> float | None:
+    return None if v is None else float(f"{v:.6g}")
+
+
+def _cross_bars_ago(diff: pd.Series, lookback: int = 50) -> tuple[str, int] | None:
+    """The latest sign change of `diff` (a - b) in the last `lookback` bars: ("bullish" | "bearish", bars ago)."""
+    sign = np.sign(diff.dropna().to_numpy()[-(lookback + 1):])
+    for i in range(len(sign) - 1, 0, -1):
+        if sign[i] != sign[i - 1] and sign[i] != 0:
+            return ("bullish" if sign[i] > 0 else "bearish"), len(sign) - 1 - i
+    return None
+
+
+def indicator_snapshot(df: pd.DataFrame, lengths: IndicatorLengths | None = None) -> dict:
+    """The latest value of every chart indicator, whether or not it is switched on, with the chart's own lengths
+    (frontend/lib/indicators.ts; the defaults are EMA 20/50, RSI 14, MACD 12/26/9, Bollinger 20/2, ATR 14 and
+    Stoch RSI 14/14/3/3): VWAP is the daily session below 1d and anchored at the first bar above, like the chart."""
+    ln = lengths or IndicatorLengths()
+    close = df["close"]
+    last = float(close.iloc[-1])
+    out: dict = {"lengths": ln.model_dump()}
+
+    ef, es = ema(close, ln.ema_fast), ema(close, ln.ema_slow)
+    out["ema_fast"], out["ema_slow"] = _price(_last(ef)), _price(_last(es))
+    out["price_vs_ema"] = ("above both" if last > max(out["ema_fast"], out["ema_slow"]) else
+                           "below both" if last < min(out["ema_fast"], out["ema_slow"]) else "between")
+    if (x := _cross_bars_ago(ef - es)):
+        out["ema_cross"] = {"type": "golden" if x[0] == "bullish" else "death", "bars_ago": x[1]}
+
+    rsi_s = rsi(close, ln.rsi)
+    if (rv := _last(rsi_s)) is not None:
+        out["rsi"] = round(rv, 1)
+
+    m = ln.macd
+    if len(df) >= max(m.fast, m.slow) + m.signal:
+        line = ema(close, m.fast) - ema(close, m.slow)
+        signal = ema(line, m.signal)
+        hist = line - signal
+        out["macd"] = {"macd": _price(_last(line)), "signal": _price(_last(signal)), "hist": _price(_last(hist)),
+                       "hist_rising": bool(hist.iloc[-1] > hist.iloc[-2])}
+        if (x := _cross_bars_ago(hist)):
+            out["macd"]["last_cross"] = {"direction": x[0], "bars_ago": x[1]}
+
+    mid = close.rolling(ln.bb.length).mean()
+    sd = close.rolling(ln.bb.length).std(ddof=0)
+    if (mv := _last(mid)) is not None:
+        up, lo = mv + ln.bb.mult * float(sd.iloc[-1]), mv - ln.bb.mult * float(sd.iloc[-1])
+        out["bollinger"] = {"upper": _price(up), "mid": _price(mv), "lower": _price(lo),
+                            "pct_b": round((last - lo) / (up - lo), 2) if up > lo else None,
+                            "width_pct": round((up - lo) / mv * 100, 2) if mv else None}
+
+    st = ln.stoch_rsi
+    srsi = rsi_s if st.rsiLength == ln.rsi else rsi(close, st.rsiLength)
+    lo_r, hi_r = srsi.rolling(st.stochLength).min(), srsi.rolling(st.stochLength).max()
+    raw = ((srsi - lo_r) / (hi_r - lo_r).replace(0, np.nan) * 100).fillna(0).where(lo_r.notna())
+    k = raw.rolling(st.k).mean()
+    d = k.rolling(st.d).mean()
+    if (kv := _last(k)) is not None and (dv := _last(d)) is not None:
+        out["stoch_rsi"] = {"k": round(kv, 1), "d": round(dv, 1),
+                            "zone": "overbought" if kv >= 80 else "oversold" if kv <= 20 else "neutral"}
+
+    times = df["time"].to_numpy()
+    intraday = len(times) > 1 and float(np.median(np.diff(times))) < 86400
+    tp = (df["high"] + df["low"] + close) / 3
+    pv, vol = tp * df["volume"], df["volume"]
+    if intraday:
+        day = pd.Series(times // 86400, index=df.index)
+        pv, vol = pv.groupby(day).cumsum(), vol.groupby(day).cumsum()
+    else:
+        pv, vol = pv.cumsum(), vol.cumsum()
+    vw = float(pv.iloc[-1] / vol.iloc[-1]) if float(vol.iloc[-1]) > 0 else float(tp.iloc[-1])
+    out["vwap"] = {"value": _price(vw), "price": "above" if last > vw else "below",
+                   "anchor": "UTC day" if intraday else "first bar"}
+
+    if (sar := _last(parabolic_sar(df))) is not None:
+        out["psar"] = {"value": _price(sar), "trend": "up" if sar < last else "down"}
+    if (av := _last(atr(df, ln.atr))) is not None:
+        out["atr"] = _price(av)
+    return out
+
+
+def htf_readings(frames: dict[str, pd.DataFrame], lengths: IndicatorLengths | None = None) -> dict:
+    """The higher timeframes in brief, so "does the daily agree?" needs no second question: trend from the EMAs,
+    RSI, MACD histogram, Stoch RSI zone and price against the EMAs and VWAP on each."""
+    out: dict = {}
+    for tf, df in frames.items():
+        if len(df) < 60:
+            continue
+        snap = indicator_snapshot(df.reset_index(drop=True), lengths)
+        fast, slow, where = snap["ema_fast"], snap["ema_slow"], snap["price_vs_ema"]
+        row: dict = {"trend": "up" if fast > slow and where == "above both" else
+                     "down" if fast < slow and where == "below both" else "mixed",
+                     "price_vs_ema": where, "rsi": snap.get("rsi"), "price_vs_vwap": snap["vwap"]["price"]}
+        if (m := snap.get("macd")):
+            row["macd_hist"] = m["hist"]
+            row["macd_momentum"] = ("rising" if m["hist_rising"] else "falling")
+        if (st := snap.get("stoch_rsi")):
+            row["stoch_rsi_zone"] = st["zone"]
+        out[TF_LABEL.get(tf, tf)] = row
+    return out
 
 
 # ------------------------------------------------------------------ swings
@@ -456,6 +564,7 @@ def analyze(
     tf: str,
     higher_tf: dict[str, pd.DataFrame] | None = None,
     confluence: dict[str, pd.DataFrame] | None = None,
+    lengths: IndicatorLengths | None = None,
 ) -> AnalysisResult:
     """Run the requested detectors and return overlays + stats + facts for narration.
 
@@ -497,6 +606,8 @@ def analyze(
     if div:
         momentum["divergence"] = f"{div['kind']} {div['type']} ({_fmt(div['price1'])} → {_fmt(div['price2'])})"
     facts["momentum"] = momentum
+    # Every chart indicator's latest value, whether or not the user has it on the chart.
+    facts["indicators"] = indicator_snapshot(df, lengths)
     breaks = structure_breaks(df, highs, lows)
     bias = None
     if breaks:
@@ -505,6 +616,8 @@ def analyze(
         facts["last_structure_break"] = {"type": b["type"], "direction": b["direction"], "level": b["level"],
                                          "bars_ago": len(df) - 1 - b["idx"]}
     facts["volume"] = volume_stats(df)
+    if facts["volume"]["last_vs_avg"] >= 3 or facts["volume"]["recent_vs_avg"] >= 2:
+        facts["volume"]["unusual"] = True  # 3x the average on the last bar, or 2x over the last 5
 
     if "support_resistance" in feats:
         zones = cluster_levels(highs + lows, atr_v, last, len(df))
@@ -765,6 +878,50 @@ def _futures_lines(f: dict) -> list[str]:
     return out
 
 
+def market_mood(overview: dict | None) -> str | None:
+    """'Market mood: Fear & Greed 31/100 · Fear, BTC dominance 57.30% (+0.12% 24h).' from the header bar's live
+    values; None when neither is live."""
+    bits = []
+    for key, name in (("fear_greed", "Fear & Greed"), ("btc_dominance", "BTC dominance")):
+        row = (overview or {}).get(key)
+        if row:
+            chg = f" ({row['change_pct']:+g}% 24h)" if row.get("change_pct") is not None else ""
+            bits.append(f"{name} {row['display']}{chg}")
+    return f"Market mood: {', '.join(bits)}." if bits else None
+
+
+def _spot_text(r: dict) -> str:
+    out = f"{r['qty']:g} {r['coin']}" + (f" (${r['value_usd']:,.0f})" if r.get("value_usd") else "")
+    if r.get("avg_entry"):
+        out += f", average entry {_fmt(r['avg_entry'])}"
+        if r.get("pnl_pct") is not None:
+            out += f", {r['pnl_pct']:+.1f}%"
+    return out
+
+
+def _position_lines(position: dict | None, holdings: dict | None) -> list[str]:
+    """'You hold 120 INJ ($936), average entry 7.21, +8.3%.' and the whole portfolio when asked."""
+    lines = []
+    if position:
+        if position.get("spot"):
+            lines.append(f"You hold {_spot_text(position['spot'])}.")
+        for p in position.get("futures", []):
+            line = f"Your futures {p['side']}: {p['qty']:g} at {_fmt(p['entry_price'])}"
+            line += f", {p['leverage']}x" if p.get("leverage") else ""
+            line += f", PnL {p['unrealized_pnl']:+,.2f}" if p.get("unrealized_pnl") is not None else ""
+            line += f", liquidation {_fmt(p['liquidation_price'])}" if p.get("liquidation_price") else ""
+            lines.append(line + ".")
+    if holdings:
+        spot = holdings.get("spot", [])
+        lines.append(f"Your holdings: ${holdings['spot_value_usd']:,.0f} in {len(spot)} coins"
+                     + (f" plus ${holdings['stablecoins_usd']:,.0f} in stablecoins" if holdings.get("stablecoins_usd")
+                        else "") + (": " + "; ".join(_spot_text(r) for r in spot[:8]) if spot else "") + ".")
+        for p in holdings.get("futures", []):
+            lines.append(f"Futures {p['symbol']} {p['side']} {p['qty']:g} at {_fmt(p['entry_price'])}"
+                         + (f", PnL {p['unrealized_pnl']:+,.2f}" if p.get("unrealized_pnl") is not None else "") + ".")
+    return lines
+
+
 def describe(facts: dict, symbol: str) -> str:
     """Plain-English summary of the analysis, used when no LLM is configured."""
     tf = facts["timeframe"]
@@ -849,6 +1006,9 @@ def describe(facts: dict, symbol: str) -> str:
             lines.append(f"Track record: {p['track_record']['summary']}.")
     elif "plan" in facts:
         lines.append("No clean trade plan here: no zone or swing to put a stop behind.")
+    if any(k in facts for k in ("scan", "market_scan", "spot_buys", "grid_coins")) and (
+            mood := market_mood(facts.get("market_overview"))):
+        lines.append(mood)
     if facts.get("scan"):
         best = facts["scan"][:3]
         lines.append("Watchlist: " + "; ".join(f"{r['symbol']} " + (", ".join(r["signals"][:2]) or r["trend"])
@@ -867,6 +1027,13 @@ def describe(facts: dict, symbol: str) -> str:
             lines.append(ms.get("note") or f"No {ms['timeframe']} setups across the market right now.")
     if facts.get("kimi"):
         lines += _kimi_lines(facts["kimi"])
+    if (facts.get("volume") or {}).get("unusual"):
+        v = facts["volume"]
+        lines.append(f"Unusual volume: the last bar is {v['last_vs_avg']}x its average, the last 5 bars "
+                     f"{v['recent_vs_avg']}x.")
+    if facts.get("your_note_on_this_coin"):
+        lines.append(f"Your note on this coin: {facts['your_note_on_this_coin']}")
+    lines += _position_lines(facts.get("your_position"), facts.get("your_holdings"))
     lines += facts.get("actions", [])
     if len(lines) == 1:
         lines.append("No qualifying levels found for this request.")

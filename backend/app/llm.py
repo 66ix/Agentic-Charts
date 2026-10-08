@@ -30,6 +30,7 @@ from pydantic import ValidationError
 from .config import Settings, get_settings
 from .pricefmt import round_facts
 from .schemas import (
+    MetricAlertSpec,
     ALL_FEATURES,
     SCAN_KINDS,
     CONFIRMATIONS,
@@ -58,7 +59,7 @@ INTENT_SCHEMA: dict[str, Any] = {
                  "remove", "keep_existing", "alert_prices", "alert_targets", "symbol", "switch_chart",
                  "scan_watchlist", "scan_filter", "scan_market", "trade_plan", "grid_plan", "indicators_on",
                  "indicators_off", "zone_trigger", "scan_kind", "top_down", "take_profit", "dip_ladder",
-                 "general_question", "sell_check"],
+                 "general_question", "sell_check", "metric_alerts"],
     "properties": {
         "features": {
             "type": "array",
@@ -142,7 +143,8 @@ INTENT_SCHEMA: dict[str, Any] = {
                            "'scan my watchlist', 'anything oversold?'.",
         },
         "scan_filter": {"type": "string", "enum": list(SCAN_FILTERS),
-                        "description": "What the scan ranks by; 'any' when it is not a scan. For a market scan: "
+                        "description": "What the scan ranks by; 'any' when it is not a scan. volume ranks by "
+                                       "unusual volume ('which coins have unusual volume?'). For a market scan: "
                                        "bullish for longs only, bearish for shorts only, any for both."},
         "scan_market": {
             "type": "boolean",
@@ -162,8 +164,10 @@ INTENT_SCHEMA: dict[str, Any] = {
                            "settings for SOL?'): the app suggests the range, number of grids and grid type.",
         },
         "indicators_on": {"type": "array", "items": {"type": "string", "enum": list(INDICATORS)},
-                          "description": "Chart indicators to show ('add RSI' → rsi; 'show my Kimi' or 'turn on "
-                                         "Kimi Cooked' → kimi, the user's own indicator)."},
+                          "description": "Chart indicators to show, only when asked to show them ('add RSI' → rsi; "
+                                         "'show my Kimi' or 'turn on Kimi Cooked' → kimi, the user's own "
+                                         "indicator). A question about a value ('what's the MACD?', 'is RSI "
+                                         "overbought?') shows nothing: every indicator is read anyway."},
         "indicators_off": {"type": "array", "items": {"type": "string", "enum": list(INDICATORS)},
                            "description": "Chart indicators to hide."},
         "zone_trigger": {
@@ -216,6 +220,27 @@ INTENT_SCHEMA: dict[str, Any] = {
                            "should I place my buy orders?'. The app splits a budget across the demand zones below "
                            "price and tests it on 90 days. features empty, keep_existing true.",
         },
+        "metric_alerts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["metric", "condition", "value", "note"],
+                "properties": {
+                    "metric": {"type": "string", "enum": ["fear_greed", "btc_dominance", "market_cap", "volume_24h",
+                                                          "open_interest", "liquidations"]},
+                    "condition": {"type": "string", "enum": ["above", "below", "moves"]},
+                    "value": {"type": "number", "description": "The level (25, 58.5, 3000000000000), or for moves "
+                                                               "the distance: points for fear_greed and "
+                                                               "btc_dominance, percent for the dollar metrics."},
+                    "note": {"type": ["string", "null"]},
+                },
+            },
+            "description": "Alerts on the market header stats, not a coin's price: 'alert me when Fear & Greed "
+                           "drops below 25' → {fear_greed, below, 25}; 'tell me if BTC dominance moves 1%' → "
+                           "{btc_dominance, moves, 1}; 'ping me when total market cap is above $3T' → {market_cap, "
+                           "above, 3000000000000}. The BTC in 'BTC dominance' is not a symbol. Empty otherwise.",
+        },
         "sell_check": {
             "type": "boolean",
             "description": "true for 'what should I sell or trim?', 'should I sell INJ?', 'which coins should I "
@@ -244,6 +269,9 @@ INTENT_SYSTEM = (
     "order_blocks, 'imbalance' or 'FVG' means fvg, 'stop hunt' or 'liquidity grab' means liquidity_sweeps, "
     "'triangle', 'wedge', 'range' or 'double top' means patterns. If the request only draws given prices, removes "
     "overlays, sets alerts, switches the chart, toggles indicators or scans the watchlist, features may be empty. "
+    "Every indicator's value is read for the answer whether or not it is on the chart, so a question about one "
+    "('what's the MACD doing?', 'is RSI overbought?') leaves indicators_on empty; only 'add', 'show' or 'turn on' "
+    "puts it on the chart. "
     "'Kimi' or 'Kimi Cooked' is the user's own indicator: 'show Kimi' → indicators_on kimi; a question about what "
     "Kimi says needs no detectors (its facts are read separately) and keeps the chart as it is (keep_existing true). "
     "'Best setups right now' or 'scan the market' is scan_market (the whole market, not the watchlist) with no "
@@ -274,12 +302,32 @@ NARRATE_SYSTEM = (
     "For a trade plan give entry, stop, targets and reward-to-risk, and its track record (FACTS.plan.track_record: "
     "how this setup type did on this coin and timeframe in the backtest) in one short clause; when its status is "
     "too_few_trades, short_history, no_match or unavailable say that instead of a win rate, and mention demo data. "
-    "For a scan name the best few coins and why. FACTS.market_scan ranks setups across the top coins by volume: "
+    "For a scan (watchlist, market, spot buys or grid coins) open with one short clause on market mood from "
+    "FACTS.market_overview (Fear & Greed and BTC dominance, when live), then name the best few coins and why. FACTS.market_scan ranks setups across the top coins by volume: "
     "name the best two or three with direction, entry, reward-to-risk and their track record. "
     "FACTS.kimi is the user's own indicator, Kimi Cooked: name it, and give its levels with odds_pct (the chance "
     "price reaches that level within the forecast window), its latest signals and its forecast when they answer "
     "the question; mention its chart_patterns (a watching pattern's break-out level and invalidation, a break-out's "
     "target) and harmonics (PRZ, TP1/TP2, invalidation) when it has any. "
+    "FACTS.indicators has the latest value of every chart indicator whether or not the user has it on the chart "
+    "(EMA 20/50 and their cross, MACD, Bollinger Bands with %b, Stoch RSI, VWAP, Parabolic SAR, ATR, and the chart "
+    "timeframe's spot CVD); quote the ones the question asks about, and never say an indicator can't be read because "
+    "it isn't on the chart. FACTS.higher_timeframes reads the next two timeframes up (trend, RSI, MACD, Stoch RSI, "
+    "price against EMAs and VWAP): say whether they agree with this chart when it matters, and answer 'does the "
+    "daily agree?' from it. "
+    "FACTS.vs_btc compares the coin with BTC (change today and over 7 days, the gap, 30-day correlation and beta): use "
+    "it for strength, 'is it just following BTC?' or correlation questions, and mention a notable gap in passing. "
+    "FACTS.volume.unusual means volume is well above normal: say so. FACTS.session_clock says which sessions are "
+    "open and when the next ones open: with an entry or plan, warn when a session opens within the hour. "
+    "FACTS.your_note_on_this_coin is the user's own note: remind them of it when it bears on the answer. "
+    "FACTS.your_position is what the user holds of this coin on Binance (spot qty, average entry, value, PnL; any "
+    "futures position with leverage and liquidation price): frame the answer around it, e.g. where the zones sit "
+    "against their entry. FACTS.your_holdings lists everything they hold, biggest first: answer 'how are my "
+    "holdings?' from it. "
+    "FACTS.last_time_you_asked is your previous answer on this coin: when it helps, say in one clause how that call "
+    "has played out (change_since_pct). FACTS.market_overview is the header bar: total crypto market cap, 24h volume, "
+    "liquidations, open interest, Fear & Greed and BTC dominance, with 24h changes; a name under unavailable "
+    "couldn't be fetched, so say so rather than guess. "
     "FACTS.futures_context has funding, open interest, the long/short ratio, 24h spot CVD, the nearest order-book "
     "walls and estimated liquidation clusters (call them estimates); use what the question needs. "
     "FACTS.upcoming_events lists high-impact economic events by hours from now: with a trade plan, warn about any "
@@ -312,11 +360,31 @@ _BASIC_WEB_SEARCH = re.compile(r"claude-(?:3|haiku-4-5|sonnet-4-5|opus-4-5|opus-
 GENERAL_SYSTEM = (
     "You are the assistant inside a crypto charting app, answering a question that isn't about the chart. Answer in "
     "plain language, leading with the answer, in at most 6 short sentences. CONTEXT gives today's date and time, the "
-    "economic calendar for the past and coming week (forecasts and previous values only), and recent crypto "
-    "headlines. Use them and any web search results, and say where a recent fact comes from (e.g. 'CoinDesk "
+    "economic calendar for the past and coming week (forecasts and previous values only), recent crypto "
+    "headlines and, in market_overview, the app's header bar (total market cap, 24h volume, liquidations, open "
+    "interest, Fear & Greed, BTC dominance; a name under unavailable couldn't be fetched) and, in your_holdings, what the user holds on "
+    "Binance. Use them and any web search results, and say where a recent fact comes from (e.g. 'CoinDesk "
     "reported...'). If neither shows something recent, say you can't confirm it rather than guessing; never invent "
     "numbers, dates or results. {spot}No markdown headings or tables."
 )
+# How long an answer is (AnalyzeRequest.detail): replaces the length rule in NARRATE_SYSTEM and GENERAL_SYSTEM.
+DETAIL_RULES = {
+    "short": "in one or two short sentences, only what the question needs",
+    "normal": "in at most 4 short sentences",
+    "detailed": "in up to 10 sentences, explaining the reasoning behind each point (why a zone matters, what each "
+                "indicator says and whether the timeframes agree)",
+}
+
+
+def narrate_system(detail: str = "normal") -> str:
+    return NARRATE_SYSTEM.replace("in at most 4 short sentences", DETAIL_RULES.get(detail, DETAIL_RULES["normal"]))
+
+
+def general_system(detail: str = "normal") -> str:
+    rule = {"short": "in one or two short sentences", "detailed": "in up to 10 sentences"}.get(detail)
+    return GENERAL_SYSTEM.replace("in at most 6 short sentences", rule) if rule else GENERAL_SYSTEM
+
+
 SPOT_LINE = ("The user trades spot only (buying coins outright): never suggest shorting, futures or leverage. ")
 
 _TF_PATTERNS: list[tuple[str, str]] = [
@@ -447,6 +515,54 @@ def _zone_trigger(p: str) -> tuple[ZoneTriggerIntent | None, tuple[int, int]]:
     return (ZoneTriggerIntent(timeframe=tf, confirm=confirm, zone_kind=kind,  # type: ignore[arg-type]
                               zone_timeframe=higher[0] if higher else None), (verb.start(), stop))
 
+_METRICS: list[tuple[str, str]] = [
+    (r"\bfear\s*(?:&|and|n)?\s*greed\b|\bf&g\b|\bfng\b", "fear_greed"),
+    (r"\b(?:btc|bitcoin)\s*(?:dominance|\.d\b)|\bdominance\b", "btc_dominance"),
+    (r"\b(?:total\s+)?(?:crypto\s+)?market\s*cap\b", "market_cap"),
+    (r"\b(?:total|24h|24 hour)\s+(?:crypto\s+)?volume\b", "volume_24h"),
+    (r"\btotal\s+open interest\b|\btotal oi\b", "open_interest"),
+    (r"\b(?:total\s+)?liquidations\b", "liquidations"),
+]
+_METRIC_COND: list[tuple[str, str]] = [
+    (r"\b(?:moves?|moving|changes?|swings?|shifts?)\b", "moves"),
+    (r"\b(?:below|under|drops?|falls?|dips?|goes down|sinks?|less than)\b", "below"),
+    (r"\b(?:above|over|rises?|climbs?|exceeds?|goes up|tops|more than|hits|reaches|breaks)\b", "above"),
+]
+_METRIC_NUM = r"\$?\s*(\d+(?:[.,]\d+)?)\s*(t|b|m|k|trillion|billion|million)?\b\s*(%|percent|points?|pts?)?"
+_SCALE = {"t": 1e12, "trillion": 1e12, "b": 1e9, "billion": 1e9, "m": 1e6, "million": 1e6, "k": 1e3}
+
+
+def _metric_alerts(p: str) -> tuple[list[MetricAlertSpec], list[tuple[int, int]]]:
+    """'alert me when fear & greed drops below 25' → (the alerts, the spans of their sentences). Needs an alert
+    verb, a header metric, a condition and a number in the same sentence."""
+    out: list[MetricAlertSpec] = []
+    spans: list[tuple[int, int]] = []
+    for verb in re.finditer(_ALERT_VERB, p):
+        if spans and verb.start() < spans[-1][1]:
+            continue
+        start = max(p.rfind(c, 0, verb.start()) for c in ".;!?") + 1
+        end = re.compile(r"[;!?]|\.(?!\d)|$").search(p, verb.end())
+        stop = end.start() if end else len(p)
+        clause = p[start:stop]
+        metric = next(((m, k) for pat, k in _METRICS if (m := re.search(pat, clause))), None)
+        if not metric:
+            continue
+        m, key = metric
+        after = clause[m.end():]
+        cond = next((c for pat, c in _METRIC_COND if re.search(pat, after) or re.search(pat, clause)), None)
+        num = re.search(_METRIC_NUM, after) or re.search(_METRIC_NUM, clause[:m.start()])
+        if not cond or not num:
+            continue
+        value = float(num.group(1).replace(",", ""))
+        if cond != "moves" and key not in ("fear_greed", "btc_dominance") and num.group(2):
+            value *= _SCALE[num.group(2)]
+        if value <= 0:
+            continue
+        out.append(MetricAlertSpec(metric=key, condition=cond, value=value))  # type: ignore[arg-type]
+        spans.append((start, stop))
+    return out[:5], spans
+
+
 # "plan a grid bot on INJ", "grid trading settings for SOL", "suggest a grid": a Spot Grid bot plan (not grid lines).
 _GRID = (r"\bgrid[ -]?(?:bots?|trading|strateg(?:y|ies))\b(?:\s+(?:setup|settings?|plan|range))?|"
          r"\bgrid (?:setup|settings?|parameters|params)\b|"
@@ -514,7 +630,8 @@ def _indicator_toggles(p: str) -> tuple[list[str], list[str], str]:
 
 
 def _scan_filter(p: str) -> str:
-    for pat, f in ((r"oversold", "oversold"), (r"overbought", "overbought"),
+    for pat, f in ((r"\b(?:unusual|high|big|spik\w*|huge|heavy) volume\b|\bvolume (?:spikes?|surges?)\b", "volume"),
+                   (r"oversold", "oversold"), (r"overbought", "overbought"),
                    (r"\bbreak(?:ing|out|s)?\b", "breakout"), (r"\b(?:demand|support|bounce|dip)", "near_support"),
                    (r"\b(?:supply|resistance|reject)", "near_resistance"),
                    (r"\b(?:bullish|long|strong|uptrend|pump)", "bullish"),
@@ -527,11 +644,23 @@ def _scan_filter(p: str) -> str:
 def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases: set[str] | None = None,
                 chart_symbol: str | None = None) -> AnalysisIntent:
     """Keyword parser used when no LLM is available."""
+    asked = prompt
     p = prompt.lower()
     symbol = find_symbol(prompt, known_bases)
     names_coin = symbol is not None
     if symbol == chart_symbol:
         symbol = None
+
+    # Alerts on the market header ("alert me when BTC dominance moves 1%"): their sentences are spent, so the BTC in
+    # "BTC dominance" is no symbol and their numbers are no price alert.
+    metric_alerts, m_spans = _metric_alerts(p)
+    if metric_alerts:
+        for a, b in m_spans:
+            p, prompt = p[:a] + " " * (b - a) + p[b:], prompt[:a] + " " * (b - a) + prompt[b:]
+        symbol = find_symbol(prompt, known_bases)
+        names_coin = symbol is not None
+        if symbol == chart_symbol:
+            symbol = None
 
     indicators_on, indicators_off, p_ind = _indicator_toggles(p)
     # A trigger alert ("alert me when 1m shows a CHoCH inside the 4h demand"): its sentence is spent, so its
@@ -666,7 +795,7 @@ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases
         re.search(r"\b(?:chart|timeframe|tf)\b", p)) and not feats and not scan_market)
 
     acting = bool(custom or remove or alert_prices or alert_targets or indicators_on or indicators_off
-                  or scan_watchlist or scan_market or trade_plan or grid_plan or zone_trigger or top_down or dip_ladder or sell_check)
+                  or scan_watchlist or scan_market or trade_plan or grid_plan or zone_trigger or top_down or dip_ladder or sell_check or metric_alerts)
     navigating = symbol is not None or switch_chart
     # Not about a chart: the date, macro results, project news, "what is staking?". Answered in plain words.
     general = not feats and not acting and not navigating and not names_coin and not re.search(_CHART_WORDS, p) and (
@@ -690,13 +819,14 @@ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases
     if trade_plan and not remove:
         keep = keep and bool(re.search(r"\b(also|add|plus|too|as well|keep|on top)\b", p))
     return AnalysisIntent(features=feats, timeframe=timeframe, window_timeframes=windows, max_zones=max_zones,
-                          answer_hint=prompt.strip()[:200], custom_levels=custom, remove=remove,
+                          answer_hint=asked.strip()[:200], custom_levels=custom, remove=remove,
                           keep_existing=keep, alert_prices=alert_prices[:10], alert_targets=alert_targets,
                           symbol=symbol, switch_chart=switch_chart, scan_watchlist=scan_watchlist,
                           scan_filter=scan_filter, scan_market=scan_market, trade_plan=trade_plan, grid_plan=grid_plan,
                           indicators_on=indicators_on, indicators_off=indicators_off, zone_trigger=zone_trigger,
                           scan_kind=scan_kind, top_down=top_down, take_profit=take_profit, dip_ladder=dip_ladder,  # type: ignore[arg-type]
-                          general_question=general, sell_check=sell_check)
+                          general_question=general, sell_check=sell_check,
+                          metric_alerts=metric_alerts)
 
 
 _FEATURE_GROUPS: dict[str, list[str]] = {
@@ -906,14 +1036,14 @@ class LLMClient:
             return None
 
     async def narrate(self, prompt: str, facts: dict, fallback: str,
-                      history: list[ChatTurn] | None = None) -> tuple[str, str]:
+                      history: list[ChatTurn] | None = None, detail: str = "normal") -> tuple[str, str]:
         if not self._available() or not prompt.strip():
             return fallback, "template"
         convo = "\n".join(f"{t.role}: {t.text[:400]}" for t in (history or [])[-4:])
         user = (f"CONVERSATION SO FAR:\n{convo}\n\n" if convo else "") + \
             f"TODAY: {_today()}\n\nREQUEST: {prompt}\n\nFACTS: {json.dumps(round_facts(facts), default=float)}"
         try:
-            text = (await self._text(NARRATE_SYSTEM, user)).strip()
+            text = (await self._text(narrate_system(detail), user)).strip()
             if text:
                 return text, f"{self.provider}:{self.model}"
         except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
@@ -922,7 +1052,7 @@ class LLMClient:
         return fallback, "template"
 
     async def narrate_stream(self, prompt: str, facts: dict, fallback: str, history: list[ChatTurn] | None,
-                             on_delta: Callable[[str], Awaitable[None]]) -> tuple[str, str]:
+                             on_delta: Callable[[str], Awaitable[None]], detail: str = "normal") -> tuple[str, str]:
         """`narrate`, but each piece of the answer is passed to `on_delta` as the model writes it. Falls back to the
         template (sent as one piece) when no model is set up or it fails before writing anything."""
         if not self._available() or not prompt.strip():
@@ -933,7 +1063,7 @@ class LLMClient:
             f"TODAY: {_today()}\n\nREQUEST: {prompt}\n\nFACTS: {json.dumps(round_facts(facts), default=float)}"
         parts: list[str] = []
         try:
-            async for piece in self._text_stream(NARRATE_SYSTEM, user):
+            async for piece in self._text_stream(narrate_system(detail), user):
                 if piece:
                     parts.append(piece)
                     await on_delta(piece)
@@ -982,7 +1112,7 @@ class LLMClient:
         raise ValueError("No LLM provider configured")
 
     async def answer(self, question: str, context: dict, history: list[ChatTurn] | None = None,
-                     spot_only: bool = False) -> tuple[str, str, list[dict[str, str]]] | None:
+                     spot_only: bool = False, detail: str = "normal") -> tuple[str, str, list[dict[str, str]]] | None:
         """A general question → (answer, "provider:model", web sources), with a web search where the provider has
         one (WEB_SEARCH=off turns it off). None when no model is available or every attempt failed."""
         if not self._available():
@@ -990,7 +1120,7 @@ class LLMClient:
         convo = "\n".join(f"{t.role}: {t.text[:400]}" for t in (history or [])[-4:])
         user = (f"CONVERSATION SO FAR:\n{convo}\n\n" if convo else "") + \
             f"CONTEXT: {json.dumps(context, default=str)}\n\nQUESTION: {question}"
-        system = GENERAL_SYSTEM.format(spot=SPOT_LINE if spot_only else "")
+        system = general_system(detail).format(spot=SPOT_LINE if spot_only else "")
         engine = f"{self.provider}:{self.model}"
         if self.s.web_search:
             try:

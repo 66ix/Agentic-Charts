@@ -37,6 +37,7 @@ import { imageFrom } from "@/lib/screenshot";
 import { ladderTestLine } from "@/lib/spot";
 import {
   TIMEFRAMES,
+  type AnswerDetail,
   type AnswerSource,
   type GridCoin,
   type Interval,
@@ -80,11 +81,15 @@ export interface AgentMessage {
   sellWatch?: SellWatch;
   /** Web pages a general answer was based on. */
   sources?: AnswerSource[];
+  /** The numbers the answer was written from, for "Numbers used". */
+  facts?: Record<string, unknown>;
   /** The chart the answer was drawn on, and the question it answered (for pins and the journal). */
   symbol?: string;
   interval?: Interval;
   prompt?: string;
   lastPrice?: number;
+  /** When it was answered (ms); older messages lack it. */
+  at?: number;
 }
 
 export interface AgentPanelHandle {
@@ -112,7 +117,140 @@ const SHORTCUTS = [
   "What should I sell or trim?",
 ];
 
-const FOLLOW_UPS = ["Also show swings", "Same on daily", "Does the daily agree?", "Alert me on these levels", "Add RSI"];
+const FOLLOW_UPS = ["Same on daily", "Does the daily agree?", "Give me a trade plan", "Alert me on these levels", "Any divergences?"];
+
+/** Follow-up buttons that fit the last answer: a plan gets plan questions, a scan offers to plan its top coin. */
+export function followUps(m: AgentMessage | undefined, spotOnly: boolean): string[] {
+  if (!m || m.role !== "agent") return FOLLOW_UPS;
+  if (m.plan) {
+    return ["Alert me at the entry", "Where do I take profit?", "Does the daily agree?", "What would invalidate this?", "Alert me on a 5m confirmation in the zone"];
+  }
+  const top = m.setups?.[0];
+  if (top) {
+    const coin = displaySymbol(top.symbol);
+    return [`Give me a ${top.direction} plan on ${coin}`, `Open ${coin} ${top.interval}`, "Same scan on 1h", "Same scan on daily"];
+  }
+  if (m.gridCoins?.[0]) {
+    const coin = displaySymbol(m.gridCoins[0].symbol);
+    return [`Suggest a grid bot for ${coin}`, "Best grid bot coins on daily", "Best spot buys"];
+  }
+  if (m.scan?.[0]) {
+    const coin = displaySymbol(m.scan[0].symbol);
+    return [`Give me a ${spotOnly ? "long" : "trade"} plan on ${coin}`, `Open ${coin}`, "Which are oversold?", "Same scan on daily"];
+  }
+  if (m.sells) return ["Where do I take profit?", "Plan a dip-buy ladder", "Best spot buys"];
+  if (m.ladder) return ["Alert me on these levels", "Same ladder on daily", "Where do I take profit?"];
+  if (m.walk) return ["Give me a trade plan", "Alert me on these levels", "Does the weekly agree?"];
+  if (m.sources) return ["What does this mean for BTC?", "Any high-impact events today?", "Latest crypto headlines"];
+  if (/\bkimi\b/i.test(m.prompt ?? "")) return ["Kimi on the daily", "Kimi on 1h", "Give me a trade plan", "Does the daily agree?"];
+  const zone = ((m.facts?.indicators ?? {}) as { stoch_rsi?: { zone?: string } }).stoch_rsi?.zone;
+  const extra = zone === "overbought" || zone === "oversold" ? `Is it ${zone} on the daily too?` : "Buyers or sellers in control?";
+  return ["Give me a trade plan", "Does the daily agree?", extra, "Alert me on these levels", "Fear & Greed and BTC dominance?"];
+}
+
+/** What the chat box suggests: it follows the chart and the last answer instead of one fixed line. */
+export function placeholderFor(m: AgentMessage | undefined, symbol: string | undefined, interval: string | undefined, n: number, spotOnly: boolean): string {
+  const coin = symbol ? `${displaySymbol(symbol)}${interval ? ` ${interval}` : ""}` : "this chart";
+  if (!m) {
+    const first = ["Which of my coins are near demand?", "Is RSI overbought here?", "Best 4h setups across the market", "What does Kimi say?", "Buyers or sellers in control?"];
+    return `Ask about ${coin}, e.g. "${first[n % first.length].toLowerCase()}", or paste a chart screenshot`;
+  }
+  const next = followUps(m, spotOnly);
+  return `Follow up on ${coin}, e.g. "${next[n % next.length].toLowerCase()}"`;
+}
+
+/** "Numbers used": the facts an answer was written from, flattened to label/value lines. */
+function factLines(obj: unknown, prefix = ""): [string, string][] {
+  const fmt = (v: unknown): string =>
+    v === null || v === undefined ? "–" : typeof v === "object" ? JSON.stringify(v) : String(v);
+  const name = (k: string) => k.replace(/_/g, " ");
+  if (Array.isArray(obj)) {
+    if (obj.every((x) => typeof x !== "object" || x === null)) return [[prefix, obj.map(fmt).join(", ") || "none"]];
+    return obj.slice(0, 8).map((x, i): [string, string] => [`${prefix} ${i + 1}`.trim(), Object.entries(x as object).map(([k, v]) => `${name(k)} ${fmt(v)}`).join(" · ")]);
+  }
+  if (obj && typeof obj === "object") return Object.entries(obj).flatMap(([k, v]) => factLines(v, prefix ? `${prefix} › ${name(k)}` : name(k)));
+  return [[prefix, fmt(obj)]];
+}
+
+const DETAIL_LABEL: Record<AnswerDetail, string> = { short: "Short answers", normal: "Normal answers", detailed: "Detailed answers" };
+const DETAIL_NEXT: Record<AnswerDetail, AnswerDetail> = { short: "normal", normal: "detailed", detailed: "short" };
+const TREND_TONE: Record<string, string> = { up: "border-up/40 text-up", down: "border-down/40 text-down" };
+
+/** "H4 up · D1 up · W1 mixed": whether the timeframes agree, at a glance. */
+function TimeframeBadges({ facts }: { facts: Record<string, unknown> }) {
+  const tf = facts.timeframe as string | undefined;
+  const trend = facts.trend as string | undefined;
+  const htf = (facts.higher_timeframes ?? {}) as Record<string, { trend?: string }>;
+  const rows: [string, string][] = [
+    ...(tf && trend ? [[tf, trend === "range" ? "mixed" : trend] as [string, string]] : []),
+    ...Object.entries(htf).flatMap(([k, v]): [string, string][] => (v.trend ? [[k, v.trend]] : [])),
+  ];
+  if (rows.length < 2) return null;
+  const agree = rows.every(([, t]) => t === rows[0][1]) && rows[0][1] !== "mixed";
+  return (
+    <div className="mt-1.5 flex flex-wrap items-center gap-1" title="Trend on this timeframe and the next two up (EMAs and price)">
+      {rows.map(([k, t]) => (
+        <span key={k} className={clsx("rounded border px-1.5 py-0.5 text-[10px]", TREND_TONE[t] ?? "border-line text-mute")}>
+          {k} {t}
+        </span>
+      ))}
+      {agree && <span className="text-[10px] text-mute">all agree</span>}
+    </div>
+  );
+}
+
+/** Copies an answer's text, for Discord or the journal. */
+function CopyAnswer({ text }: { text: string }) {
+  const [done, setDone] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={() =>
+        void navigator.clipboard?.writeText(text).then(() => {
+          setDone(true);
+          setTimeout(() => setDone(false), 1500);
+        })
+      }
+      className="inline-flex shrink-0 items-center gap-1 rounded px-1 py-0.5 text-[10px] text-mute opacity-70 hover:bg-panel2 hover:text-ink group-hover:opacity-100"
+      title="Copy this answer"
+    >
+      {done ? <Check className="h-3 w-3" /> : <ClipboardCopy className="h-3 w-3" />}
+      {done ? "Copied" : "Copy"}
+    </button>
+  );
+}
+
+function NumbersUsed({ facts }: { facts: Record<string, unknown> }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="mt-1">
+      <button type="button" onClick={() => setOpen(!open)} className="text-[10px] text-mute hover:text-ink">
+        {open ? "Hide numbers used" : "Numbers used"}
+      </button>
+      {open && (
+        <div className="mt-1 max-h-64 overflow-y-auto rounded border border-line bg-base/60 p-1.5 font-mono text-[10px] leading-4">
+          {factLines(Object.fromEntries(Object.entries(facts).filter(([, v]) => typeof v !== "object" || v === null))).map(([k, val]) => (
+            <div key={k} className="flex gap-2">
+              <span className="shrink-0 text-mute">{k}</span>
+              <span className="text-ink">{val}</span>
+            </div>
+          ))}
+          {Object.entries(facts).filter(([, v]) => typeof v === "object" && v !== null).map(([section, v]) => (
+            <div key={section} className="mt-1">
+              <div className="font-semibold uppercase tracking-wide text-mute">{section.replace(/_/g, " ")}</div>
+              {factLines(v).map(([k, val], i) => (
+                <div key={i} className="flex gap-2">
+                  {k && <span className="shrink-0 text-mute">{k}</span>}
+                  <span className="break-all text-ink">{val}</span>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 /** Prices in an answer in bold: numbers with decimals or thousands separators within ±60% of the last price. */
 function emphasize(text: string, last: number | undefined): ReactNode {
@@ -496,6 +634,12 @@ interface Props {
   /** Arms the sell signal alerts on the coins a sell check covered → saved. */
   onSellWatch?(watch: SellWatch): Promise<boolean>;
   handleRef?: Ref<AgentPanelHandle>;
+  /** The chart the agent is looking at, for the chat box's hint. */
+  symbol?: string;
+  interval?: Interval;
+  /** How long answers are. */
+  detail?: AnswerDetail;
+  onDetail?(d: AnswerDetail): void;
 }
 
 /** The chart agent as a dock tab: the conversation fills the height, the prompt sits at the bottom. */
@@ -505,6 +649,10 @@ export default function AgentPanel(p: Props) {
   const listRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  const lastAgent = [...p.messages].reverse().find((m) => m.role === "agent");
+  const lastPrompt = [...p.messages].reverse().find((m) => m.role === "user")?.text;
+  const [myShortcuts, setMyShortcuts] = usePersistentState<string[]>("ac:my-shortcuts", []);
 
   useImperativeHandle(p.handleRef, () => ({ focus: () => inputRef.current?.focus() }));
 
@@ -533,6 +681,16 @@ export default function AgentPanel(p: Props) {
         >
           {p.spotOnly ? "Spot only" : "Spot + futures"}
         </button>
+        {p.detail && p.onDetail && (
+          <button
+            type="button"
+            onClick={() => p.onDetail!(DETAIL_NEXT[p.detail!])}
+            className="btn-ghost h-6 shrink-0 gap-1 border border-line px-1.5 text-[11px]"
+            title="Answer length: short (one or two sentences), normal, or detailed (explains the reasoning). Click to change."
+          >
+            {DETAIL_LABEL[p.detail]}
+          </button>
+        )}
         {p.overlayCount > 0 && (
           <button type="button" onClick={p.onClearOverlays} className="btn-ghost h-6 shrink-0 gap-1 px-1.5 text-[11px]" title="Remove all the agent's drawings from this chart (Ctrl+Z brings them back). To remove one level, use its bin in the Layers tab (L).">
             <Eraser className="h-3.5 w-3.5" /> Clear {p.overlayCount}
@@ -633,6 +791,8 @@ export default function AgentPanel(p: Props) {
                     {m.sells && <SellList rows={m.sells} onPick={p.onPickSymbol} />}
                     {m.sellWatch && p.onSellWatch && <SellWatchButton watch={m.sellWatch} onWatch={p.onSellWatch} />}
                     {m.sources && <Sources rows={m.sources} />}
+                    {m.facts && <TimeframeBadges facts={m.facts} />}
+                    {m.facts && <NumbersUsed facts={m.facts} />}
                     {m.overlays && m.overlays.length > 0 && (
                       <div className="mt-1.5 flex flex-wrap gap-1">
                         {m.overlays
@@ -652,6 +812,7 @@ export default function AgentPanel(p: Props) {
                     ) : null}
                     <div className="mt-1 flex items-center gap-2">
                       {m.meta && <p className="text-[10px] text-mute">{m.meta}</p>}
+                      {m.role === "agent" && !m.streaming && m.text && <CopyAnswer text={m.text} />}
                       {drawable && (
                         <button
                           type="button"
@@ -679,6 +840,33 @@ export default function AgentPanel(p: Props) {
           </div>
 
           <div className="flex shrink-0 gap-1.5 overflow-x-auto px-3 pt-2">
+            {myShortcuts.map((s) => (
+              <span key={`my-${s}`} className="group/sc inline-flex shrink-0 items-center rounded-full border border-yellow-400/40 bg-yellow-400/10 text-[11px] text-ink">
+                <button type="button" disabled={p.busy} onClick={() => submit(s)} className="py-1 pl-2.5 pr-1 disabled:opacity-50" title={s}>
+                  {s.length > 40 ? `${s.slice(0, 39)}…` : s}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMyShortcuts(myShortcuts.filter((x) => x !== s))}
+                  className="pr-2 text-mute opacity-50 hover:text-down group-hover/sc:opacity-100"
+                  title="Remove this shortcut"
+                  aria-label={`Remove shortcut ${s}`}
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+            <button
+              type="button"
+              onClick={() => {
+                const t = (value.trim() || lastPrompt || "").trim();
+                if (t && !myShortcuts.includes(t)) setMyShortcuts([...myShortcuts, t].slice(-12));
+              }}
+              className="shrink-0 rounded-full border border-dashed border-line px-2.5 py-1 text-[11px] text-mute hover:border-accent/50 hover:text-ink"
+              title="Save what's in the chat box (or your last question) as a shortcut button"
+            >
+              + Save as shortcut
+            </button>
             {SHORTCUTS.map((s) => (
               <button
                 key={s}
@@ -693,7 +881,7 @@ export default function AgentPanel(p: Props) {
           </div>
           {!p.busy && (
             <div className="flex shrink-0 flex-wrap gap-1.5 px-3 pt-2">
-              {(p.messages.length === 0 ? SUGGESTIONS : FOLLOW_UPS).map((s) => (
+              {(p.messages.length === 0 ? SUGGESTIONS : followUps(lastAgent, p.spotOnly)).map((s) => (
                 <button
                   key={s}
                   type="button"
@@ -764,7 +952,7 @@ export default function AgentPanel(p: Props) {
                   submit(value);
                 }
               }}
-              placeholder={p.messages.length ? 'Follow up, e.g. "same on ETH", "line at 25.4" or "alert me at the entry"' : 'Ask the agent, e.g. "Which of my coins are near demand?", or paste a chart screenshot'}
+              placeholder={placeholderFor(lastAgent, p.symbol, p.interval, p.messages.length, p.spotOnly)}
               className="min-h-9 flex-1 resize-none rounded-lg border border-line bg-base px-3 py-2 text-sm text-ink outline-none placeholder:text-mute focus:border-accent/60"
               aria-label="Agent prompt"
             />

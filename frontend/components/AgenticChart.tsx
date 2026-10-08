@@ -136,6 +136,8 @@ interface Props {
   onAlertMove?(alertId: string, patch: { price?: number; price_low?: number; price_high?: number }): void;
   /** Layers tab visibility, for the indicator layers drawn here (session levels, order-book heatmap). */
   layers?: LayerVisibility;
+  /** Right-click on the price pane: ask the chart agent about that price (the prompt is ready to send). */
+  onAskAgent?(prompt: string): void;
 }
 
 const UP = "#22c55e";
@@ -356,6 +358,8 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
   const [cvdError, setCvdError] = useState<string | null>(null);
   const [compareChange, setCompareChange] = useState<Record<string, number>>({});
   const [alertHover, setAlertHover] = useState(false);
+  // Right-click menu on the price pane: ask the agent about the price under the pointer.
+  const [askMenu, setAskMenu] = useState<{ x: number; y: number; price: number } | null>(null);
 
   useImperativeHandle(ref, () => ({
     screenshot: () => chartRef.current?.takeScreenshot() ?? null,
@@ -1436,6 +1440,36 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
     };
   }, [toPoint]);
 
+  // Right-click on the candles: a small menu to ask the agent about that price, alert on it or draw a line there.
+  useEffect(() => {
+    const el = containerRef.current;
+    const chart = chartRef.current;
+    if (!el || !chart) return;
+    const open = (e: MouseEvent) => {
+      if (!propsRef.current.onAskAgent) return;
+      const r = el.getBoundingClientRect();
+      const x = e.clientX - r.left;
+      const y = e.clientY - r.top;
+      if (x < 0 || x > chart.timeScale().width() || y > el.clientHeight - chart.timeScale().height()) return;
+      const price = candleRef.current?.coordinateToPrice(y);
+      if (price == null || !Number.isFinite(price) || (price as number) <= 0) return;
+      e.preventDefault();
+      setAskMenu({ x: Math.min(x, r.width - 240), y: Math.min(y, r.height - 110), price: price as number });
+    };
+    const close = (e: Event) => {
+      if (!(e.target instanceof Node) || !el.parentElement?.querySelector("[data-ask-menu]")?.contains(e.target)) setAskMenu(null);
+    };
+    const esc = (e: KeyboardEvent) => e.key === "Escape" && setAskMenu(null);
+    el.addEventListener("contextmenu", open);
+    window.addEventListener("pointerdown", close, true);
+    window.addEventListener("keydown", esc);
+    return () => {
+      el.removeEventListener("contextmenu", open);
+      window.removeEventListener("pointerdown", close, true);
+      window.removeEventListener("keydown", esc);
+    };
+  }, []);
+
   // Escape cancels an in-progress drawing.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -1468,6 +1502,34 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
         ref={containerRef}
         className={`h-full w-full ${props.tool !== "crosshair" ? "cursor-crosshair" : alertHover ? "cursor-ns-resize" : ""}`}
       />
+      {askMenu && props.onAskAgent && (
+        <div
+          data-ask-menu
+          className="absolute z-30 w-[230px] rounded-md border border-line bg-panel p-1 text-xs shadow-xl"
+          style={{ left: Math.max(4, askMenu.x), top: Math.max(4, askMenu.y) }}
+        >
+          {(() => {
+            const p = formatPrice(askMenu.price).replace(/,/g, "");
+            return [
+              [`Ask the agent about ${p}`, `What's at ${p}? Is it support or resistance, how has price reacted there, and what happens if it breaks?`],
+              [`Alert me at ${p}`, `Alert me at ${p}`],
+              [`Draw a line at ${p}`, `Draw a line at ${p}`],
+            ].map(([label, prompt]) => (
+              <button
+                key={label}
+                type="button"
+                className="block w-full rounded px-2 py-1.5 text-left text-ink hover:bg-panel2"
+                onClick={() => {
+                  setAskMenu(null);
+                  props.onAskAgent?.(prompt);
+                }}
+              >
+                {label}
+              </button>
+            ));
+          })()}
+        </div>
+      )}
       {lg && (
         <div className="pointer-events-none absolute left-3 top-2 z-10 flex flex-wrap gap-x-3 font-mono text-[11px] text-mute">
           {(["open", "high", "low", "close"] as const).map((k) => (

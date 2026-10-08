@@ -138,6 +138,9 @@ export interface AnalysisIntent {
 
 export type ScanKind = "setups" | "spot_buys" | "grid_coins";
 
+/** How long the agent's answers are. */
+export type AnswerDetail = "short" | "normal" | "detailed";
+
 export interface Navigate {
   symbol: string;
   interval: Interval;
@@ -402,6 +405,10 @@ export interface ScanResult {
   signals: string[];
   score: number;
   data_source: string;
+  /** Last bar's volume against its 20-bar average. */
+  volume_ratio?: number | null;
+  /** Volume well above normal (3x on the last bar, or 2x over the last 5). */
+  unusual_volume?: boolean;
 }
 
 export interface Ticker {
@@ -531,6 +538,8 @@ export interface AnalyzeResponse {
   sells?: SellSignal[];
   /** The coins and timeframe a sell check covered, to watch with signal alerts. */
   sell_watch?: SellWatch | null;
+  /** The numbers the answer was written from (indicators, zones, market overview...), as the model saw them. */
+  facts?: Record<string, unknown>;
   generated_at: string;
 }
 
@@ -680,6 +689,10 @@ export interface IndicatorState {
   sessions?: boolean;
   /** Order-book heatmap behind the candles. */
   heatmap?: boolean;
+  /** Estimated liquidation clusters as shaded bands (backend/app/futures_data.py), refreshed every minute. */
+  liqZones?: boolean;
+  /** Your Binance average entry (and futures entry / liquidation) on the chart; on unless switched off. */
+  myEntry?: boolean;
 }
 
 /** One chart in the multi-chart grid. */
@@ -853,4 +866,23 @@ export interface KimiResult {
   stats: KimiRow[];
   notes: string[];
   seconds: number;
+}
+
+export type MetricKey = "fear_greed" | "btc_dominance" | "market_cap" | "volume_24h" | "open_interest" | "liquidations";
+
+export interface MetricAlertSpec {
+  metric: MetricKey;
+  condition: "above" | "below" | "moves";
+  value: number;
+  note?: string | null;
+}
+
+/** An alert on a market header stat (backend metric_alerts.py). */
+export interface MetricAlert extends MetricAlertSpec {
+  id: string;
+  created_at: number;
+  armed: boolean;
+  base_value: number | null;
+  triggered_at: number | null;
+  triggered_value: number | null;
 }

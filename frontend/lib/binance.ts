@@ -4,6 +4,7 @@
 
 import { apiRequest } from "./api";
 import { JOURNAL_EVENT } from "./journal";
+import type { HorizontalLineOverlay } from "./types";
 
 export type FillKind = "manual" | "bot" | "unknown";
 export type AccountMarket = "spot" | "futures";
@@ -283,4 +284,49 @@ export function saveHoldingsWatch(settings: HoldingsWatchSettings) {
 
 export function runHoldingsWatch() {
   return apiRequest<HoldingsWatchStatus>("/api/holdings-watch/run", { method: "POST", timeoutMs: 60_000 });
+}
+
+/** Your own position on `symbol` as chart lines: the spot average entry, a futures entry and its liquidation. */
+export function positionOverlays(pos: AccountPositions | null, symbol: string): HorizontalLineOverlay[] {
+  if (!pos) return [];
+  const out: HorizontalLineOverlay[] = [];
+  const spot = pos.manual.spot.find((h) => h.symbol === symbol && h.avg_entry && (h.value ?? 0) >= 5);
+  if (spot?.avg_entry) {
+    const pct = spot.price ? (spot.price / spot.avg_entry - 1) * 100 : null;
+    out.push({
+      type: "horizontal_line",
+      id: `my-entry-${symbol}`,
+      kind: "my_entry",
+      label: pct == null ? "My avg entry" : `My avg entry (${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%)`,
+      price: spot.avg_entry,
+      color: "#facc15",
+      line_style: "dashed",
+      line_width: 1,
+    });
+  }
+  for (const f of pos.manual.futures.filter((p) => p.symbol === symbol)) {
+    out.push({
+      type: "horizontal_line",
+      id: `my-fut-${f.key}`,
+      kind: "my_entry",
+      label: `My ${f.side} entry${f.leverage ? ` ${f.leverage}x` : ""}`,
+      price: f.entry_price,
+      color: f.side === "long" ? "#22c55e" : "#ef4444",
+      line_style: "dashed",
+      line_width: 1,
+    });
+    if (f.liquidation_price) {
+      out.push({
+        type: "horizontal_line",
+        id: `my-liq-${f.key}`,
+        kind: "my_entry",
+        label: `My ${f.side} liquidation`,
+        price: f.liquidation_price,
+        color: "#f97316",
+        line_style: "dotted",
+        line_width: 1,
+      });
+    }
+  }
+  return out;
 }

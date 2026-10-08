@@ -14,7 +14,7 @@ os.environ["JOURNAL_REVIEW_STORE"] = "memory"
 os.environ["GRIDBOTS_STORE"] = "memory"
 os.environ["LLM_CHOICE_STORE"] = "memory"
 os.environ["TRADES_STORE"] = "memory"
-for _key in ("ALERT_HISTORY_STORE", "SIGNAL_ALERTS_STORE", "BRIEF_STORE"):
+for _key in ("ALERT_HISTORY_STORE", "SIGNAL_ALERTS_STORE", "BRIEF_STORE", "METRIC_ALERTS_STORE", "LEVEL_LOG_STORE"):
     os.environ[_key] = "memory"
 for _key in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "DISCORD_WEBHOOK_URL"):
     os.environ[_key] = ""  # set (even empty) so python-dotenv will not fill it from .env
