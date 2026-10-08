@@ -130,6 +130,8 @@ export type SignalId =
   | "bos_bear"
   | "rsi_overbought"
   | "rsi_oversold"
+  | "lost_support"
+  | "at_resistance"
   | "zone_trigger";
 
 /** Plain-English names, in the order the picker lists them. Mirrors SIGNALS in backend/app/signal_alerts.py. */
@@ -147,7 +149,20 @@ export const SIGNAL_OPTIONS: { id: SignalId; name: string; hint: string }[] = [
   { id: "bos_bear", name: "Bearish structure break", hint: "A candle closes below the last swing low (BOS or CHoCH)" },
   { id: "rsi_overbought", name: "RSI crosses above 70", hint: "RSI moves up into overbought" },
   { id: "rsi_oversold", name: "RSI crosses below 30", hint: "RSI moves down into oversold" },
+  {
+    id: "lost_support",
+    name: "Lost support (sell)",
+    hint: "Two closes below a support or demand zone that held before: sell or trim on a retest from below",
+  },
+  {
+    id: "at_resistance",
+    name: "Rejected at resistance (trim)",
+    hint: "Price reaches resistance or supply with a rejection wick or RSI at 70+: trim into the zone",
+  },
 ];
+
+/** The two signals that watch coins you hold, the alert version of "what should I sell or trim?". */
+export const SELL_SIGNALS: SignalId[] = ["lost_support", "at_resistance"];
 
 export function signalName(id: string): string {
   if (id === "zone_trigger") return "Zone trigger";

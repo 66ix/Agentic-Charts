@@ -464,6 +464,13 @@ class SellSignal(BaseModel):
     data_source: str = "binance"
 
 
+class SellWatch(BaseModel):
+    """What a sell check covered. Mirrors SellWatch in frontend/lib/types.ts."""
+
+    symbols: list[str]
+    interval: Interval
+
+
 class GridCoin(BaseModel):
     """A coin that has been ranging well enough for a Spot Grid bot (market_scanner.grid_candidate). Mirrors GridCoin
     in frontend/lib/types.ts."""
@@ -573,6 +580,8 @@ class AnalyzeResponse(BaseModel):
     ladder: Optional[dict[str, Any]] = Field(None, description="A dip-buy ladder and its backtest (dip_ladder.py)")
     sources: list[dict[str, str]] = Field(default_factory=list, description="Web pages or headlines an answer used")
     sells: list[SellSignal] = Field(default_factory=list, description="Sell or trim signals (sell_check.py)")
+    sell_watch: Optional[SellWatch] = Field(None, description="The coins and timeframe a sell check covered, so the "
+                                                              "client can offer to watch them with signal alerts")
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

@@ -40,6 +40,7 @@ import {
   type Overlay,
   type ScanResult,
   type SellSignal,
+  type SellWatch,
   type TopDownResult,
   type TradePlan,
   type TriggerInterval,
@@ -68,6 +69,8 @@ export interface AgentMessage {
   ladder?: LadderResult;
   /** Coins to sell or trim. */
   sells?: SellSignal[];
+  /** The coins and timeframe that sell check covered. */
+  sellWatch?: SellWatch;
   /** Web pages a general answer was based on. */
   sources?: AnswerSource[];
   /** The chart the answer was drawn on, and the question it answered (for pins and the journal). */
@@ -363,6 +366,33 @@ function SellList({ rows, onPick }: { rows: SellSignal[]; onPick(symbol: string)
   );
 }
 
+/** "Alert me on these": arms lost-support and rejected-at-resistance signal alerts on the coins a sell check
+ * covered, so the check keeps running on every candle close and pings you (Telegram / Discord when set up). */
+function SellWatchButton({ watch, onWatch }: { watch: SellWatch; onWatch(w: SellWatch): Promise<boolean> }) {
+  const [state, setState] = useState<"idle" | "busy" | "done" | "error">("idle");
+  const n = watch.symbols.length;
+  const coins = n === 1 ? displaySymbol(watch.symbols[0]) : `these ${n} coins`;
+  return (
+    <button
+      type="button"
+      disabled={state === "busy" || state === "done"}
+      className="btn-ghost mt-1.5 h-6 border border-line px-1.5 text-[11px] disabled:opacity-60"
+      title={`Alert on every ${watch.interval} close when ${n === 1 ? "it loses" : "one of them loses"} support or is rejected at resistance`}
+      onClick={async () => {
+        setState("busy");
+        setState((await onWatch(watch)) ? "done" : "error");
+      }}
+    >
+      {state === "done" ? <Check className="h-3.5 w-3.5 text-up" /> : <Bell className="h-3.5 w-3.5" />}
+      {state === "done"
+        ? `Watching ${coins} on ${watch.interval}`
+        : state === "error"
+          ? "Not saved, retry"
+          : `Alert me when ${coins} need selling (${watch.interval})`}
+    </button>
+  );
+}
+
 function Sources({ rows }: { rows: AnswerSource[] }) {
   return (
     <div className="mt-1.5 space-y-0.5 text-[11px]">
@@ -409,6 +439,8 @@ interface Props {
   onLogTrade?(message: AgentMessage): Promise<boolean>;
   /** Arms a lower-timeframe trigger alert on an answer's plan zone → saved. */
   onPlanTrigger?(message: AgentMessage, tf: TriggerInterval): Promise<boolean>;
+  /** Arms the sell signal alerts on the coins a sell check covered → saved. */
+  onSellWatch?(watch: SellWatch): Promise<boolean>;
   handleRef?: Ref<AgentPanelHandle>;
 }
 
@@ -543,6 +575,7 @@ export default function AgentPanel(p: Props) {
                       </div>
                     )}
                     {m.sells && <SellList rows={m.sells} onPick={p.onPickSymbol} />}
+                    {m.sellWatch && p.onSellWatch && <SellWatchButton watch={m.sellWatch} onWatch={p.onSellWatch} />}
                     {m.sources && <Sources rows={m.sources} />}
                     {m.overlays && m.overlays.length > 0 && (
                       <div className="mt-1.5 flex flex-wrap gap-1">

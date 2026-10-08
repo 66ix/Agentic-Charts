@@ -46,6 +46,7 @@ from .schemas import (
     HorizontalLineOverlay,
     MarketSetup,
     Navigate,
+    SellWatch,
     ZoneTriggerSpec,
     is_custom_symbol,
 )
@@ -726,6 +727,7 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         ladder=ladder.model_dump() if ladder else None,
         sources=sources,
         sells=sells or [],
+        sell_watch=SellWatch(symbols=sell_symbols[:40], interval=sell_tf) if sells is not None else None,
     )
 
 

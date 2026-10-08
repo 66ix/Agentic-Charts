@@ -356,6 +356,12 @@ export interface LadderResult {
 }
 
 /** A web page or headline an answer used. */
+/** What a sell check covered. Mirrors SellWatch in schemas.py. */
+export interface SellWatch {
+  symbols: string[];
+  interval: Interval;
+}
+
 /** A coin to sell or trim (backend/app/sell_check.py). Mirrors SellSignal in schemas.py. */
 export interface SellSignal {
   symbol: string;
@@ -523,6 +529,8 @@ export interface AnalyzeResponse {
   sources?: AnswerSource[];
   /** Sell or trim signals, strongest first. */
   sells?: SellSignal[];
+  /** The coins and timeframe a sell check covered, to watch with signal alerts. */
+  sell_watch?: SellWatch | null;
   generated_at: string;
 }
 

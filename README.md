@@ -263,8 +263,11 @@ Each price alert can **repeat** (fire on every new cross instead of once), **exp
 pick, and carry a **note** that goes into the message. Edit one with the pencil in the Alerts tab, or drag
 its amber line or zone on the chart to a new price. **Signal alerts** watch for setups instead of prices
 on any coins and timeframe: Kimi Cooked B+/B- labels, RSI divergence, a sweep of a swing high or low, a new
-demand or supply zone, a break of structure and more. They are checked on the server when each candle
-closes, and **Preview** shows where the signal fired on the last few hundred candles. **History** lists
+demand or supply zone, a break of structure and more. For coins you hold, **Lost support (sell)** fires once
+when a support or demand zone is lost (two closes below it), and **Rejected at resistance (trim)** when price
+reaches resistance or supply with a rejection wick or RSI at 70+. After "What should I sell or trim?", the
+**Alert me when these coins need selling** button arms both on the coins it checked. They are checked on the
+server when each candle closes, and **Preview** shows where the signal fired on the last few hundred candles. **History** lists
 everything that fired. The **Brief** sends a market summary to Telegram or Discord at the times you pick
 (price and change since the last brief per coin, trend, RSI, the nearest zone, Kimi's latest signal and
 forecast, funding and open interest, key levels and the day's high-impact economic events); **Preview**
