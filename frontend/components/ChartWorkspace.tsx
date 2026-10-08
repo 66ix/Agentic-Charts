@@ -9,7 +9,7 @@ import { useHigherTfOverlays } from "@/hooks/useHigherTfOverlays";
 import { useIsMobile } from "@/hooks/useMediaQuery";
 import { readStored, usePersistentState, writeStored } from "@/hooks/usePersistentState";
 import { useUndo } from "@/hooks/useUndo";
-import { alertFromDrawing, alertOverlays, chartZones } from "@/lib/alerts";
+import { alertFromDrawing, alertOverlays, chartZones, SELL_SIGNALS } from "@/lib/alerts";
 import { analyze } from "@/lib/api";
 import { DEFAULT_INTERVAL, DEFAULT_SYMBOL } from "@/lib/config";
 import { isCustom } from "@/lib/customSymbols";
@@ -45,6 +45,7 @@ import type {
   LayoutState,
   MarketSetup,
   Overlay,
+  SellWatch,
   ToolId,
   TopDownResult,
   TriggerInterval,
@@ -363,7 +364,7 @@ export default function ChartWorkspace() {
   }, []);
   const onSignalFired = useCallback((f: SignalFired) => setToasts((t) => [...t, signalToast(uid(), f)].slice(-4)), []);
   const alertsApi = useAlerts(onAlertsFired, onSignalFired);
-  const { alerts, add: addAlerts, update: updateAlert, addTrigger } = alertsApi;
+  const { alerts, add: addAlerts, update: updateAlert, addTrigger, addSignal } = alertsApi;
   const armedAlerts = alerts.filter((a) => a.armed).length;
   const alertOverlaysFor = useCallback((s: string) => alertOverlays(alerts, s), [alerts]);
 
@@ -532,6 +533,7 @@ export default function ChartWorkspace() {
           ladder: res.ladder ?? undefined,
           sources: res.sources?.length ? res.sources : undefined,
           sells: res.sells?.length ? res.sells : undefined,
+          sellWatch: res.sell_watch?.symbols.length ? res.sell_watch : undefined,
           steps: res.steps?.length ? res.steps : undefined,
           symbol: target.symbol,
           interval: target.interval,
@@ -812,6 +814,15 @@ export default function ChartWorkspace() {
     },
     [addTrigger],
   );
+  const sellWatch = useCallback(
+    async (w: SellWatch) => {
+      const made = await Promise.all(
+        SELL_SIGNALS.map((signal) => addSignal({ symbols: w.symbols, interval: w.interval, signal, repeat: true })),
+      );
+      return made.every((m) => m != null);
+    },
+    [addSignal],
+  );
   const triggerZones = useMemo(() => chartZones(overlays, drawings, selectedId), [overlays, drawings, selectedId]);
 
   const dockProps: DockPanelProps = { symbol, interval, price, watchlist, onPickSymbol: pickSymbol, onChartOverlays };
@@ -842,6 +853,7 @@ export default function ChartWorkspace() {
           onTogglePin={togglePin}
           onLogTrade={logTrade}
           onPlanTrigger={planTrigger}
+          onSellWatch={sellWatch}
         />
       ),
     },

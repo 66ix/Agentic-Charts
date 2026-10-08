@@ -1,5 +1,6 @@
 """Signal alerts: "tell me when Kimi prints B+ on BTC 4h", "when RSI diverges on any watchlist coin", "when price
-sweeps the H4 low and closes back inside", "when a new fresh demand zone forms", and trigger alerts: "when 1m shows a
+sweeps the H4 low and closes back inside", "when a new fresh demand zone forms", the spot holder's sell signals
+("lost support", "rejected at resistance", sell_check.py's checks on each close), and trigger alerts: "when 1m shows a
 CHoCH inside the 4h demand" (signal `zone_trigger`, detection in zone_triggers.py).
 
 A signal alert watches one coin on one timeframe for one detector event. Signals are judged on closed candles
@@ -36,6 +37,7 @@ import numpy as np
 import pandas as pd
 from pydantic import BaseModel, Field
 
+from . import sell_check
 from .alerts import AlertService, fmt_price, read_store, store_path, write_store
 from .config import Settings, get_settings
 from .indicators import rsi, rsi_divergence, structure_breaks
@@ -55,7 +57,7 @@ log = logging.getLogger(__name__)
 
 SignalId = Literal["kimi_buy", "kimi_sell", "kimi_any", "rsi_bull_div", "rsi_bear_div", "sweep_low", "sweep_high",
                    "new_demand", "new_supply", "bos_bull", "bos_bear", "rsi_overbought", "rsi_oversold",
-                   "zone_trigger"]
+                   "lost_support", "at_resistance", "zone_trigger"]
 SIGNAL_IDS: tuple[str, ...] = get_args(SignalId)
 
 
@@ -83,10 +85,17 @@ SIGNALS: dict[str, SignalInfo] = {
                            "A candle closes below the last swing low (break of structure or change of character)"),
     "rsi_overbought": SignalInfo("RSI crosses above 70", "RSI moves up into overbought"),
     "rsi_oversold": SignalInfo("RSI crosses below 30", "RSI moves down into oversold"),
+    "lost_support": SignalInfo("Lost support (sell)",
+                               "Two closes below a support or demand zone that held before: sell or trim on a retest "
+                               "from below"),
+    "at_resistance": SignalInfo("Rejected at resistance (trim)",
+                                "Price reaches resistance or supply with a rejection wick or RSI at 70+: trim into "
+                                "the zone"),
     "zone_trigger": SignalInfo("Zone trigger", "A lower timeframe (1m/5m/15m) confirms inside a higher-timeframe zone: "
                                                "a CHoCH / BOS, a liquidity sweep or an engulfing close"),
 }
 KIMI_SIGNALS = frozenset({"kimi_buy", "kimi_sell", "kimi_any"})
+SELL_SIGNALS = frozenset({"lost_support", "at_resistance"})  # sell_check.py's checks, for spot holders
 KIMI_LABELS = {"kimi_buy": {"B+"}, "kimi_sell": {"B-"}}
 
 WINDOW = 300          # closed candles the detectors see, like the watchlist scan
@@ -236,6 +245,14 @@ def detect(signal: str, frame: Frame, prev: Optional[Frame] = None,
         z = max(fresh, key=lambda z: z.score)
         return SignalHit(t, close, f"new {kind} zone {fmt_price(z.price_low)}–{fmt_price(z.price_high)} formed "
                                    f"(close {fmt_price(close)})", f"zone:{kind}:{z.first_time}")
+
+    if signal in SELL_SIGNALS:
+        found = sell_check.alert_check(frame.df, signal)
+        if found is None:
+            return None
+        z, text = found
+        # One fire per zone: a lost zone stays lost, and a run of rejections at the same zone is one event.
+        return SignalHit(t, close, text, f"{signal}:{z.kind}:{z.first_time}")
 
     if signal in ("bos_bull", "bos_bear"):
         direction = "bullish" if signal == "bos_bull" else "bearish"

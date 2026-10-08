@@ -343,6 +343,8 @@ def test_agent_sell_check_answers_for_the_watchlist_and_a_spot_short_checks_this
     assert res.intent.sell_check and res.plan is None and res.navigate is None
     assert all(r.symbol in ("BTCUSDT", "ETHUSDT", "INJUSDT") for r in res.sells)
     assert res.summary  # either the flagged coins or "nothing to sell"
+    assert res.sell_watch and res.sell_watch.symbols == ["BTCUSDT", "ETHUSDT", "INJUSDT"]
+    assert res.sell_watch.interval in ("1h", "4h", "1d")
     res = _run("should I sell INJ?", watchlist=["BTCUSDT", "ETHUSDT"])
     assert res.intent.sell_check and all(r.symbol == "INJUSDT" for r in res.sells)
     res = _run("give me a short setup")
@@ -356,3 +358,23 @@ def test_sell_check_endpoint():
         r = c.post("/api/sell-check", json={"symbols": ["BTCUSDT", "ETHUSDT"], "interval": "4h"})
         assert r.status_code == 200 and all(x["action"] in ("sell", "trim") for x in r.json())
         assert c.post("/api/sell-check", json={"symbols": "BTC"}).status_code == 422
+
+
+def test_sell_signal_alerts_fire_once_when_support_is_lost_and_on_a_rejection_at_resistance():
+    from app.signal_alerts import Frame, detect, scan_history
+
+    broke = _df(list(_wave(200, amp=0.05)) + [97, 95.5, 95.2, 94.0, 93.2, 93.0, 92.9, 93.1])
+    hits = scan_history("lost_support", broke, 12)
+    # It fires on the second close below the zone (93.2), not again on the candles after it.
+    assert len(hits) == 1 and hits[0].price == 93.2
+    assert "lost support" in hits[0].text and "retest from below" in hits[0].text
+    assert detect("lost_support", Frame(broke)) is None
+
+    top = _df(list(_wave(198, amp=0.05)))
+    top.loc[top.index[-1], "high"] = top["close"].iloc[-1] * 1.03
+    hit = detect("at_resistance", Frame(top))
+    assert hit and "rejection wick" in hit.text and "Trim into the zone" in hit.text
+    assert hit.key.startswith("at_resistance:")
+
+    rising = _df(list(np.linspace(80, 100, 200)))
+    assert detect("lost_support", Frame(rising)) is None and detect("at_resistance", Frame(rising)) is None

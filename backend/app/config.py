@@ -113,6 +113,9 @@ class Settings:
     # Trade journal (journal.py): logged trades. JOURNAL_STORE=memory keeps them in memory only (lost on restart).
     journal_store: str = field(default_factory=lambda: _env(
         "JOURNAL_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "journal.json")))
+    # Spot paper trading (paper.py): the paper wallet's orders. PAPER_STORE=memory keeps them in memory only.
+    paper_store: str = field(default_factory=lambda: _env(
+        "PAPER_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "paper.json")))
     # Weekly trade review schedule (postmortem.py); `memory` keeps it in memory only.
     journal_review_store: str = field(default_factory=lambda: _env(
         "JOURNAL_REVIEW_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "journal_review.json")))

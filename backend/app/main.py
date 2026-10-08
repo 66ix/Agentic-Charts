@@ -46,6 +46,7 @@ from .top_down import walk
 from .binance_account import BinanceAccount, BinanceApiError, BinanceKeyError
 from .binance_import import BinanceImportService, ClassifyRequest, ImportSettings
 from .journal import JournalPatch, JournalService, NewJournalEntry, entry_json
+from .paper import NewPaperOrder, PaperService
 from .events import EventsService
 from .futures_data import FUTURES_PERIODS, FuturesDataService
 from .kimi_service import KimiService
@@ -87,6 +88,7 @@ async def lifespan(app: FastAPI):
     await app.state.alerts.start()
     app.state.gridbots = GridBotService(market)  # grid bot tracker: saved bots, results cached per 1m bar
     app.state.journal = JournalService(market)  # trade journal: entries tracked on 1m candles
+    app.state.paper = PaperService(market)  # spot paper wallet, replayed on 1m candles
     # Read-only Binance account: fills → journal, bot vs manual, positions (binance_account.py, binance_import.py).
     app.state.binance = BinanceImportService(BinanceAccount(), app.state.journal, app.state.gridbots, market)
     app.state.binance.start()
@@ -713,6 +715,51 @@ async def ws_klines(ws: WebSocket, symbol: str = "INJUSDT", interval: str = "4h"
             with contextlib.suppress(asyncio.CancelledError, WebSocketDisconnect, Exception):
                 await t
         await hub.unsubscribe(sym, iv, queue)
+
+
+# ------------------------------------------------------------- paper trading --
+#   GET    /api/paper                     the wallet: cash, holdings, PnL, orders with what happened to them
+#   POST   /api/paper/orders              {orders: [NewPaperOrder, ...]} placed together → {orders, wallet}
+#   DELETE /api/paper/orders/{id}         cancels a pending order → {wallet}
+#   POST   /api/paper/reset               {start_cash?, fee_pct?} → empty wallet
+
+
+@app.get("/api/paper")
+async def paper_wallet(request: Request) -> dict:
+    return (await request.app.state.paper.wallet()).model_dump()
+
+
+@app.post("/api/paper/orders")
+async def paper_place(request: Request, body: dict = Body(...)) -> dict:
+    service: PaperService = request.app.state.paper
+    try:
+        rows = body.get("orders")
+        if not isinstance(rows, list) or not 1 <= len(rows) <= 12:
+            raise ValueError("Send 1 to 12 orders as {orders: [...]}")
+        made = await service.place([NewPaperOrder.model_validate(r) for r in rows])
+    except MarketDataError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    except ValueError as exc:  # includes pydantic's ValidationError
+        raise HTTPException(422, str(exc)) from exc
+    return {"orders": [o.model_dump() for o in made], "wallet": (await service.wallet()).model_dump()}
+
+
+@app.delete("/api/paper/orders/{order_id}")
+async def paper_cancel(order_id: str, request: Request) -> dict:
+    service: PaperService = request.app.state.paper
+    if service.cancel(order_id) is None:
+        raise HTTPException(404, "Order not found")
+    return {"wallet": (await service.wallet()).model_dump()}
+
+
+@app.post("/api/paper/reset")
+async def paper_reset(request: Request, body: dict = Body(default={})) -> dict:
+    service: PaperService = request.app.state.paper
+    try:
+        service.reset(float(body.get("start_cash", 10_000)), float(body.get("fee_pct", 0.1)))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"wallet": (await service.wallet()).model_dump()}
 
 
 # ------------------------------------------------------ trade journal + backtests --

@@ -8,6 +8,7 @@ import os
 os.environ["CANDLE_CACHE"] = "off"
 os.environ["ALERTS_STORE"] = "memory"
 os.environ["JOURNAL_STORE"] = "memory"
+os.environ["PAPER_STORE"] = "memory"
 os.environ["JOURNAL_REVIEW_STORE"] = "memory"
 os.environ["GRIDBOTS_STORE"] = "memory"
 os.environ["LLM_CHOICE_STORE"] = "memory"

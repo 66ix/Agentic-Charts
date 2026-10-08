@@ -52,8 +52,10 @@ def _zones(df: pd.DataFrame) -> tuple[list[Zone], float]:
     return sr + supply_demand_zones(df, atr_s), atr_v
 
 
-def _lost(df: pd.DataFrame, zones: list[Zone], atr_v: float) -> Optional[Zone]:
-    """The strongest zone price closed above in the LOOKBACK bars before the last LOST_CONFIRM, and below since."""
+def _lost(df: pd.DataFrame, zones: list[Zone], atr_v: float, fresh: bool = False) -> Optional[Zone]:
+    """The strongest zone price closed above in the LOOKBACK bars before the last LOST_CONFIRM, and below since.
+    `fresh`: only a zone lost on the last candle, i.e. the close before the last LOST_CONFIRM was still above it (the
+    signal alert fires once, when the break is confirmed)."""
     closes = df["close"].reset_index(drop=True)
     if len(closes) < LOOKBACK + LOST_CONFIRM + 20:
         return None
@@ -63,7 +65,8 @@ def _lost(df: pd.DataFrame, zones: list[Zone], atr_v: float) -> Optional[Zone]:
     last = float(closes.iloc[-1])
     hits = [z for z in zones
             if (recent < z.price_low).all() and float(before.max()) >= z.price_low
-            and float((held >= z.price_low).mean()) >= 0.6 and z.price_low - last <= MAX_LOST_ATR * atr_v]
+            and float((held >= z.price_low).mean()) >= 0.6 and z.price_low - last <= MAX_LOST_ATR * atr_v
+            and (not fresh or float(closes.iloc[-(LOST_CONFIRM + 1)]) >= z.price_low)]
     return max(hits, key=lambda z: z.score, default=None)
 
 
@@ -72,6 +75,16 @@ def _overhead(zones: list[Zone], last: float, atr_v: float) -> Optional[Zone]:
     near = [z for z in zones if z.kind in ("resistance", "supply") and z.price_high >= last
             and z.price_low - last <= NEAR_ATR * atr_v]
     return min(near, key=lambda z: max(0.0, z.price_low - last), default=None)
+
+
+def _rejection(df: pd.DataFrame, z: Zone, rsi_v: Optional[float]) -> tuple[bool, bool]:
+    """(rejected, hot) for the last candle under resistance or supply `z`: a rejection is a candle that reached into
+    the zone and left a long upper wick; hot is RSI at or above RSI_HOT."""
+    bar = df.iloc[-1]
+    rng = float(bar["high"] - bar["low"]) or 1e-12
+    wick = float(bar["high"] - max(bar["open"], bar["close"])) / rng
+    rejected = float(bar["high"]) >= z.price_low and wick >= 0.5
+    return rejected, rsi_v is not None and rsi_v >= RSI_HOT
 
 
 def _support_below(zones: list[Zone], last: float) -> Optional[float]:
@@ -119,12 +132,7 @@ def check(symbol: str, interval: str, df: pd.DataFrame, daily: Optional[pd.DataF
         z = _overhead(zs, last, a)
         if z is None:
             continue
-        bar = df.iloc[-1]
-        rng = float(bar["high"] - bar["low"]) or 1e-12
-        wick = float(bar["high"] - max(bar["open"], bar["close"])) / rng
-        # A rejection: the last candle reached into the zone and left a long upper wick.
-        rejected = float(bar["high"]) >= z.price_low and wick >= 0.5
-        hot = rsi_v is not None and rsi_v >= RSI_HOT
+        rejected, hot = _rejection(df, z, rsi_v)
         if not (rejected or hot):
             continue  # sitting under resistance alone is not a reason to sell
         why = [w for w, on in (("a rejection wick", rejected), (f"RSI at {rsi_v}", hot)) if on]
@@ -136,6 +144,41 @@ def check(symbol: str, interval: str, df: pd.DataFrame, daily: Optional[pd.DataF
         return SellSignal(**base, action="trim", reason=reason, sell_low=z.price_low, sell_high=z.price_high,
                           zone=f"{label} {z.kind}", score=round(score, 3))
     return None
+
+
+def alert_check(df: pd.DataFrame, signal: str) -> Optional[tuple[Zone, str]]:
+    """The signal alerts' version of `check`, on one frame of closed candles: `lost_support` when a support or demand
+    zone was lost on the last candle, `at_resistance` when the last candle is at resistance or supply with a rejection
+    wick or hot RSI. Returns the zone and the text, or None. CPU-bound."""
+    if len(df) < MIN_CANDLES:
+        return None
+    df = df.reset_index(drop=True)
+    zones, atr_v = _zones(df)
+    last = float(df["close"].iloc[-1])
+    support = _support_below(zones, last)
+    nxt = f"; next support {_fmt(support)} ({(support / last - 1) * 100:+.1f}%)." if support else "."
+    if signal == "lost_support":
+        z = _lost(df, zones, atr_v, fresh=True)
+        if z is None:
+            return None
+        was = "demand" if z.kind in ("supply", "demand") else "support"
+        return z, (f"lost {was} {_fmt(z.price_low)}–{_fmt(z.price_high)}: closed below it {LOST_CONFIRM} times "
+                   f"(close {_fmt(last)}). Sell or trim on a retest from below "
+                   f"({(z.price_low / last - 1) * 100:+.1f}%){nxt}")
+    if signal == "at_resistance":
+        z = _overhead(zones, last, atr_v)
+        if z is None:
+            return None
+        r = rsi_series(df["close"]).iloc[-1]
+        rsi_v = round(float(r), 1) if pd.notna(r) else None
+        rejected, hot = _rejection(df, z, rsi_v)
+        if not (rejected or hot):
+            return None
+        why = " and ".join(w for w, on in (("a rejection wick", rejected), (f"RSI at {rsi_v}", hot)) if on)
+        where = "inside" if z.price_low <= last else "just under"
+        return z, (f"{where} {z.kind} {_fmt(z.price_low)}–{_fmt(z.price_high)} with {why} (close {_fmt(last)}). "
+                   f"Trim into the zone{nxt}")
+    raise ValueError(f"Unknown sell signal {signal!r}")
 
 
 def timeframe_for(tf: str) -> str:
