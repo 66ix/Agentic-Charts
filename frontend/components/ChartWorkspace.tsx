@@ -12,6 +12,7 @@ import { useUndo } from "@/hooks/useUndo";
 import { alertFromDrawing, alertOverlays, chartZones, SELL_SIGNALS } from "@/lib/alerts";
 import { analyzeStream } from "@/lib/api";
 import { imageToDataUrl, readScreenshot } from "@/lib/screenshot";
+import { composeSnapshot, shareSnapshot } from "@/lib/snapshot";
 import { DEFAULT_INTERVAL, DEFAULT_SYMBOL } from "@/lib/config";
 import { isCustom } from "@/lib/customSymbols";
 import { CHAT_ID_KEY, CHATS_KEY, toSession, upsertSession, worthKeeping, type ChatSession } from "@/lib/chatHistory";
@@ -669,18 +670,20 @@ export default function ChartWorkspace() {
     setUndoNote("Alert set");
   }, [selectedAlert, addAlerts, symbol]);
 
+  /** Alt+S: the chart with the latest agent answer about it (summary, plan, levels) in one image. */
   const screenshot = useCallback(() => {
     const canvas = activeChart()?.screenshot();
     if (!canvas) return;
-    canvas.toBlob((blob) => {
-      if (!blob) return;
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = `${symbol.replace(/[/:]/g, "-")}-${interval}-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.png`;
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-    });
-  }, [symbol, interval, activeChart]);
+    const answer = [...messages].reverse().find((m) => m.role === "agent" && m.symbol === symbol && m.interval === interval && !m.streaming);
+    const levels = overlays
+      .filter((o) => (o.type === "horizontal_line" || o.type === "box") && o.label)
+      .sort((x, y) => (y.strength ?? 0) - (x.strength ?? 0))
+      .slice(0, 6)
+      .map((o) => o.label);
+    const out = composeSnapshot(canvas, { symbol, interval, summary: answer?.text, plan: answer?.plan, levels });
+    const name = `${symbol.replace(/[/:]/g, "-")}-${interval}-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.png`;
+    void shareSnapshot(out, name).then(setUndoNote);
+  }, [symbol, interval, activeChart, messages, overlays]);
 
   // ------------------------------------------------------------------ replay
   const [replay, setReplay] = useState<ReplayState | null>(null);

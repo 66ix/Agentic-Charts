@@ -22,7 +22,7 @@ export const SHORTCUTS: Array<{ group: string; keys: Array<[string, string]> }> 
       ["[  ] or Alt+↑ ↓", "Previous / next coin in the watchlist"],
       ["G", "One, two or four charts"],
       ["Alt+R", "Fit the chart"],
-      ["Alt+S", "Save a screenshot"],
+      ["Alt+S", "Save a snapshot with the agent's answer"],
       ["Alt+L", "Log scale on / off"],
       ["K", "Kimi Cooked on / off"],
       ["I", "Indicator settings"],

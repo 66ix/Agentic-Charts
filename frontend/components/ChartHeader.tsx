@@ -223,7 +223,7 @@ export default function ChartHeader(p: Props) {
       <button type="button" className="btn-ghost shrink-0" title="Fit chart (Alt+R)" aria-label="Fit chart" onClick={p.onFit}>
         <Maximize2 className="h-4 w-4" />
       </button>
-      <button type="button" className="btn-ghost shrink-0" title="Save screenshot (Alt+S)" aria-label="Save screenshot" onClick={p.onScreenshot}>
+      <button type="button" className="btn-ghost shrink-0" title="Save a snapshot with the agent&apos;s latest answer, also copied to the clipboard (Alt+S)" aria-label="Save snapshot" onClick={p.onScreenshot}>
         <Camera className="h-4 w-4" />
       </button>
       {p.onReplay && (

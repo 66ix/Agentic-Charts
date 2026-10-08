@@ -31,7 +31,7 @@ export default function ReplayBar(p: {
   const last = s.bars.length - 1;
   const go = (i: number) => p.onChange({ ...s, i: Math.max(1, Math.min(last, i)), playing: false });
   return (
-    <div className="pointer-events-auto absolute bottom-10 left-1/2 z-30 flex max-w-[95%] -translate-x-1/2 flex-wrap items-center gap-1.5 rounded-lg border border-line bg-panel/95 px-2 py-1.5 text-[11px] shadow-xl backdrop-blur">
+    <div className="pointer-events-auto absolute bottom-24 left-1/2 z-30 flex max-w-[95%] -translate-x-1/2 flex-wrap items-center gap-1.5 rounded-lg border border-line bg-panel/95 px-2 py-1.5 text-[11px] shadow-xl backdrop-blur">
       <span className="font-semibold text-accent">Replay</span>
       <button type="button" className="btn-ghost h-6 w-6 p-0" aria-label="Back one candle" title="Back one candle" onClick={() => go(s.i - 1)}>
         <ChevronLeft className="h-4 w-4" />

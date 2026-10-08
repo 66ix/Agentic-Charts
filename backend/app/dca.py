@@ -131,8 +131,9 @@ def plan_dca(df: pd.DataFrame, req: DcaRequest, source: str = "binance") -> DcaR
     best = max(strategies, key=lambda s: s.final_value)
     lump = strategies[0]
     bh = (closes[-1] / opens[0] - 1) * 100
-    others = ", ".join(f"{s.name.split(' (')[0].lower()} {s.return_pct:+.1f}%" for s in strategies if s is not best)
-    summary = (f"Over the last {len(test)} days, {best.name.split(' (')[0].lower()} did best: {best.return_pct:+.1f}% "
+    short = {"lump": "the lump sum", "weekly": "weekly DCA", "daily": "daily DCA", "dips": "buying the dips"}
+    others = ", ".join(f"{short[s.id]} {s.return_pct:+.1f}%" for s in strategies if s is not best)
+    summary = (f"Over the last {len(test)} days, {short[best.id]} did best: {best.return_pct:+.1f}% "
                f"(average price {best.avg_price:.6g}, worst drawdown {best.max_drawdown_pct:.1f}%), vs {others}. ")
     if bh < 0:
         summary += "Price fell over the period, so spreading the buys out helped."
