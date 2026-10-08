@@ -20,6 +20,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -29,6 +30,7 @@ from .config import Settings, get_settings
 from .pricefmt import round_facts
 from .schemas import (
     ALL_FEATURES,
+    SCAN_KINDS,
     CONFIRMATIONS,
     FULL_FEATURES,
     INDICATORS,
@@ -54,7 +56,8 @@ INTENT_SCHEMA: dict[str, Any] = {
     "required": ["features", "timeframe", "window_timeframes", "max_zones", "answer_hint", "custom_levels",
                  "remove", "keep_existing", "alert_prices", "alert_targets", "symbol", "switch_chart",
                  "scan_watchlist", "scan_filter", "scan_market", "trade_plan", "grid_plan", "indicators_on",
-                 "indicators_off", "zone_trigger"],
+                 "indicators_off", "zone_trigger", "scan_kind", "top_down", "take_profit", "dip_ladder",
+                 "general_question", "sell_check"],
     "properties": {
         "features": {
             "type": "array",
@@ -187,6 +190,45 @@ INTENT_SCHEMA: dict[str, Any] = {
                            "a CHoCH inside the 4h demand' → {timeframe 1m, confirm choch, zone_kind demand, "
                            "zone_timeframe 4h}. null for every other request, including plain price alerts.",
         },
+        "scan_kind": {
+            "type": "string", "enum": list(SCAN_KINDS),
+            "description": "What a market scan ranks. spot_buys: coins to buy outright at higher-timeframe demand "
+                           "('best spot buys', 'what should I buy?', 'good coins to buy'); grid_coins: coins ranging "
+                           "well enough for a grid bot ('best grid bot coins', 'which coins suit a grid?'); setups "
+                           "otherwise. spot_buys and grid_coins set scan_market true.",
+        },
+        "top_down": {
+            "type": "boolean",
+            "description": "true for a top-down walk: 'top-down S/R', 'walk me down the timeframes', 'do a top-down "
+                           "analysis'. The app draws the valid levels on 1D, then 4H, 1H and 15m, skipping timeframes "
+                           "with nothing valid. features empty, keep_existing true.",
+        },
+        "take_profit": {
+            "type": "boolean",
+            "description": "true for 'where do I take profit?', 'where should I sell?', 'profit targets': the "
+                           "resistance and supply zones above price. Use features support_resistance and "
+                           "supply_demand with it.",
+        },
+        "dip_ladder": {
+            "type": "boolean",
+            "description": "true for a spot buy-the-dip ladder: 'plan a dip-buy ladder', 'DCA into the dips', 'where "
+                           "should I place my buy orders?'. The app splits a budget across the demand zones below "
+                           "price and tests it on 90 days. features empty, keep_existing true.",
+        },
+        "sell_check": {
+            "type": "boolean",
+            "description": "true for 'what should I sell or trim?', 'should I sell INJ?', 'which coins should I "
+                           "sell?', 'any sell signals?': the app checks the coin (if one is named) or the watchlist "
+                           "for lost support and rejections at resistance. features empty, keep_existing true, "
+                           "scan_watchlist false.",
+        },
+        "general_question": {
+            "type": "boolean",
+            "description": "true when the question isn't about reading a chart: today's date or time, macro results "
+                           "('what did the FOMC decide?', 'CPI result'), project news ('which coins have an upgrade "
+                           "coming?'), or a general crypto question ('what is staking?'). features empty, "
+                           "keep_existing true; it is answered in plain language.",
+        },
     },
 }
 
@@ -209,7 +251,13 @@ INTENT_SYSTEM = (
     "An alert on a lower-timeframe confirmation inside a zone ('alert me when 1m shows a CHoCH inside the 4h "
     "demand', 'ping me on a 5m confirmation in the H4 supply') is zone_trigger, not alert_targets: features empty, "
     "keep_existing true. "
-    "'Grid bot' or 'grid trading' means grid_plan (a Binance Spot Grid bot), not a trade plan. "
+    "'Grid bot' or 'grid trading' means grid_plan (a Binance Spot Grid bot), not a trade plan; 'best grid bot coins' "
+    "is a market scan with scan_kind grid_coins instead. 'Best spot buys' or 'what should I buy' is a market scan with "
+    "scan_kind spot_buys. 'Top-down' is top_down. 'Where do I take profit' is take_profit. 'Dip-buy ladder' is "
+    "dip_ladder. 'What should I sell or trim' or 'should I sell X' is sell_check, not a short plan. A question that isn't about a chart (the date, FOMC or CPI results, coin upgrades, what something "
+    "means) is general_question with no features and keep_existing true. "
+    "When the context says SPOT ONLY the user buys coins outright and never shorts: 'what's the trade here?' is "
+    "trade_plan long, and a market scan is for longs or spot buys. "
     "Respond with JSON only."
 )
 
@@ -237,8 +285,38 @@ NARRATE_SYSTEM = (
     "inside it; an empty list means nothing high-impact is scheduled. FACTS.headlines are recent news titles. "
     "FACTS.grid_plan is a Spot Grid bot plan: give its range and what it is built on, the grids and grid type and "
     "the profit per grid after fees, and say it can be tested on history in the Grid bots tab. "
+    "FACTS.spot_buys ranks coins to buy outright at demand that lines up with a higher timeframe: name the best two or "
+    "three with their buy zone, first target and invalidation (the price where the idea is wrong). FACTS.grid_coins "
+    "lists coins ranging well enough for a grid bot: name the best few with their range and how often price crossed "
+    "it. FACTS.take_profit lists where to sell, nearest first: give each with its gain from price and suggest scaling "
+    "out across them. FACTS.top_down is a top-down walk: say which timeframes got levels (and the key ones) and which "
+    "were skipped and why; the levels stay visible on the lower timeframes. FACTS.ladder is a dip-buy ladder: give "
+    "the buy prices and shares, the average price if all fill, the take profit, and the backtest against holding. "
+    "FACTS.sell_check lists coins to sell or trim, strongest first: for each give the action, why (lost support or "
+    "rejected at resistance), the zone to sell into and the next support below; if none is flagged, say nothing needs "
+    "selling right now. "
+    "When FACTS.trading_style says spot only, never suggest shorting, futures or leverage: a bearish read means wait "
+    "for a lower buy zone or take profit on coins already held. "
     "No disclaimers, no markdown."
 )
+
+# Room for the model's thinking as well as the answer: current Claude models think by default and count it here.
+ANTHROPIC_MAX_TOKENS = 4096
+WEB_SEARCH_MAX_USES = 3
+WEB_SEARCH_TIMEOUT = 90.0
+# Claude models that only have the basic web search tool; newer ones take the dynamic-filtering version.
+_BASIC_WEB_SEARCH = re.compile(r"claude-(?:3|haiku-4-5|sonnet-4-5|opus-4-5|opus-4-1|opus-4-0|sonnet-4-0|opus-4-2|"
+                               r"sonnet-4-2|haiku-4-0)")
+
+GENERAL_SYSTEM = (
+    "You are the assistant inside a crypto charting app, answering a question that isn't about the chart. Answer in "
+    "plain language, leading with the answer, in at most 6 short sentences. CONTEXT gives today's date and time, the "
+    "economic calendar for the past and coming week (forecasts and previous values only), and recent crypto "
+    "headlines. Use them and any web search results, and say where a recent fact comes from (e.g. 'CoinDesk "
+    "reported...'). If neither shows something recent, say you can't confirm it rather than guessing; never invent "
+    "numbers, dates or results. {spot}No markdown headings or tables."
+)
+SPOT_LINE = ("The user trades spot only (buying coins outright): never suggest shorting, futures or leverage. ")
 
 _TF_PATTERNS: list[tuple[str, str]] = [
     (r"\b(m1|1m|1\s*min(ute)?)\b", "1m"),
@@ -304,6 +382,35 @@ _MARKET_SCAN = (r"\b(?:(?:scan|screen|search|sweep|check) (?:the |across the )?(
                 r"market[- ]wide|across the (?:whole |entire )?market|(?:any|good|best|top)(?: \d+)?(?: \w+){0,2} setups|"
                 r"best(?: \w+){0,2} (?:setups?|trades?) (?:right now|now|today|out there))\b")
 _NOT_MARKET = r"\b(?:my|watch ?list|here|this (?:chart|coin|pair|one))\b"
+_TOP_DOWN = (r"\btop[- ]?down(?: (?:s/?r|walk|analysis|levels|view))?\b|"
+             r"\bwalk (?:me )?(?:down|through) (?:the |all the )?(?:time ?frames|tfs)\b|"
+             r"\bmulti[- ]?time ?frame (?:walk|s/?r|levels|analysis)\b")
+_LADDER = (r"\b(?:dip[- ]?buy(?:ing)?|buy[- ]the[- ]dips?|dca|spot) ladder\b|\bladder\b|"
+           r"\bdca (?:plan|into (?:the )?dips?)\b|\bwhere (?:should|do|would) i (?:put|place|set) (?:my )?buy orders\b")
+_GRID_COINS = (r"\b(?:best |good |top )?grid(?:[- ]bot)? (?:coins?|candidates?|pairs?)\b|"
+               r"\bcoins? (?:for|to run|suited (?:to|for)|that suit) (?:a )?grid(?:[- ]?bots?)?\b|"
+               r"\bwhich coins? (?:suit|fit|work for) (?:a )?grid(?:[- ]?bots?)?\b|\branging coins?\b")
+_SPOT_BUYS = (r"\b(?:best |good |top )?spot (?:buys?|coins?|opportunit\w+|entries|picks)\b|"
+              r"\bwhat (?:should|can|could) i buy\b|\b(?:good|best) (?:coins?|things?|spots?) to buy\b|"
+              r"\bwhat(?:'s| is) (?:worth|good) buying\b")
+_TAKE_PROFIT = (r"\btake[- ]?profits?\b|\bwhere (?:do|should|would|can) i (?:sell|exit|take (?:some )?profits?)\b|"
+                r"\bwhen (?:do|should) i sell\b|\bprofit targets?\b|\bwhere to (?:sell|take profits?)\b")
+# Spot holders' answer to a short: which coins to sell or trim ("what should I sell or trim?", "should I sell INJ?").
+_SELL = (r"\bsell or trim\b|\bwhat (?:should|do|can) i (?:sell|trim)\b|\bshould i (?:sell|trim|dump)\b|"
+         r"\b(?:which|any|anything)\b[^.?!]{0,30}?\b(?:to |should i )?(?:sell|trim)\b|\bsell signals?\b|"
+         r"\btime to sell\b")
+_DATE_Q = (r"\bwhat(?:'s| is)? (?:the |today'?s )?(?:date|day|time)\b|\bwhat day is (?:it|today)\b|"
+           r"\btoday'?s date\b|\bwhat time is it\b|\bwhat (?:year|month) is it\b")
+_MACRO = (r"\b(?:fomc|the fed|federal reserve|powell|cpi|ppi|nfp|payrolls?|inflation|interest rates?|"
+          r"rate (?:cut|hike|decision)|gdp|jobs report|unemployment)\b")
+_PROJECT_NEWS = (r"\b(?:upgrades?|hard ?forks?|mainnet|testnet|token unlocks?|unlocks?|airdrops?|halving|etfs?|"
+                 r"listings?|delistings?|regulation|sec|news|headlines)\b")
+_PROJECT_EVENTS = r"\b(?:upgrades?|hard ?forks?|mainnet|testnet|token unlocks?|unlocks?|airdrops?|halving)\b"
+_QUESTION = r"^\s*(?:what|who|why|how|when|which|is|are|does|do|did|can|could|will|explain|tell me|any)\b"
+_EXPLAIN = r"^\s*(?:what (?:is|are|does)|explain|how (?:does|do)|define|what's the difference)\b"
+_CHART_WORDS = (r"\b(?:chart|trend|price|level|zone|support|resistance|supply|demand|setup|entry|stop|target|rsi|macd|"
+                r"ema|vwap|candle|breakout|pattern|swing|fvg|order ?block|liquidity|this coin|here|kimi|funding|"
+                r"open interest|oi|long[ /-]?short|l/s|liquidat\w*|order ?book|walls?|cvd|order ?flow|positioning)\b")
 
 
 _ALERT_VERB = r"\b(?:alert|notify|ping|tell me|let me know)\b"
@@ -421,6 +528,7 @@ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases
     """Keyword parser used when no LLM is available."""
     p = prompt.lower()
     symbol = find_symbol(prompt, known_bases)
+    names_coin = symbol is not None
     if symbol == chart_symbol:
         symbol = None
 
@@ -476,7 +584,27 @@ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases
     for span in spans:  # "support at 24.1" is a drawing, not a request for the S/R detector
         scan = scan.replace(span, " ")
 
-    scan_market = symbol is None and bool(re.search(_MARKET_SCAN, scan)) and not re.search(_NOT_MARKET, scan)
+    top_down = bool(re.search(_TOP_DOWN, scan))
+    if top_down:
+        scan = re.sub(_TOP_DOWN, " ", scan)
+    dip_ladder = bool(re.search(_LADDER, scan))
+    if dip_ladder:
+        scan = re.sub(_LADDER, " ", scan)
+    scan_kind = "setups"
+    for pat, kind in ((_GRID_COINS, "grid_coins"), (_SPOT_BUYS, "spot_buys")):
+        if re.search(pat, scan):
+            scan_kind = kind
+            scan = re.sub(pat, " ", scan)
+            break
+    take_profit = bool(re.search(_TAKE_PROFIT, scan))
+    if take_profit:
+        scan = re.sub(_TAKE_PROFIT, " ", scan)
+    sell_check = not take_profit and bool(re.search(_SELL, scan))
+    if sell_check:
+        scan = re.sub(_SELL, " ", scan)
+
+    scan_market = scan_kind != "setups" or (
+        symbol is None and bool(re.search(_MARKET_SCAN, scan)) and not re.search(_NOT_MARKET, scan))
     if scan_market:
         scan = re.sub(_MARKET_SCAN, " ", scan)
     grid_plan = bool(re.search(_GRID, scan))
@@ -489,7 +617,9 @@ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases
                       else "short" if re.search(r"\b(?:short|sell|bear)", scan) else "auto")
         scan = re.sub(_PLAN, " ", scan)
 
-    scan_watchlist = bool(re.search(_SCAN, scan)) and not scan_market
+    # "Which coins have an upgrade coming?" asks about project news, not where the watchlist sits on its chart.
+    project_q = bool(re.search(_QUESTION, p) and re.search(_PROJECT_EVENTS, p)) and not re.search(_CHART_WORDS, p)
+    scan_watchlist = bool(re.search(_SCAN, scan)) and not scan_market and not project_q
     scan_filter = _scan_filter(scan) if scan_watchlist else _scan_filter(p_ind) if scan_market else "any"
     if scan_watchlist:
         scan = re.sub(_SCAN, " ", scan)
@@ -519,6 +649,8 @@ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases
         feats.append("volume_profile")
     if (scan_watchlist and not re.search(r"\b(?:this|the) chart\b|\bhere\b", scan)) or scan_market:
         feats = []  # "which coins are near demand" ranks the scan; it doesn't ask for zones on this chart
+    if take_profit:
+        feats += [f for f in ("support_resistance", "supply_demand") if f not in feats]
     if alert_targets == ["new"] and not feats and not custom and not trade_plan:
         alert_targets = ["all"]
     if alert_targets == ["new"] and trade_plan and not feats:
@@ -533,11 +665,16 @@ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases
         re.search(r"\b(?:chart|timeframe|tf)\b", p)) and not feats and not scan_market)
 
     acting = bool(custom or remove or alert_prices or alert_targets or indicators_on or indicators_off
-                  or scan_watchlist or scan_market or trade_plan or grid_plan or zone_trigger)
+                  or scan_watchlist or scan_market or trade_plan or grid_plan or zone_trigger or top_down or dip_ladder or sell_check)
     navigating = symbol is not None or switch_chart
+    # Not about a chart: the date, macro results, project news, "what is staking?". Answered in plain words.
+    general = not feats and not acting and not navigating and not names_coin and not re.search(_CHART_WORDS, p) and (
+        bool(re.search(_DATE_Q, p))
+        or (bool(re.search(_QUESTION, p)) and bool(re.search(_MACRO, p) or re.search(_PROJECT_NEWS, p)))
+        or bool(re.search(_EXPLAIN, p)))
     # "What does Kimi say?" is read from Kimi's own facts: no detectors, and the chart stays as it is.
     asks_kimi = not feats and bool(re.search(r"\bkimi\b", p))
-    follow_up = previous is not None and not feats and not acting and (
+    follow_up = previous is not None and not feats and not acting and not general and (
         timeframe is not None or symbol is not None
         or re.search(r"\b(same|again|that|it|this|now|instead|redo|refresh)\b", p))
     if follow_up and not (switch_chart and not re.search(r"\b(same|again|redo)\b", p)):
@@ -545,10 +682,10 @@ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases
         windows = [tf for tf in tfs if tf in ("1h", "4h", "1d", "1w")] or list(previous.window_timeframes)
         max_zones = previous.max_zones
         trade_plan = previous.trade_plan if re.search(r"\b(same|again|redo)\b", p) else None
-    elif not feats and not acting and not navigating and not asks_kimi:
+    elif not feats and not acting and not navigating and not asks_kimi and not general:
         feats = ["support_resistance", "window_levels"]
 
-    keep = acting or asks_kimi or bool(re.search(r"\b(also|add|plus|too|as well|keep|on top)\b", p))
+    keep = acting or asks_kimi or general or bool(re.search(r"\b(also|add|plus|too|as well|keep|on top)\b", p))
     if trade_plan and not remove:
         keep = keep and bool(re.search(r"\b(also|add|plus|too|as well|keep|on top)\b", p))
     return AnalysisIntent(features=feats, timeframe=timeframe, window_timeframes=windows, max_zones=max_zones,
@@ -556,7 +693,9 @@ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases
                           keep_existing=keep, alert_prices=alert_prices[:10], alert_targets=alert_targets,
                           symbol=symbol, switch_chart=switch_chart, scan_watchlist=scan_watchlist,
                           scan_filter=scan_filter, scan_market=scan_market, trade_plan=trade_plan, grid_plan=grid_plan,
-                          indicators_on=indicators_on, indicators_off=indicators_off, zone_trigger=zone_trigger)
+                          indicators_on=indicators_on, indicators_off=indicators_off, zone_trigger=zone_trigger,
+                          scan_kind=scan_kind, top_down=top_down, take_profit=take_profit, dip_ladder=dip_ladder,  # type: ignore[arg-type]
+                          general_question=general, sell_check=sell_check)
 
 
 _FEATURE_GROUPS: dict[str, list[str]] = {
@@ -580,6 +719,7 @@ class ChartContext:
     symbol: str = ""
     interval: str = ""
     watchlist: list[str] = field(default_factory=list)
+    spot_only: bool = False
 
 
 @dataclass
@@ -595,11 +735,18 @@ class ToolTurn:
     calls: list[ToolCall]
 
 
+def _today() -> str:
+    dt = datetime.now(timezone.utc)
+    return f"{dt:%A} {dt.day} {dt:%B %Y, %H:%M} UTC"
+
+
 def _context_block(history: list[ChatTurn], overlays: list, previous: AnalysisIntent | None,
                    chart: ChartContext | None = None) -> str:
-    parts = []
+    parts = [f"TODAY: {_today()}"]
     if chart and chart.symbol:
         parts.append(f"CHART: {chart.symbol} {chart.interval}")
+    if chart and chart.spot_only:
+        parts.append("SPOT ONLY: the user buys and sells coins outright; no shorts, futures or leverage.")
     if chart and chart.watchlist:
         parts.append("WATCHLIST: " + ", ".join(chart.watchlist[:40]))
     if history:
@@ -688,14 +835,17 @@ class LLMClient:
         {"role": "user", "text"} | {"role": "assistant", "text", "calls": [ToolCall]} | {"role": "tool", "id", "name",
         "content"}. `force` = "any" to require some tool call, or a tool name to require that one."""
         if self.provider == "anthropic":
-            choice = {"type": "tool", "name": force} if force not in (None, "any") else {"type": "any"} if force else {
-                "type": "auto"}
+            # Current Claude models reject a forced tool_choice ("any" / a named tool), so the choice stays "auto":
+            # a named tool is the only one offered, and the system prompt asks for a call either way.
+            offered = [t for t in tools if t["name"] == force] if force not in (None, "any") else tools
+            if force:
+                system += f"\n\nAnswer by calling {'the ' + force + ' tool' if force != 'any' else 'one of the tools'}."
             r = await self._client.post("https://api.anthropic.com/v1/messages", headers=self._anthropic_headers(),
                                         json={
-                "model": self.model, "max_tokens": 1024, "system": system,
+                "model": self.model, "max_tokens": ANTHROPIC_MAX_TOKENS, "system": system,
                 "tools": [{"name": t["name"], "description": t["description"], "input_schema": t["parameters"]}
-                          for t in tools],
-                "tool_choice": choice, "messages": _to_anthropic(messages),
+                          for t in offered],
+                "tool_choice": {"type": "auto"}, "messages": _to_anthropic(messages),
             })
             r.raise_for_status()
             blocks = r.json()["content"]
@@ -760,7 +910,7 @@ class LLMClient:
             return fallback, "template"
         convo = "\n".join(f"{t.role}: {t.text[:400]}" for t in (history or [])[-4:])
         user = (f"CONVERSATION SO FAR:\n{convo}\n\n" if convo else "") + \
-            f"REQUEST: {prompt}\n\nFACTS: {json.dumps(round_facts(facts), default=float)}"
+            f"TODAY: {_today()}\n\nREQUEST: {prompt}\n\nFACTS: {json.dumps(round_facts(facts), default=float)}"
         try:
             text = (await self._text(NARRATE_SYSTEM, user)).strip()
             if text:
@@ -769,6 +919,76 @@ class LLMClient:
             log.warning("LLM narration failed (%s: %s); using template", type(exc).__name__, exc)
             self._trip(exc)
         return fallback, "template"
+
+    async def answer(self, question: str, context: dict, history: list[ChatTurn] | None = None,
+                     spot_only: bool = False) -> tuple[str, str, list[dict[str, str]]] | None:
+        """A general question → (answer, "provider:model", web sources), with a web search where the provider has
+        one (WEB_SEARCH=off turns it off). None when no model is available or every attempt failed."""
+        if not self._available():
+            return None
+        convo = "\n".join(f"{t.role}: {t.text[:400]}" for t in (history or [])[-4:])
+        user = (f"CONVERSATION SO FAR:\n{convo}\n\n" if convo else "") + \
+            f"CONTEXT: {json.dumps(context, default=str)}\n\nQUESTION: {question}"
+        system = GENERAL_SYSTEM.format(spot=SPOT_LINE if spot_only else "")
+        engine = f"{self.provider}:{self.model}"
+        if self.s.web_search:
+            try:
+                found = await self._web_answer(system, user)
+                if found and found[0].strip():
+                    return found[0].strip(), engine + " + web search", found[1]
+            except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+                log.info("Web search answer failed (%s: %s); answering from the context", type(exc).__name__, exc)
+        try:
+            text = (await self._text(system, user)).strip()
+            return (text, engine, []) if text else None
+        except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+            log.warning("LLM answer failed (%s: %s)", type(exc).__name__, exc)
+            self._trip(exc)
+            return None
+
+    async def _web_answer(self, system: str, user: str) -> tuple[str, list[dict[str, str]]] | None:
+        """Anthropic's server-side web search tool, or OpenAI's Responses API web search; None for other providers."""
+        timeout = httpx.Timeout(WEB_SEARCH_TIMEOUT, connect=5.0)
+        if self.provider == "anthropic":
+            kind = "web_search_20250305" if _BASIC_WEB_SEARCH.match(self.model) else "web_search_20260209"
+            messages: list[dict] = [{"role": "user", "content": user}]
+            text, sources = "", []
+            for _ in range(2):  # a long search can pause the turn; it is resumed once
+                r = await self._client.post("https://api.anthropic.com/v1/messages",
+                                            headers=self._anthropic_headers(), timeout=timeout, json={
+                    "model": self.model, "max_tokens": ANTHROPIC_MAX_TOKENS, "system": system,
+                    "tools": [{"type": kind, "name": "web_search", "max_uses": WEB_SEARCH_MAX_USES}],
+                    "messages": messages,
+                })
+                r.raise_for_status()
+                body = r.json()
+                for b in body.get("content") or []:
+                    if b.get("type") == "text":
+                        text += b.get("text", "")
+                    elif b.get("type") == "web_search_tool_result" and isinstance(b.get("content"), list):
+                        sources += [{"title": x.get("title") or x.get("url", ""), "url": x.get("url", "")}
+                                    for x in b["content"] if x.get("type") == "web_search_result" and x.get("url")]
+                if body.get("stop_reason") != "pause_turn":
+                    break
+                messages.append({"role": "assistant", "content": body["content"]})
+            return text, _dedupe_sources(sources)
+        if self.provider == "openai" and "api.openai.com" in self.s.openai_base_url:
+            r = await self._client.post(f"{self.s.openai_base_url}/responses", headers=self._openai_headers(),
+                                        timeout=timeout, json={
+                "model": self.model, "instructions": system, "input": user, "tools": [{"type": "web_search"}],
+            })
+            r.raise_for_status()
+            text, sources = "", []
+            for item in r.json().get("output") or []:
+                if item.get("type") != "message":
+                    continue
+                for c in item.get("content") or []:
+                    if c.get("type") == "output_text":
+                        text += c.get("text", "")
+                        sources += [{"title": a.get("title") or a.get("url", ""), "url": a.get("url", "")}
+                                    for a in c.get("annotations") or [] if a.get("type") == "url_citation"]
+            return text, _dedupe_sources(sources)
+        return None
 
     # -------------------------------------------------------- providers
     def _ollama_options(self, temperature: float) -> dict:
@@ -801,9 +1021,10 @@ class LLMClient:
         if self.provider == "anthropic":
             r = await self._client.post("https://api.anthropic.com/v1/messages", headers=self._anthropic_headers(),
                                         json={
-                "model": self.model, "max_tokens": 512, "system": system,
+                "model": self.model, "max_tokens": ANTHROPIC_MAX_TOKENS,
+                "system": system + f"\n\nAnswer by calling the {name} tool.",
                 "tools": [{"name": name, "description": "Return the analysis plan.", "input_schema": schema}],
-                "tool_choice": {"type": "tool", "name": name},
+                "tool_choice": {"type": "auto"},
                 "messages": [{"role": "user", "content": user}],
             })
             r.raise_for_status()
@@ -833,7 +1054,7 @@ class LLMClient:
         if self.provider == "anthropic":
             r = await self._client.post("https://api.anthropic.com/v1/messages", headers=self._anthropic_headers(),
                                         json={
-                "model": self.model, "max_tokens": 400, "system": system,
+                "model": self.model, "max_tokens": ANTHROPIC_MAX_TOKENS, "system": system,
                 "messages": [{"role": "user", "content": user}],
             })
             r.raise_for_status()
@@ -845,6 +1066,16 @@ class LLMClient:
 
     def _anthropic_headers(self) -> dict[str, str]:
         return {"x-api-key": self.s.anthropic_api_key, "anthropic-version": "2023-06-01"}
+
+
+def _dedupe_sources(rows: list[dict[str, str]], n: int = 5) -> list[dict[str, str]]:
+    seen: set[str] = set()
+    out = []
+    for r in rows:
+        if r["url"] and r["url"] not in seen:
+            seen.add(r["url"])
+            out.append(r)
+    return out[:n]
 
 
 # ------------------------------------------------- tool-message translation

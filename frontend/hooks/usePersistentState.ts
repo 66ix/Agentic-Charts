@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, type SetStateAction } from "react";
 
-const SYNC_EVENT = "ac-storage";
+export const SYNC_EVENT = "ac-storage";
 
 /** Write a value straight to storage and tell every usePersistentState on that key (e.g. overlays for a chart
  *  the agent is about to switch to). */

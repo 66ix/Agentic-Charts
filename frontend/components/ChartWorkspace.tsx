@@ -5,6 +5,7 @@ import { Bell, Bot, CandlestickChart, Layers as LayersIcon, List, Loader2, Messa
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useAlerts, type FiredAlert, type SignalFired } from "@/hooks/useAlerts";
+import { useHigherTfOverlays } from "@/hooks/useHigherTfOverlays";
 import { useIsMobile } from "@/hooks/useMediaQuery";
 import { readStored, usePersistentState, writeStored } from "@/hooks/usePersistentState";
 import { useUndo } from "@/hooks/useUndo";
@@ -17,10 +18,12 @@ import { createJournalEntry, planToJournalEntry } from "@/lib/journal";
 import { DEFAULT_SIZING, sizePlan, type SizingSettings } from "@/lib/sizing";
 import { OPEN_PANEL_EVENT, type DockPanelProps } from "@/lib/dock";
 import { offerGridPlan } from "@/lib/gridbot";
+import { gridCoinOverlays, SPOT_ONLY_KEY } from "@/lib/spot";
 import {
   composeOverlays,
   drawingsFor,
   isVisible,
+  overlaysKey as overlaysKeyFor,
   pinsKey,
   type LayerVisibility,
   type PanelOverlays,
@@ -34,6 +37,7 @@ import type {
   ChartCell as Cell,
   DataSource,
   Drawing,
+  GridCoin,
   GridMode,
   IndicatorSettings,
   IndicatorState,
@@ -42,6 +46,7 @@ import type {
   MarketSetup,
   Overlay,
   ToolId,
+  TopDownResult,
   TriggerInterval,
 } from "@/lib/types";
 import { CURRENT_WORKSPACE_KEY, saveWorkspace, WORKSPACES_KEY, type SavedWorkspace } from "@/lib/workspaces";
@@ -66,6 +71,16 @@ import Watchlist, { type WatchlistList, type WatchlistSort } from "./Watchlist";
 const VALID_INTERVALS = new Set<string>(TIMEFRAMES.map((t) => t.value));
 const uid = () => Math.random().toString(36).slice(2, 10);
 const MAX_MESSAGES = 40;
+/** How long a top-down walk shows each timeframe before stepping down to the next. */
+const WALK_PAUSE_MS = 2500;
+
+/** Resolves after `ms`, or as soon as `signal` aborts. */
+function pause(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, ms);
+    signal.addEventListener("abort", () => (clearTimeout(t), resolve()), { once: true });
+  });
+}
 const DEFAULT_CELLS: Cell[] = [
   { symbol: DEFAULT_SYMBOL, interval: DEFAULT_INTERVAL },
   { symbol: "BTCUSDT", interval: "4h" },
@@ -210,6 +225,7 @@ export default function ChartWorkspace() {
   const [compareStore, setCompareStore] = usePersistentState<Record<string, CompareLine[]>>("ac:compare", {});
   const [panels, setPanels] = usePersistentState<PanelOverlays>("ac:panel-overlays", {});
   const [quickbar, setQuickbar] = usePersistentState("ac:quickbar", true);
+  const [spotOnly, setSpotOnly] = usePersistentState(SPOT_ONLY_KEY, true);
 
   const kimiParts = useMemo<KimiVisibility>(
     () => ({
@@ -234,7 +250,7 @@ export default function ChartWorkspace() {
 
   // ------------------------------------------------------------------ drawings, AI levels, pins, undo
   const drawingsKey = `ac:drawings:${symbol}`;
-  const overlaysKey = `ac:overlays:${symbol}:${interval}`;
+  const overlaysKey = overlaysKeyFor(symbol, interval);
   const [drawings, setDrawings] = usePersistentState<Drawing[]>(drawingsKey, []);
   const [overlays, , overlaysLoaded] = usePersistentState<Overlay[]>(overlaysKey, []);
   const [pins] = usePersistentState<Record<string, PinnedAnswer>>(pinsKey(symbol, interval), {});
@@ -351,9 +367,10 @@ export default function ChartWorkspace() {
   const armedAlerts = alerts.filter((a) => a.armed).length;
   const alertOverlaysFor = useCallback((s: string) => alertOverlays(alerts, s), [alerts]);
 
+  const htf = useHigherTfOverlays(symbol, interval);
   const composed = useMemo(
-    () => composeOverlays({ symbol, overlays, pins, panels, alerts: alertOverlaysFor(symbol), visibility }),
-    [symbol, overlays, pins, panels, alertOverlaysFor, visibility],
+    () => composeOverlays({ symbol, overlays, pins, panels, alerts: alertOverlaysFor(symbol), visibility, htf }),
+    [symbol, overlays, pins, panels, alertOverlaysFor, visibility, htf],
   );
   const layerCounts = useMemo(() => {
     const kimi = indicators.kimi && !isCustom(symbol) ? 1 : 0;
@@ -380,6 +397,9 @@ export default function ChartWorkspace() {
     [setStoredMessages],
   );
   const [busy, setBusy] = useState(false);
+  /** The step a top-down walk is showing ("D1: 3 levels (1/4)"), while it plays. */
+  const [walkNote, setWalkNote] = useState<string | null>(null);
+  const walkingRef = useRef(false);
   const [quickAnswer, setQuickAnswer] = useState<AgentMessage | null>(null);
   const [searchMode, setSearchMode] = useState<SearchMode | null>(null);
   const [feed, setFeed] = useState<FeedInfo>({ price: NaN, open24: null, source: "connecting" });
@@ -422,15 +442,43 @@ export default function ChartWorkspace() {
   const deleteChat = useCallback((id: string) => setChats((list) => list.filter((c) => c.id !== id)), [setChats]);
 
   // Latest conversation state for the request, without re-creating runAnalysis on every message.
-  const convoRef = useRef({ messages, overlays, lastIntent, watchlist });
-  convoRef.current = { messages, overlays, lastIntent, watchlist };
+  const convoRef = useRef({ messages, overlays, lastIntent, watchlist, spotOnly });
+  convoRef.current = { messages, overlays, lastIntent, watchlist, spotOnly };
 
-  // Cancel in-flight analysis when the market changes.
+  // Cancel in-flight analysis when the market changes (unless a top-down walk is the one changing it).
   useEffect(() => {
+    if (walkingRef.current) return;
     analysisCtrl.current?.abort();
     setSelectedId(null);
     setBusy(false);
   }, [symbol, interval]);
+
+  /**
+   * Plays a top-down walk: each timeframe with valid levels in turn, highest first, drawing its levels and moving
+   * the chart there, then pausing so they can be seen. Higher-timeframe levels stay on the lower charts
+   * (useHigherTfOverlays). Stops early when the answer is stopped or a new question is asked.
+   */
+  const playWalk = useCallback(
+    async (walk: TopDownResult, signal: AbortSignal) => {
+      const drawn = walk.steps.filter((s) => s.status === "drawn");
+      if (!drawn.length) return;
+      walkingRef.current = true;
+      try {
+        for (const [i, step] of drawn.entries()) {
+          if (signal.aborted) break;
+          setWalkNote(`${step.label}: ${step.zones.length} level${step.zones.length === 1 ? "" : "s"} (${i + 1}/${drawn.length})`);
+          changeOverlays(overlaysKeyFor(walk.symbol, step.interval), step.overlays, `top-down ${step.label} levels`);
+          setCell({ symbol: walk.symbol, interval: step.interval });
+          if (i < drawn.length - 1) await pause(WALK_PAUSE_MS, signal);
+        }
+      } finally {
+        // Let the last timeframe switch render before market changes cancel analysis again.
+        setTimeout(() => (walkingRef.current = false), 500);
+        setWalkNote(null);
+      }
+    },
+    [changeOverlays, setCell],
+  );
 
   const runAnalysis = useCallback(
     async (prompt: string, opts: { silent?: boolean } = {}) => {
@@ -456,6 +504,7 @@ export default function ChartWorkspace() {
             overlays: opts.silent ? [] : convo.overlays,
             previous_intent: opts.silent ? null : convo.lastIntent,
             watchlist: convo.watchlist,
+            spot_only: convo.spotOnly,
           },
           ctrl.signal,
         );
@@ -478,6 +527,11 @@ export default function ChartWorkspace() {
           plan: res.plan ?? undefined,
           scan: res.scan?.length ? res.scan : undefined,
           setups: res.setups?.length ? res.setups : undefined,
+          gridCoins: res.grid_coins?.length ? res.grid_coins : undefined,
+          walk: res.top_down ?? undefined,
+          ladder: res.ladder ?? undefined,
+          sources: res.sources?.length ? res.sources : undefined,
+          sells: res.sells?.length ? res.sells : undefined,
           steps: res.steps?.length ? res.steps : undefined,
           symbol: target.symbol,
           interval: target.interval,
@@ -491,6 +545,7 @@ export default function ChartWorkspace() {
           offerGridPlan(res.grid_plan);
           openTabRef.current("gridbots");
         }
+        if (res.top_down && !opts.silent) await playWalk(res.top_down, ctrl.signal);
       } catch (err) {
         if ((err as Error).name === "AbortError") return;
         const msg: AgentMessage = { id: uid(), role: "error", text: (err as Error).message };
@@ -500,7 +555,7 @@ export default function ChartWorkspace() {
         if (analysisCtrl.current === ctrl) setBusy(false);
       }
     },
-    [symbol, interval, activeChart, setMessages, changeOverlays, setLastIntent, addAlerts, addTrigger, setCell, setIndicators],
+    [symbol, interval, activeChart, setMessages, changeOverlays, setLastIntent, addAlerts, addTrigger, setCell, setIndicators, playWalk],
   );
 
   // Auto-detect levels on load, unless this chart already has saved AI overlays.
@@ -730,6 +785,15 @@ export default function ChartWorkspace() {
     },
     [pickSymbol, onChartOverlays, mobile],
   );
+  /** A grid coin in an agent answer: its chart with the range drawn. */
+  const openGridCoin = useCallback(
+    (c: GridCoin) => {
+      pickSymbol(c.symbol, c.interval);
+      onChartOverlays("scanner", c.symbol, gridCoinOverlays(c));
+      if (mobile) setMobileTab(null);
+    },
+    [pickSymbol, onChartOverlays, mobile],
+  );
   /** "Alert on 5m confirmation" on a plan card: a trigger alert on the plan's entry zone. */
   const planTrigger = useCallback(
     async (m: AgentMessage, tf: TriggerInterval) => {
@@ -771,6 +835,10 @@ export default function ChartWorkspace() {
           onDeleteChat={deleteChat}
           onPickSymbol={setSymbol}
           onOpenSetup={openSetup}
+          onOpenGridCoin={openGridCoin}
+          spotOnly={spotOnly}
+          onSpotOnly={setSpotOnly}
+          walkNote={walkNote}
           onTogglePin={togglePin}
           onLogTrade={logTrade}
           onPlanTrigger={planTrigger}

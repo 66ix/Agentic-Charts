@@ -55,7 +55,8 @@ def test_anthropic_tool_loop_looks_then_draws():
             return httpx.Response(200, json={"content": [{"type": "text", "text": "Daily agrees."}]})
         n = sum(1 for b in seen if "tools" in b)
         if n == 1:
-            assert body["tool_choice"] == {"type": "any"}
+            # Current Claude models reject a forced tool_choice: "auto", with the prompt asking for a tool call.
+            assert body["tool_choice"] == {"type": "auto"} and "calling one of the tools" in body["system"]
             return httpx.Response(200, json={"content": [
                 {"type": "tool_use", "id": "t1", "name": "look_at_chart",
                  "input": {"symbol": "INJUSDT", "timeframe": "1d", "features": ["support_resistance"]}}]})

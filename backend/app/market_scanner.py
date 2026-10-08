@@ -12,6 +12,15 @@ chart agent's own detectors and trade-plan builder (ta_agent.py, trade_plan.py),
 Only plans entered at a zone count as setups (not market entries beyond a swing), and T1 must be at least MIN_RR.
 Track records are backtests, so they are only run for the best TRACK_TOP setups per side, then those are re-ranked.
 
+Two more lists come out of the same scan, for spot traders (buying coins outright, no shorts or leverage):
+
+* Spot buys (`spot_rank`): the long setups whose entry is a support or demand zone that overlaps a zone on a higher
+  timeframe, or where at least half the timeframes trend up, ranked with a bonus for that confluence. Each keeps its
+  buy zone (the plan's zone), targets and invalidation (the plan's stop).
+* Grid coins (`grid_candidate`): coins that have been ranging on the scan's timeframe, which is what a Spot Grid bot
+  needs: most closes inside a 6-60% band, price crossing the middle of it often, little net drift, and price not
+  sitting at an edge.
+
 Binance limits: one 24h ticker call for the universe (cached), then candles for the coin's timeframe and its two
 higher ones, at most MARKET_SCAN_CONCURRENCY coins at a time, through MarketData's candle cache and SQLite store;
 only one scan runs at a time. Without Binance the scan runs on the fallback coin list with synthetic demo candles
@@ -28,6 +37,7 @@ import re
 import time
 from typing import TYPE_CHECKING, Literal, Optional
 
+import numpy as np
 import pandas as pd
 from pydantic import BaseModel, Field
 
@@ -36,7 +46,7 @@ from .config import Settings, get_settings
 from .market_data import FALLBACK_SYMBOLS, INTERVAL_SECONDS, MarketData, candles_to_df
 from .pricefmt import _fmt
 from .scanner import change_24h
-from .schemas import INTERVALS, AnalysisIntent, Interval, MarketSetup, SetupAgreement, TrackRecord
+from .schemas import INTERVALS, AnalysisIntent, GridCoin, Interval, MarketSetup, SetupAgreement, TrackRecord
 from .ta_agent import analyze, atr, ema, higher_timeframes
 from .track_record import TrackRecordService
 from .trade_plan import build_plan, plan_overlays
@@ -56,6 +66,14 @@ UNIVERSE_TTL = 600.0
 CHECK_SECONDS = 30.0
 MIN_EVERY_MINUTES = 5.0
 WEIGHTS = {"rr": 0.3, "near": 0.3, "agree": 0.2, "track": 0.2}
+SPOT_ZONES = ("support", "demand")
+SPOT_HTF_BONUS = 0.1
+GRID_BARS = 120          # window the range is measured on
+GRID_MIN_WIDTH, GRID_MAX_WIDTH = 6.0, 60.0
+GRID_MIN_INSIDE = 0.85   # closes inside the range
+GRID_MIN_CROSSINGS = 4
+GRID_MAX_EFFICIENCY = 0.3
+GRID_EDGE_PCT = 10.0     # price within this % of an edge is about to leave the range
 
 # Base assets that are stablecoins or fiat: their USDT pairs barely move.
 STABLE_BASES = frozenset({
@@ -80,11 +98,16 @@ class MarketScanResult(BaseModel):
     data_source: str = "binance"
     longs: list[MarketSetup] = Field(default_factory=list)
     shorts: list[MarketSetup] = Field(default_factory=list)
+    spot_buys: list[MarketSetup] = Field(default_factory=list, description="Longs at higher-timeframe demand")
+    grid_coins: list[GridCoin] = Field(default_factory=list, description="Coins ranging well enough for a grid bot")
     notes: list[str] = Field(default_factory=list)
 
     def best(self, n: int, direction: Optional[str] = None) -> list[MarketSetup]:
         rows = (self.longs if direction != "short" else []) + (self.shorts if direction != "long" else [])
         return sorted(rows, key=lambda r: -r.score)[:n]
+
+    def best_spot(self, n: int) -> list[MarketSetup]:
+        return sorted(self.spot_buys, key=lambda r: -(r.spot_score or 0))[:n]
 
 
 # ---------------------------------------------------------------- universe --
@@ -199,6 +222,72 @@ def coin_setups(symbol: str, interval: str, df: pd.DataFrame, frames: dict[str, 
     return out
 
 
+def spot_score(s: MarketSetup) -> Optional[float]:
+    """Rank among spot buys, or None when the setup isn't one: a long at a support or demand zone with
+    higher-timeframe confluence or at least half the timeframes trending up."""
+    if s.direction != "long" or s.plan.zone_kind not in SPOT_ZONES:
+        return None
+    htf = bool(s.plan.zone_htf)
+    agree = s.agreement.aligned / s.agreement.total if s.agreement.total else 0.5
+    if not htf and agree < 0.5:
+        return None
+    return round(min(1.0, s.score + (SPOT_HTF_BONUS if htf else 0.0)), 4)
+
+
+def spot_rank(setups: list[MarketSetup], keep: int = KEEP) -> list[MarketSetup]:
+    """The spot buys among `setups`, best first, with `spot_score` set."""
+    out = []
+    for s in setups:
+        s.spot_score = spot_score(s)
+        if s.spot_score is not None:
+            out.append(s)
+    return sorted(out, key=lambda s: -(s.spot_score or 0))[:keep]
+
+
+def grid_candidate(symbol: str, interval: str, df: pd.DataFrame, source: str, change_pct: Optional[float] = None,
+                   quote_volume: Optional[float] = None) -> Optional[GridCoin]:
+    """`symbol` as a grid coin when its last GRID_BARS candles ranged well enough for a Spot Grid bot, else None."""
+    w = df.tail(GRID_BARS).reset_index(drop=True)
+    if len(w) < MIN_CANDLES:
+        return None
+    lo, hi = float(w["low"].quantile(0.05)), float(w["high"].quantile(0.95))
+    last = float(w["close"].iloc[-1])
+    if lo <= 0 or hi <= lo or last <= 0:
+        return None
+    width = (hi / lo - 1) * 100
+    closes = w["close"].to_numpy(dtype=float)
+    inside = float(((closes >= lo) & (closes <= hi)).mean())
+    side = np.sign(closes - (lo + hi) / 2)
+    side = side[side != 0]
+    crossings = int((side[1:] != side[:-1]).sum()) if len(side) > 1 else 0
+    moves = float(np.abs(np.diff(closes)).sum())
+    eff = abs(closes[-1] - closes[0]) / moves if moves else 1.0
+    pos = (last - lo) / (hi - lo) * 100
+    if not (GRID_MIN_WIDTH <= width <= GRID_MAX_WIDTH and inside >= GRID_MIN_INSIDE and crossings >= GRID_MIN_CROSSINGS
+            and eff <= GRID_MAX_EFFICIENCY and GRID_EDGE_PCT <= pos <= 100 - GRID_EDGE_PCT):
+        return None
+    days = len(w) * INTERVAL_SECONDS.get(interval, 3600) / 86400
+    a = float(atr(w).iloc[-1])
+    score = (0.4 * min(crossings / 12, 1.0) + 0.3 * (1 - eff / GRID_MAX_EFFICIENCY) + 0.2 * inside
+             + 0.1 * (1 - abs(pos - 50) / 50))
+    return GridCoin(
+        symbol=symbol, interval=interval, last_price=last, low=lo, high=hi, width_pct=round(width, 2),  # type: ignore[arg-type]
+        crossings=crossings, efficiency=round(eff, 3), in_range_pct=round(inside * 100, 1),
+        position_pct=round(pos, 1), atr_pct=round(a / last * 100, 2), days=round(days, 1), score=round(score, 4),
+        change_pct=change_pct if change_pct is not None else change_24h(df), quote_volume=quote_volume,
+        note=f"Ranged {_fmt(lo)}–{_fmt(hi)} ({width:.1f}% wide) for {days:.0f} days, crossing the middle "
+             f"{crossings} times; price is {pos:.0f}% up the range.",
+        data_source=source)
+
+
+def coin_scan(symbol: str, interval: str, df: pd.DataFrame, frames: dict[str, pd.DataFrame], source: str,
+              change_pct: Optional[float] = None,
+              quote_volume: Optional[float] = None) -> tuple[list[MarketSetup], Optional[GridCoin]]:
+    """One coin of a market scan: its setups and, if it qualifies, its grid-coin row. CPU-bound."""
+    return (coin_setups(symbol, interval, df, frames, source, change_pct, quote_volume),
+            grid_candidate(symbol, interval, df, source, change_pct, quote_volume))
+
+
 # ----------------------------------------------------------------- service --
 
 
@@ -290,7 +379,7 @@ class MarketScanner:
             sem = asyncio.Semaphore(self.s.market_scan_concurrency)
             sources: set[str] = set()
 
-            async def one(c: dict) -> Optional[list[MarketSetup]]:
+            async def one(c: dict) -> Optional[tuple[list[MarketSetup], Optional[GridCoin]]]:
                 sym = c["symbol"]
                 async with sem:
                     try:
@@ -306,19 +395,23 @@ class MarketScanner:
                           if not isinstance(r, BaseException) and len(r[0]) >= MIN_CANDLES and r[1] == source}
                 sources.add(source)
                 try:
-                    return await asyncio.to_thread(coin_setups, sym, interval, candles_to_df(candles), frames, source,
+                    return await asyncio.to_thread(coin_scan, sym, interval, candles_to_df(candles), frames, source,
                                                    c.get("change_pct"), c.get("quote_volume"))
                 except Exception as exc:  # a detector choking on odd data must not sink the scan
                     log.info("Market scan: %s failed: %s", sym, exc)
                     return None
 
             found = [r for r in await asyncio.gather(*(one(c) for c in coins)) if r is not None]
-            setups = [s for rows in found for s in rows]
+            setups = [s for rows, _ in found for s in rows]
+            grid = sorted((g for _, g in found if g is not None), key=lambda g: -g.score)[:KEEP]
             longs = sorted((s for s in setups if s.direction == "long"), key=lambda s: -s.score)[:KEEP]
             shorts = sorted((s for s in setups if s.direction == "short"), key=lambda s: -s.score)[:KEEP]
-            await self._add_track_records(longs[:TRACK_TOP] + shorts[:TRACK_TOP])
+            spot = spot_rank(setups)
+            tracked = {id(s): s for s in longs[:TRACK_TOP] + shorts[:TRACK_TOP] + spot[:TRACK_TOP]}
+            await self._add_track_records(list(tracked.values()))
             longs.sort(key=lambda s: -s.score)
             shorts.sort(key=lambda s: -s.score)
+            spot = spot_rank(spot)
 
             notes: list[str] = []
             data_source = "synthetic" if sources == {"synthetic"} else "mixed" if len(sources) > 1 else (
@@ -334,11 +427,11 @@ class MarketScanner:
                 interval=interval, generated_at=int(time.time() * 1000),  # type: ignore[arg-type]
                 seconds=round(time.perf_counter() - started, 1), trigger=trigger,  # type: ignore[arg-type]
                 universe=len(coins), scanned=len(found), universe_source=universe_source,  # type: ignore[arg-type]
-                data_source=data_source, longs=longs, shorts=shorts, notes=notes)
+                data_source=data_source, longs=longs, shorts=shorts, spot_buys=spot, grid_coins=grid, notes=notes)
             self._results[interval] = result
             self._save()
-            log.info("Market scan %s: %d coins, %d longs, %d shorts in %.1fs", interval, len(found), len(longs),
-                     len(shorts), result.seconds)
+            log.info("Market scan %s: %d coins, %d longs, %d shorts, %d spot buys, %d grid coins in %.1fs", interval,
+                     len(found), len(longs), len(shorts), len(spot), len(grid), result.seconds)
             return result
 
     async def _add_track_records(self, rows: list[MarketSetup]) -> None:

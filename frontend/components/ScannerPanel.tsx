@@ -1,7 +1,7 @@
 "use client";
 
 import clsx from "clsx";
-import { Loader2, Play, Radar, Timer, X } from "lucide-react";
+import { Grid3x3, Loader2, Play, Radar, Timer, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { usePersistentState } from "@/hooks/usePersistentState";
@@ -17,24 +17,67 @@ import {
   trackTone,
   type MarketScanStatus,
 } from "@/lib/scanner";
-import { TIMEFRAMES, type Interval, type MarketScanResult, type MarketSetup } from "@/lib/types";
+import { gridCoinOverlays, planGridFor, SPOT_ONLY_KEY } from "@/lib/spot";
+import { TIMEFRAMES, type GridCoin, type Interval, type MarketScanResult, type MarketSetup } from "@/lib/types";
 
 import TrackRecordLine from "./TrackRecordLine";
 
-type Side = "all" | "long" | "short";
+type Side = "spot" | "all" | "long" | "short" | "grid";
 
 interface Prefs {
   interval: Interval;
   side: Side;
 }
 
-const DEFAULT_PREFS: Prefs = { interval: "4h", side: "all" };
+const DEFAULT_PREFS: Prefs = { interval: "4h", side: "spot" };
 const POLL_MS = 30_000;
-const SIDES: { v: Side; label: string }[] = [
-  { v: "all", label: "Both" },
-  { v: "long", label: "Longs" },
-  { v: "short", label: "Shorts" },
+const SIDES: { v: Side; label: string; title: string; futures?: boolean }[] = [
+  { v: "spot", label: "Spot buys", title: "Longs at a support or demand zone backed by a higher timeframe: coins to buy outright" },
+  { v: "all", label: "Both", title: "Long and short setups", futures: true },
+  { v: "long", label: "Longs", title: "Every long setup" },
+  { v: "short", label: "Shorts", title: "Short setups (futures)", futures: true },
+  { v: "grid", label: "Grid coins", title: "Coins ranging cleanly enough for a Spot Grid bot" },
 ];
+
+/** Grid coins as two-line rows: coin, range width, crossings, days; the range and a note below. */
+export function GridCoinList({ rows, selected, onPick }: { rows: GridCoin[]; selected?: string | null; onPick(c: GridCoin): void }) {
+  return (
+    <div className="overflow-hidden rounded border border-line">
+      <div className="flex items-center gap-2 border-b border-line bg-panel2/60 px-2 py-0.5 text-[10px] uppercase tracking-wide text-mute">
+        <span className="min-w-0 flex-1">Coin</span>
+        <span className="w-12 text-right" title="Range width, % of its bottom">Width</span>
+        <span className="w-10 text-right" title="Times the close crossed the middle of the range">Cross</span>
+        <span className="w-12 text-right" title="Where price sits in the range: 0% = bottom, 100% = top">In range</span>
+      </div>
+      {rows.map((c) => (
+        <button
+          key={c.symbol}
+          type="button"
+          onClick={() => onPick(c)}
+          title={`${c.note}\nClick to open the chart with the range drawn`}
+          className={clsx(
+            "block w-full border-b border-line/60 px-2 py-1 text-left text-[11px] last:border-b-0 hover:bg-panel2",
+            selected === c.symbol && "bg-panel2",
+          )}
+        >
+          <div className="flex items-center gap-2">
+            <span className="flex min-w-0 flex-1 items-center gap-1.5">
+              <Grid3x3 className="h-3 w-3 shrink-0 text-amber-400" />
+              <span className="truncate font-medium text-ink">{displaySymbol(c.symbol)}</span>
+            </span>
+            <span className="w-12 text-right font-mono text-ink">{c.width_pct.toFixed(1)}%</span>
+            <span className="w-10 text-right font-mono text-mute">{c.crossings}</span>
+            <span className="w-12 text-right font-mono text-mute">{c.position_pct.toFixed(0)}%</span>
+          </div>
+          <div className="mt-0.5 flex gap-2 pl-[1.1rem] font-mono text-[10px] text-mute">
+            <span>{formatPrice(c.low)} – {formatPrice(c.high)}</span>
+            <span>· {c.days.toFixed(0)}d</span>
+          </div>
+        </button>
+      ))}
+    </div>
+  );
+}
 
 function ago(ms: number, now: number): string {
   const m = Math.max(0, Math.round((now - ms) / 60000));
@@ -104,7 +147,11 @@ export function SetupList({ rows, selected, onPick }: { rows: MarketSetup[]; sel
  */
 export default function ScannerPanel(p: DockPanelProps) {
   const [prefs, setPrefs] = usePersistentState<Prefs>("ac:scanner", DEFAULT_PREFS);
-  const pr = { ...DEFAULT_PREFS, ...prefs };
+  const [spotOnly] = usePersistentState(SPOT_ONLY_KEY, true);
+  const stored = { ...DEFAULT_PREFS, ...prefs };
+  // Spot mode has no use for shorts: "Both" and "Shorts" fall back to the spot buys.
+  const pr = spotOnly && (stored.side === "all" || stored.side === "short") ? { ...stored, side: "spot" as Side } : stored;
+  const [gridBusy, setGridBusy] = useState<string | null>(null);
   const [scanned, setScanned] = useState<MarketScanResult | null>(null);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -163,10 +210,36 @@ export default function ScannerPanel(p: DockPanelProps) {
     setSelected(`${s.symbol}:${s.direction}`);
   };
 
+  const pickGrid = (c: GridCoin) => {
+    if (drawnFor && drawnFor !== c.symbol) onChartOverlays("scanner", drawnFor, []);
+    p.onPickSymbol(c.symbol, c.interval);
+    onChartOverlays("scanner", c.symbol, gridCoinOverlays(c));
+    setDrawnFor(c.symbol);
+    setSelected(c.symbol);
+  };
+
+  const planGrid = async (symbol: string) => {
+    setGridBusy(symbol);
+    setError(null);
+    try {
+      await planGridFor(symbol);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setGridBusy(null);
+    }
+  };
+
   const rows = !result
     ? []
-    : [...(pr.side !== "short" ? result.longs : []), ...(pr.side !== "long" ? result.shorts : [])].sort((a, b) => b.score - a.score);
+    : pr.side === "spot"
+      ? [...(result.spot_buys ?? [])].sort((a, b) => (b.spot_score ?? 0) - (a.spot_score ?? 0))
+      : pr.side === "grid"
+        ? []
+        : [...(pr.side !== "short" ? result.longs : []), ...(pr.side !== "long" ? result.shorts : [])].sort((a, b) => b.score - a.score);
+  const gridRows = result && pr.side === "grid" ? (result.grid_coins ?? []) : [];
   const picked = rows.find((s) => `${s.symbol}:${s.direction}` === selected);
+  const pickedGrid = gridRows.find((c) => c.symbol === selected);
   const every = status?.schedule[pr.interval];
   const next = status?.next_run[pr.interval];
   const field = "h-7 rounded border border-line bg-base px-2 text-[11px] text-ink outline-none focus:border-accent";
@@ -185,8 +258,8 @@ export default function ScannerPanel(p: DockPanelProps) {
           ))}
         </select>
         <div className="flex overflow-hidden rounded border border-line">
-          {SIDES.map((s) => (
-            <button key={s.v} type="button" onClick={() => setPrefs({ ...pr, side: s.v })}
+          {SIDES.filter((s) => !(spotOnly && s.futures)).map((s) => (
+            <button key={s.v} type="button" title={s.title} onClick={() => setPrefs({ ...pr, side: s.v })}
               className={clsx("h-7 px-2 text-[11px]", pr.side === s.v ? "bg-accent/15 text-accent" : "text-mute hover:text-ink")}>
               {s.label}
             </button>
@@ -230,7 +303,7 @@ export default function ScannerPanel(p: DockPanelProps) {
         ))}
         {!result && !busy && !polled.loading && (
           <p className="py-2 text-[12px] leading-relaxed text-mute">
-            Press Scan to rank the best long and short setups across the top {status?.top ?? 100} coins by 24h volume:
+            Press Scan to rank the best {spotOnly ? "spot buys, long setups and grid coins" : "long and short setups"} across the top {status?.top ?? 100} coins by 24h volume:
             entries at detected zones, ranked by reward-to-risk, how close the entry is, how many timeframes agree and
             how the same setup did on that coin in the backtest. The first scan downloads a lot of candles and can take
             a minute.
@@ -241,8 +314,33 @@ export default function ScannerPanel(p: DockPanelProps) {
             <Loader2 className="h-4 w-4 animate-spin" /> Scanning the market…
           </div>
         )}
-        {result && rows.length === 0 && <p className="text-[12px] text-mute">No setups with at least 1R to T1 right now.</p>}
+        {result && pr.side === "spot" && !result.spot_buys && (
+          <p className="text-[12px] text-mute">This scan is from an older version; press Scan for spot buys and grid coins.</p>
+        )}
+        {result && pr.side === "grid" && gridRows.length === 0 && (
+          <p className="text-[12px] text-mute">No coin has been ranging cleanly enough for a grid bot on {result.interval}.</p>
+        )}
+        {result && pr.side !== "grid" && rows.length === 0 && (pr.side !== "spot" || result.spot_buys) && (
+          <p className="text-[12px] text-mute">
+            {pr.side === "spot" ? "No longs at higher-timeframe demand right now." : "No setups with at least 1R to T1 right now."}
+          </p>
+        )}
         {rows.length > 0 && <SetupList rows={rows} selected={selected} onPick={pick} />}
+        {gridRows.length > 0 && <GridCoinList rows={gridRows} selected={selected} onPick={pickGrid} />}
+        {pickedGrid && (
+          <div className="rounded border border-line bg-base/60 p-2 text-[11px]">
+            <p className="text-mute">{pickedGrid.note}</p>
+            <button
+              type="button"
+              disabled={gridBusy === pickedGrid.symbol}
+              onClick={() => void planGrid(pickedGrid.symbol)}
+              className="mt-1.5 inline-flex h-6 items-center gap-1 rounded border border-line px-1.5 text-[11px] text-ink hover:border-accent disabled:opacity-60"
+            >
+              {gridBusy === pickedGrid.symbol ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Grid3x3 className="h-3.5 w-3.5" />}
+              Plan a grid bot and test it on 90 days
+            </button>
+          </div>
+        )}
         {picked && (
           <div className="rounded border border-line bg-base/60 p-2 text-[11px]">
             <div className="text-mute">
