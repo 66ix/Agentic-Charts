@@ -68,6 +68,10 @@ class MarketDataError(RuntimeError):
     pass
 
 
+class BinanceRejected(MarketDataError):
+    """Binance answered 400 (e.g. an unknown or delisted symbol): Binance is up, only this request is bad."""
+
+
 @dataclass
 class _Cached:
     expires: float
@@ -148,7 +152,8 @@ class MarketData:
                 if self.settings.data_source == "binance":
                     raise MarketDataError(f"Binance klines failed: {exc}") from exc
                 log.warning("Binance unavailable (%s); serving synthetic data", exc)
-                self.mark_binance_down()
+                if not isinstance(exc, BinanceRejected):  # one bad symbol must not demote every chart
+                    self.mark_binance_down()
         if candles is None:
             candles = synthetic_klines(symbol, interval, limit)
 
@@ -181,7 +186,8 @@ class MarketData:
                 if self.settings.data_source == "binance":
                     raise MarketDataError(f"Binance klines failed: {exc}") from exc
                 log.warning("Binance unavailable for a range (%s); serving synthetic data", exc)
-                self.mark_binance_down()
+                if not isinstance(exc, BinanceRejected):  # one bad symbol must not demote every chart
+                    self.mark_binance_down()
         candles = synthetic_klines(symbol, interval, (now - start) // step + 1, end=now)
         df = candles_to_df(candles)
         return df[(df["time"] >= start) & (df["time"] <= end)].reset_index(drop=True), "synthetic"
@@ -327,7 +333,7 @@ class MarketData:
     async def _kline_rows(self, params: dict[str, str | int]) -> list[list]:
         resp = await self._binance_get("/api/v3/klines", params=params)
         if resp.status_code == 400:
-            raise MarketDataError(f"Binance rejected request: {resp.text[:200]}")
+            raise BinanceRejected(f"Binance rejected request: {resp.text[:200]}")
         resp.raise_for_status()
         return resp.json()
 
