@@ -37,6 +37,7 @@ import { imageFrom } from "@/lib/screenshot";
 import { ladderTestLine } from "@/lib/spot";
 import {
   TIMEFRAMES,
+  type AnswerDetail,
   type AnswerSource,
   type GridCoin,
   type Interval,
@@ -87,6 +88,8 @@ export interface AgentMessage {
   interval?: Interval;
   prompt?: string;
   lastPrice?: number;
+  /** When it was answered (ms); older messages lack it. */
+  at?: number;
 }
 
 export interface AgentPanelHandle {
@@ -167,6 +170,33 @@ function factLines(obj: unknown, prefix = ""): [string, string][] {
   }
   if (obj && typeof obj === "object") return Object.entries(obj).flatMap(([k, v]) => factLines(v, prefix ? `${prefix} › ${name(k)}` : name(k)));
   return [[prefix, fmt(obj)]];
+}
+
+const DETAIL_LABEL: Record<AnswerDetail, string> = { short: "Short answers", normal: "Normal answers", detailed: "Detailed answers" };
+const DETAIL_NEXT: Record<AnswerDetail, AnswerDetail> = { short: "normal", normal: "detailed", detailed: "short" };
+const TREND_TONE: Record<string, string> = { up: "border-up/40 text-up", down: "border-down/40 text-down" };
+
+/** "H4 up · D1 up · W1 mixed": whether the timeframes agree, at a glance. */
+function TimeframeBadges({ facts }: { facts: Record<string, unknown> }) {
+  const tf = facts.timeframe as string | undefined;
+  const trend = facts.trend as string | undefined;
+  const htf = (facts.higher_timeframes ?? {}) as Record<string, { trend?: string }>;
+  const rows: [string, string][] = [
+    ...(tf && trend ? [[tf, trend === "range" ? "mixed" : trend] as [string, string]] : []),
+    ...Object.entries(htf).flatMap(([k, v]): [string, string][] => (v.trend ? [[k, v.trend]] : [])),
+  ];
+  if (rows.length < 2) return null;
+  const agree = rows.every(([, t]) => t === rows[0][1]) && rows[0][1] !== "mixed";
+  return (
+    <div className="mt-1.5 flex flex-wrap items-center gap-1" title="Trend on this timeframe and the next two up (EMAs and price)">
+      {rows.map(([k, t]) => (
+        <span key={k} className={clsx("rounded border px-1.5 py-0.5 text-[10px]", TREND_TONE[t] ?? "border-line text-mute")}>
+          {k} {t}
+        </span>
+      ))}
+      {agree && <span className="text-[10px] text-mute">all agree</span>}
+    </div>
+  );
 }
 
 /** Copies an answer's text, for Discord or the journal. */
@@ -607,6 +637,9 @@ interface Props {
   /** The chart the agent is looking at, for the chat box's hint. */
   symbol?: string;
   interval?: Interval;
+  /** How long answers are. */
+  detail?: AnswerDetail;
+  onDetail?(d: AnswerDetail): void;
 }
 
 /** The chart agent as a dock tab: the conversation fills the height, the prompt sits at the bottom. */
@@ -618,6 +651,8 @@ export default function AgentPanel(p: Props) {
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
   const lastAgent = [...p.messages].reverse().find((m) => m.role === "agent");
+  const lastPrompt = [...p.messages].reverse().find((m) => m.role === "user")?.text;
+  const [myShortcuts, setMyShortcuts] = usePersistentState<string[]>("ac:my-shortcuts", []);
 
   useImperativeHandle(p.handleRef, () => ({ focus: () => inputRef.current?.focus() }));
 
@@ -646,6 +681,16 @@ export default function AgentPanel(p: Props) {
         >
           {p.spotOnly ? "Spot only" : "Spot + futures"}
         </button>
+        {p.detail && p.onDetail && (
+          <button
+            type="button"
+            onClick={() => p.onDetail!(DETAIL_NEXT[p.detail!])}
+            className="btn-ghost h-6 shrink-0 gap-1 border border-line px-1.5 text-[11px]"
+            title="Answer length: short (one or two sentences), normal, or detailed (explains the reasoning). Click to change."
+          >
+            {DETAIL_LABEL[p.detail]}
+          </button>
+        )}
         {p.overlayCount > 0 && (
           <button type="button" onClick={p.onClearOverlays} className="btn-ghost h-6 shrink-0 gap-1 px-1.5 text-[11px]" title="Remove all the agent's drawings from this chart (Ctrl+Z brings them back). To remove one level, use its bin in the Layers tab (L).">
             <Eraser className="h-3.5 w-3.5" /> Clear {p.overlayCount}
@@ -746,6 +791,7 @@ export default function AgentPanel(p: Props) {
                     {m.sells && <SellList rows={m.sells} onPick={p.onPickSymbol} />}
                     {m.sellWatch && p.onSellWatch && <SellWatchButton watch={m.sellWatch} onWatch={p.onSellWatch} />}
                     {m.sources && <Sources rows={m.sources} />}
+                    {m.facts && <TimeframeBadges facts={m.facts} />}
                     {m.facts && <NumbersUsed facts={m.facts} />}
                     {m.overlays && m.overlays.length > 0 && (
                       <div className="mt-1.5 flex flex-wrap gap-1">
@@ -794,6 +840,33 @@ export default function AgentPanel(p: Props) {
           </div>
 
           <div className="flex shrink-0 gap-1.5 overflow-x-auto px-3 pt-2">
+            {myShortcuts.map((s) => (
+              <span key={`my-${s}`} className="group/sc inline-flex shrink-0 items-center rounded-full border border-yellow-400/40 bg-yellow-400/10 text-[11px] text-ink">
+                <button type="button" disabled={p.busy} onClick={() => submit(s)} className="py-1 pl-2.5 pr-1 disabled:opacity-50" title={s}>
+                  {s.length > 40 ? `${s.slice(0, 39)}…` : s}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMyShortcuts(myShortcuts.filter((x) => x !== s))}
+                  className="pr-2 text-mute opacity-50 hover:text-down group-hover/sc:opacity-100"
+                  title="Remove this shortcut"
+                  aria-label={`Remove shortcut ${s}`}
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+            <button
+              type="button"
+              onClick={() => {
+                const t = (value.trim() || lastPrompt || "").trim();
+                if (t && !myShortcuts.includes(t)) setMyShortcuts([...myShortcuts, t].slice(-12));
+              }}
+              className="shrink-0 rounded-full border border-dashed border-line px-2.5 py-1 text-[11px] text-mute hover:border-accent/50 hover:text-ink"
+              title="Save what's in the chat box (or your last question) as a shortcut button"
+            >
+              + Save as shortcut
+            </button>
             {SHORTCUTS.map((s) => (
               <button
                 key={s}

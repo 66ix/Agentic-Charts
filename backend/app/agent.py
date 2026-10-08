@@ -37,7 +37,8 @@ from .market_scanner import MarketScanner, MarketScanResult
 from .scanner import DEFAULT_WATCHLIST, scan, tickers
 from .sell_check import describe_sells, sell_facts, sell_scan, timeframe_for
 from .pricefmt import round_facts
-from .session_levels import SessionLevelsService, level_facts
+from .relative import vs_btc
+from .session_levels import SessionLevelsService, clock_facts, level_facts
 from .schemas import (
     FEATURE_KINDS,
     TARGET_KINDS,
@@ -50,6 +51,7 @@ from .schemas import (
     HorizontalLineOverlay,
     MarketSetup,
     Navigate,
+    PastAnswer,
     SellWatch,
     ZoneTriggerSpec,
     is_custom_symbol,
@@ -247,6 +249,35 @@ async def _market_overview(metrics: MarketMetricsService | None) -> dict | None:
         return None
     res = await _guarded(metrics.get(), "market overview", 5.0)
     return overview_facts(res) if res else None
+
+
+async def _vs_btc(market: MarketData, symbol: str) -> dict | None:
+    """The coin against BTC on daily candles (relative.py): change vs BTC today and over 7 days, 30-day correlation
+    and beta. None for BTC itself, pairs not quoted in a dollar stablecoin, or when the candles can't be had."""
+    if symbol.startswith("BTC") or not symbol.endswith(("USDT", "USDC", "FDUSD")):
+        return None
+    try:
+        (coin, _), (btc, _) = await asyncio.wait_for(asyncio.gather(
+            market.get_klines(symbol, "1d", 60), market.get_klines("BTCUSDT", "1d", 60)), 8.0)
+    except Exception as exc:  # the answer goes out without it
+        log.info("Skipped vs BTC for %s: %s", symbol, exc)
+        return None
+    return vs_btc(candles_to_df(coin), candles_to_df(btc))
+
+
+def past_answer_facts(prev: PastAnswer, price_now: float, now: float | None = None) -> dict | None:
+    """The agent's last answer on this coin (from the client's chat history) and how price moved since."""
+    age_h = ((now if now is not None else time.time()) * 1000 - prev.time) / 3_600_000
+    if age_h < 0.05 or not prev.summary.strip():  # the answer the user is following up on right now
+        return None
+    out: dict = {"when": f"{age_h:.0f} hours ago" if age_h < 48 else f"{age_h / 24:.0f} days ago",
+                 "question": prev.prompt[:200], "answer": prev.summary[:500]}
+    if prev.interval:
+        out["timeframe"] = prev.interval
+    if prev.price:
+        out.update(price_then=prev.price, price_now=price_now,
+                   change_since_pct=round((price_now / prev.price - 1) * 100, 2))
+    return out
 
 
 async def _chart_cvd(futures: FuturesDataService | None, symbol: str, tf: str) -> dict | None:
@@ -612,7 +643,8 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         _ladder(market, symbol, tf) if want_ladder else _none(),
         general.context(events, req.prompt) if want_general else _none(),
         # The market header bar and the chart's CVD pane, read whether or not the user has them on screen.
-        _market_overview(metrics), _chart_cvd(futures, symbol, tf) if not custom_chart else _none())
+        _market_overview(metrics), _chart_cvd(futures, symbol, tf) if not custom_chart else _none(),
+        _vs_btc(market, symbol) if not custom_chart else _none())
     (candles, source), higher, htf_frames, rows, deriv, kimi_facts, fut, upcoming, headlines, mscan, lvl, grid, extra = await asyncio.gather(
         candles_for_chart(), windows(),
         _confluence_frames(market, symbol, tf, [] if custom_chart else ["support_resistance"]), scan_rows(),
@@ -623,7 +655,7 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         _headlines(events, symbol) if want_news else _empty(), market_scan(),
         _guarded(levels.get(symbol, tf), "session levels") if want_levels else _none(),
         _grid_plan(gridbots, symbol) if want_grid else _none(), extras)
-    sells, walked, ladder, general_ctx, overview, chart_cvd = extra
+    sells, walked, ladder, general_ctx, overview, chart_cvd, vs_btc_facts = extra
     if general_ctx is not None and overview:
         general_ctx["market_overview"] = overview
 
@@ -684,6 +716,13 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         facts["indicators"]["cvd"] = chart_cvd
     if htf_frames and (htf := htf_readings(htf_frames, req.indicator_settings)):
         facts["higher_timeframes"] = htf
+    if vs_btc_facts:
+        facts["vs_btc"] = vs_btc_facts
+    facts["session_clock"] = clock_facts(int(time.time()))
+    if req.coin_note and req.coin_note.strip():
+        facts["your_note_on_this_coin"] = req.coin_note.strip()
+    if req.previous_answer and (past := past_answer_facts(req.previous_answer, result.stats.last_price)):
+        facts["last_time_you_asked"] = past
     if overview:
         facts["market_overview"] = overview
     if deriv:
@@ -792,7 +831,7 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
     sources: list[dict[str, str]] = []
     if want_general and general_ctx is not None:
         # Web-searched answers come back in one piece.
-        answered = await llm.answer(req.prompt, general_ctx, req.history, req.spot_only)
+        answered = await llm.answer(req.prompt, general_ctx, req.history, req.spot_only, req.detail)
         if answered:
             summary, narrate_engine, sources = answered
         else:
@@ -801,9 +840,11 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         if on_delta is not None:
             await on_delta(summary)
     elif on_delta is not None:
-        summary, narrate_engine = await llm.narrate_stream(req.prompt, narrate_facts, fallback, req.history, on_delta)
+        summary, narrate_engine = await llm.narrate_stream(req.prompt, narrate_facts, fallback, req.history, on_delta,
+                                                           detail=req.detail)
     else:
-        summary, narrate_engine = await llm.narrate(req.prompt, narrate_facts, fallback, req.history)
+        summary, narrate_engine = await llm.narrate(req.prompt, narrate_facts, fallback, req.history,
+                                                    detail=req.detail)
     return res.model_copy(update={"summary": summary, "sources": sources,
                                   "engine": {**res.engine, "summary": narrate_engine}})
 

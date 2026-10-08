@@ -121,6 +121,32 @@ def recent_sessions(key: str, now: int, n: int = 2) -> list[tuple[int, int]]:
     return wins[::-1][:n]
 
 
+def session_clock(now: int) -> list[dict]:
+    """Each session's state at `now`: open (with when it closes) or closed (with when it next opens), in UTC
+    seconds and whole minutes from now. Weekends skip to Monday's session."""
+    out = []
+    for key, s in SESSIONS.items():
+        wins = [w for w in session_windows(key, now - DAY, now + 5 * DAY) if w[1] > now]
+        if not wins:
+            continue
+        o, c = wins[0]
+        live = o <= now
+        out.append({"key": key, "name": s.name, "open": live, "opens_at": o, "closes_at": c,
+                    "minutes": round(((c if live else o) - now) / 60)})
+    return out
+
+
+def _dur(minutes: int) -> str:
+    h, m = divmod(max(minutes, 0), 60)
+    return f"{h}h {m}m" if h and m else f"{h}h" if h else f"{m}m"
+
+
+def clock_facts(now: int) -> dict:
+    """For the agent: {"London": "open, closes in 3h 10m", "New York": "opens in 40m", ...}."""
+    return {r["name"]: (f"open, closes in {_dur(r['minutes'])}" if r["open"] else f"opens in {_dur(r['minutes'])}")
+            for r in session_clock(now)}
+
+
 def period_window(kind: str, now: int, back: int = 1) -> tuple[int, int]:
     """UTC (open, close) of the day / week / month `back` periods before the current one."""
     today = datetime.fromtimestamp(now, timezone.utc).date()

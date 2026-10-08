@@ -2,6 +2,7 @@ import { API_URL } from "./config";
 import type { AlertPatch } from "./alerts";
 import type {
   AlertChannels,
+  AnswerDetail,
   AlertSpec,
   AnalysisIntent,
   AnalyzeResponse,
@@ -98,6 +99,12 @@ export function analyze(
       atr: number;
       stoch_rsi: { rsiLength: number; stochLength: number; k: number; d: number };
     };
+    /** How long the answer should be. */
+    detail?: AnswerDetail;
+    /** The user's own note on this coin. */
+    coin_note?: string;
+    /** The agent's last answer on this coin in an earlier conversation. */
+    previous_answer?: { time: number; prompt: string; summary: string; interval?: Interval; price?: number } | null;
   },
   signal?: AbortSignal,
 ) {

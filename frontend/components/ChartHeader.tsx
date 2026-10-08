@@ -16,6 +16,7 @@ import {
   Settings,
   SlidersHorizontal,
   Square,
+  StickyNote,
   X,
 } from "lucide-react";
 
@@ -66,6 +67,9 @@ interface Props {
   onSettings(): void;
   onShortcuts(): void;
   onGridMode(mode: GridMode): void;
+  /** Your note on this coin; the agent reads it and reminds you of it. */
+  note?: string;
+  onNote?(text: string): void;
 }
 
 const GRID_MODES: Array<{ mode: GridMode; label: string; Icon: typeof Square }> = [
@@ -226,6 +230,31 @@ export default function ChartHeader(p: Props) {
       <button type="button" className="btn-ghost shrink-0" title="Save a snapshot with the agent&apos;s latest answer, also copied to the clipboard (Alt+S)" aria-label="Save snapshot" onClick={p.onScreenshot}>
         <Camera className="h-4 w-4" />
       </button>
+      {p.onNote && (
+        <Menu
+          title={p.note ? `Your note on ${customLabel(p.symbol)}: ${p.note}` : `Add a note on ${customLabel(p.symbol)}`}
+          align="right"
+          trigger={
+            <span className={clsx("inline-flex items-center gap-1", p.note && "text-yellow-300")}>
+              <StickyNote className="h-4 w-4" />
+              {p.note && <span className="hidden max-w-[10rem] truncate text-[11px] lg:inline">{p.note}</span>}
+            </span>
+          }
+        >
+          <div className="p-1">
+            <div className="mb-1 text-[11px] text-mute">Your note on {customLabel(p.symbol)}. The agent reads it and reminds you when it matters.</div>
+            <textarea
+              autoFocus
+              rows={4}
+              maxLength={1000}
+              defaultValue={p.note ?? ""}
+              onChange={(e) => p.onNote!(e.target.value)}
+              placeholder='e.g. "waiting for a retest of 140 before adding"'
+              className="w-full resize-none rounded border border-line bg-base px-2 py-1 text-xs text-ink outline-none focus:border-accent/60"
+            />
+          </div>
+        </Menu>
+      )}
       {p.onReplay && (
         <button type="button" className="btn-ghost shrink-0" title="Replay: step through past candles" aria-label="Replay" onClick={p.onReplay}>
           <History className="h-4 w-4" />

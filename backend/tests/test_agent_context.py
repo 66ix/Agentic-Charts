@@ -93,7 +93,7 @@ class FakeMetrics:
 def test_the_agent_reads_every_indicator_and_the_header_bar_without_them_on_the_chart():
     seen = {}
 
-    async def narrate(prompt, facts, fallback, history=None):
+    async def narrate(prompt, facts, fallback, history=None, **kw):
         seen.update(facts)
         return fallback, "test"
 
@@ -159,3 +159,62 @@ def test_scans_open_with_the_market_mood():
     assert market_mood({"unavailable": ["Fear & Greed"]}) is None
     res = _run("which of my coins are near demand?", metrics=FakeMetrics())
     assert "Market mood: Fear & Greed 31/100 · Fear" in res.summary
+
+
+def test_vs_btc_correlation_and_strength():
+    import numpy as np
+    import pandas as pd
+
+    from app.relative import vs_btc
+    t = 1_700_006_400 + np.arange(40) * 86400
+    btc = pd.DataFrame({"time": t, "close": 60000 * np.cumprod(1 + 0.01 * np.sin(np.arange(40)))})
+    coin = pd.DataFrame({"time": t, "close": 100 * np.cumprod(1 + 0.02 * np.sin(np.arange(40)))})
+    out = vs_btc(coin, btc)
+    assert out["correlation_30d"] == 1.0 and out["beta_30d"] == 2.0 and out["follows_btc"] == "closely"
+    assert vs_btc(coin.head(5), btc.head(5)) is None
+
+
+def test_the_agent_knows_btc_your_note_the_last_answer_and_the_session_clock():
+    import time as _t
+
+    from app.schemas import PastAnswer
+    seen = {}
+
+    async def narrate(prompt, facts, fallback, history=None, **kw):
+        seen.update(facts, detail=kw.get("detail"))
+        return fallback, "test"
+
+    async def go():
+        md, llm = MarketData(), LLMClient()
+        llm.narrate = narrate
+        try:
+            req = AnalyzeRequest(symbol="INJUSDT", interval="4h", prompt="is INJ just following BTC?", detail="short",
+                                 coin_note="waiting for a retest of 20",
+                                 previous_answer=PastAnswer(time=int((_t.time() - 3 * 86400) * 1000), prompt="long?",
+                                                            summary="Long from 20, stop 19.", price=20.0))
+            return await run_analysis(req, md, llm)
+        finally:
+            await md.close()
+            await llm.close()
+    res = asyncio.run(go())
+    assert {"correlation_30d", "vs_btc_7d_pct"} <= set(seen["vs_btc"])
+    assert seen["your_note_on_this_coin"] == "waiting for a retest of 20"
+    assert seen["last_time_you_asked"]["when"] == "3 days ago" and "change_since_pct" in seen["last_time_you_asked"]
+    assert set(seen["session_clock"]) == {"Asia", "London", "New York"}
+    assert seen["detail"] == "short"
+    assert "Your note on this coin: waiting for a retest of 20" in res.summary
+
+
+def test_session_clock_counts_down_to_the_next_open():
+    from datetime import datetime, timezone
+
+    from app.session_levels import session_clock
+    # Wednesday 2026-10-07 06:20 UTC: Asia is open, London (BST) opens at 07:00, New York (EDT) at 13:30.
+    now = int(datetime(2026, 10, 7, 6, 20, tzinfo=timezone.utc).timestamp())
+    rows = {r["key"]: r for r in session_clock(now)}
+    assert rows["asia"]["open"] and rows["asia"]["minutes"] == 160
+    assert not rows["london"]["open"] and rows["london"]["minutes"] == 40
+    assert rows["ny"]["minutes"] == 430
+    # Saturday: the next London session is Monday's.
+    sat = int(datetime(2026, 10, 10, 12, 0, tzinfo=timezone.utc).timestamp())
+    assert {r["key"]: r for r in session_clock(sat)}["london"]["minutes"] == (2 * 24 - 5) * 60

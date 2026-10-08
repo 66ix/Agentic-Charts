@@ -13,6 +13,7 @@ REST
   *    /api/brief*               the scheduled market brief
   *    /api/market-scan*         best long / short setups across the top coins by volume
   GET  /api/levels/sessions      session (Asia/London/NY), previous day/week/month and opening-range levels
+  GET  /api/sessions/clock       which sessions are open now, and when each next opens or closes
   GET  /api/orderbook/heatmap    resting order-book liquidity over time (sampled while someone polls it)
 WebSocket
   /ws/klines?symbol=INJUSDT&interval=4h   live candle updates
@@ -66,7 +67,7 @@ from .market_scanner import MarketScanner
 from .orderbook_heatmap import OrderbookHeatmapService
 from .ratelimit import RateLimitMiddleware
 from .scanner import DEFAULT_WATCHLIST, WatchlistCache, tickers
-from .session_levels import SessionLevelsService
+from .session_levels import SessionLevelsService, session_clock
 from .schemas import AnalysisIntent
 from .schemas import norm_symbol as schemas_norm
 from .screenshot import SCHEMA as SHOT_SCHEMA
@@ -1247,6 +1248,13 @@ async def market_scan_run(request: Request, interval: str = Query("4h"),
 #   GET /api/orderbook/heatmap?symbol=BTCUSDT&step=60&since=1700000000
 #       {source, note, bin_size, cadence, step, started_at, collecting, price, walls,
 #        columns: [[time, mid, first_bin, [notional per bin]]]}; polling it keeps the symbol sampled
+
+
+@app.get("/api/sessions/clock")
+async def sessions_clock() -> dict:
+    """Asia, London and New York: open now (and when each closes) or when each next opens, for the header countdown."""
+    now = int(time.time())
+    return {"now": now, "sessions": session_clock(now)}
 
 
 @app.get("/api/levels/sessions")

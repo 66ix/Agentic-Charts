@@ -15,7 +15,7 @@ import { imageToDataUrl, readScreenshot } from "@/lib/screenshot";
 import { composeSnapshot, shareSnapshot } from "@/lib/snapshot";
 import { DEFAULT_INTERVAL, DEFAULT_SYMBOL } from "@/lib/config";
 import { isCustom } from "@/lib/customSymbols";
-import { CHAT_ID_KEY, CHATS_KEY, toSession, upsertSession, worthKeeping, type ChatSession } from "@/lib/chatHistory";
+import { CHAT_ID_KEY, CHATS_KEY, lastAnswerOn, toSession, upsertSession, worthKeeping, type ChatSession } from "@/lib/chatHistory";
 import { createJournalEntry, planToJournalEntry } from "@/lib/journal";
 import { DEFAULT_SIZING, sizePlan, type SizingSettings } from "@/lib/sizing";
 import { apiRequest } from "@/lib/api";
@@ -43,6 +43,7 @@ import type {
   GridCoin,
   GridMode,
   IndicatorSettings,
+  AnswerDetail,
   IndicatorState,
   Interval,
   LayoutState,
@@ -449,8 +450,21 @@ export default function ChartWorkspace() {
   const deleteChat = useCallback((id: string) => setChats((list) => list.filter((c) => c.id !== id)), [setChats]);
 
   // Latest conversation state for the request, without re-creating runAnalysis on every message.
-  const convoRef = useRef({ messages, overlays, lastIntent, watchlist, spotOnly, indicatorSettings });
-  convoRef.current = { messages, overlays, lastIntent, watchlist, spotOnly, indicatorSettings };
+  // Answer length, and the user's own note on each coin (keyed by symbol), both read by the agent.
+  const [answerDetail, setAnswerDetail] = usePersistentState<AnswerDetail>("ac:answer-detail", "normal");
+  const [coinNotes, setCoinNotes] = usePersistentState<Record<string, string>>("ac:coin-notes", {});
+  const setCoinNote = useCallback(
+    (sym: string, text: string) =>
+      setCoinNotes((all) => {
+        const next = { ...all };
+        if (text.trim()) next[sym] = text.trim();
+        else delete next[sym];
+        return next;
+      }),
+    [setCoinNotes],
+  );
+  const convoRef = useRef({ messages, overlays, lastIntent, watchlist, spotOnly, indicatorSettings, answerDetail, coinNotes, chats, chatId });
+  convoRef.current = { messages, overlays, lastIntent, watchlist, spotOnly, indicatorSettings, answerDetail, coinNotes, chats, chatId };
 
   // Cancel in-flight analysis when the market changes (unless a top-down walk is the one changing it).
   useEffect(() => {
@@ -511,6 +525,9 @@ export default function ChartWorkspace() {
           previous_intent: opts.silent ? null : convo.lastIntent,
           watchlist: convo.watchlist,
           spot_only: convo.spotOnly,
+          detail: convo.answerDetail,
+          coin_note: convo.coinNotes[symbol] || undefined,
+          previous_answer: opts.silent ? null : lastAnswerOn(convo.chats, symbol, convo.chatId),
           // The agent reads every indicator with the lengths the chart uses.
           indicator_settings: {
             ema_fast: convo.indicatorSettings.ema1.length,
@@ -523,11 +540,13 @@ export default function ChartWorkspace() {
           },
         };
         const id = uid();
+        const at = Date.now();
         const lead = opts.silent ? "Auto-detected levels. " : "";
         const toMessage = (res: AnalyzeResponse, text: string, streaming: boolean): AgentMessage => {
           const target = res.navigate ?? { symbol, interval };
           return {
             id,
+            at,
             role: "agent",
             text: lead + text,
             streaming: streaming || undefined,
@@ -978,6 +997,8 @@ export default function ChartWorkspace() {
           pinned={pinnedSet}
           symbol={symbol}
           interval={interval}
+          detail={answerDetail}
+          onDetail={setAnswerDetail}
           onSubmit={(p) => void runAnalysis(p)}
           onImage={(f) => void readShot(f)}
           onClearOverlays={() => changeOverlays(overlaysKey, [], "clear AI levels")}
@@ -1105,6 +1126,8 @@ export default function ChartWorkspace() {
         onSettings={() => setDialog("settings")}
         onShortcuts={() => setDialog("shortcuts")}
         onGridMode={setGridMode}
+        note={coinNotes[symbol]}
+        onNote={(t) => setCoinNote(symbol, t)}
       />
       <div className="relative flex min-h-0 flex-1">
         {!mobile && (

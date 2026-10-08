@@ -530,6 +530,16 @@ class IndicatorLengths(BaseModel):
     stoch_rsi: StochRsiLengths = Field(default_factory=StochRsiLengths)
 
 
+class PastAnswer(BaseModel):
+    """The agent's last answer on this coin, from the client's chat history, so it can follow up on it."""
+
+    time: int = Field(..., description="UNIX milliseconds")
+    prompt: str = Field("", max_length=500)
+    summary: str = Field("", max_length=1500)
+    interval: Optional[str] = None
+    price: Optional[float] = Field(None, description="Price when it answered")
+
+
 class AnalyzeRequest(BaseModel):
     symbol: str = Field("INJUSDT", min_length=2, max_length=40)
     interval: Interval = "4h"
@@ -544,6 +554,9 @@ class AnalyzeRequest(BaseModel):
     watchlist: list[str] = Field(default_factory=list, max_length=40, description="The user's watchlist symbols")
     spot_only: bool = Field(True, description="The user trades spot only: no short plans, no short setups")
     indicator_settings: IndicatorLengths = Field(default_factory=IndicatorLengths)
+    detail: Literal["short", "normal", "detailed"] = Field("normal", description="How long the answer should be")
+    coin_note: Optional[str] = Field(None, max_length=1000, description="The user's own note on this coin")
+    previous_answer: Optional[PastAnswer] = None
 
     @field_validator("symbol")
     @classmethod

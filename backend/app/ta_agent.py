@@ -616,6 +616,8 @@ def analyze(
         facts["last_structure_break"] = {"type": b["type"], "direction": b["direction"], "level": b["level"],
                                          "bars_ago": len(df) - 1 - b["idx"]}
     facts["volume"] = volume_stats(df)
+    if facts["volume"]["last_vs_avg"] >= 3 or facts["volume"]["recent_vs_avg"] >= 2:
+        facts["volume"]["unusual"] = True  # 3x the average on the last bar, or 2x over the last 5
 
     if "support_resistance" in feats:
         zones = cluster_levels(highs + lows, atr_v, last, len(df))
@@ -993,6 +995,12 @@ def describe(facts: dict, symbol: str) -> str:
             lines.append(ms.get("note") or f"No {ms['timeframe']} setups across the market right now.")
     if facts.get("kimi"):
         lines += _kimi_lines(facts["kimi"])
+    if (facts.get("volume") or {}).get("unusual"):
+        v = facts["volume"]
+        lines.append(f"Unusual volume: the last bar is {v['last_vs_avg']}x its average, the last 5 bars "
+                     f"{v['recent_vs_avg']}x.")
+    if facts.get("your_note_on_this_coin"):
+        lines.append(f"Your note on this coin: {facts['your_note_on_this_coin']}")
     lines += facts.get("actions", [])
     if len(lines) == 1:
         lines.append("No qualifying levels found for this request.")

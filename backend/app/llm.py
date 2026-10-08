@@ -291,7 +291,14 @@ NARRATE_SYSTEM = (
     "timeframe's spot CVD); quote the ones the question asks about, and never say an indicator can't be read because "
     "it isn't on the chart. FACTS.higher_timeframes reads the next two timeframes up (trend, RSI, MACD, Stoch RSI, "
     "price against EMAs and VWAP): say whether they agree with this chart when it matters, and answer 'does the "
-    "daily agree?' from it. FACTS.market_overview is the header bar: total crypto market cap, 24h volume, "
+    "daily agree?' from it. "
+    "FACTS.vs_btc compares the coin with BTC (change today and over 7 days, the gap, 30-day correlation and beta): use "
+    "it for strength, 'is it just following BTC?' or correlation questions, and mention a notable gap in passing. "
+    "FACTS.volume.unusual means volume is well above normal: say so. FACTS.session_clock says which sessions are "
+    "open and when the next ones open: with an entry or plan, warn when a session opens within the hour. "
+    "FACTS.your_note_on_this_coin is the user's own note: remind them of it when it bears on the answer. "
+    "FACTS.last_time_you_asked is your previous answer on this coin: when it helps, say in one clause how that call "
+    "has played out (change_since_pct). FACTS.market_overview is the header bar: total crypto market cap, 24h volume, "
     "liquidations, open interest, Fear & Greed and BTC dominance, with 24h changes; a name under unavailable "
     "couldn't be fetched, so say so rather than guess. "
     "FACTS.futures_context has funding, open interest, the long/short ratio, 24h spot CVD, the nearest order-book "
@@ -332,6 +339,24 @@ GENERAL_SYSTEM = (
     "reported...'). If neither shows something recent, say you can't confirm it rather than guessing; never invent "
     "numbers, dates or results. {spot}No markdown headings or tables."
 )
+# How long an answer is (AnalyzeRequest.detail): replaces the length rule in NARRATE_SYSTEM and GENERAL_SYSTEM.
+DETAIL_RULES = {
+    "short": "in one or two short sentences, only what the question needs",
+    "normal": "in at most 4 short sentences",
+    "detailed": "in up to 10 sentences, explaining the reasoning behind each point (why a zone matters, what each "
+                "indicator says and whether the timeframes agree)",
+}
+
+
+def narrate_system(detail: str = "normal") -> str:
+    return NARRATE_SYSTEM.replace("in at most 4 short sentences", DETAIL_RULES.get(detail, DETAIL_RULES["normal"]))
+
+
+def general_system(detail: str = "normal") -> str:
+    rule = {"short": "in one or two short sentences", "detailed": "in up to 10 sentences"}.get(detail)
+    return GENERAL_SYSTEM.replace("in at most 6 short sentences", rule) if rule else GENERAL_SYSTEM
+
+
 SPOT_LINE = ("The user trades spot only (buying coins outright): never suggest shorting, futures or leverage. ")
 
 _TF_PATTERNS: list[tuple[str, str]] = [
@@ -921,14 +946,14 @@ class LLMClient:
             return None
 
     async def narrate(self, prompt: str, facts: dict, fallback: str,
-                      history: list[ChatTurn] | None = None) -> tuple[str, str]:
+                      history: list[ChatTurn] | None = None, detail: str = "normal") -> tuple[str, str]:
         if not self._available() or not prompt.strip():
             return fallback, "template"
         convo = "\n".join(f"{t.role}: {t.text[:400]}" for t in (history or [])[-4:])
         user = (f"CONVERSATION SO FAR:\n{convo}\n\n" if convo else "") + \
             f"TODAY: {_today()}\n\nREQUEST: {prompt}\n\nFACTS: {json.dumps(round_facts(facts), default=float)}"
         try:
-            text = (await self._text(NARRATE_SYSTEM, user)).strip()
+            text = (await self._text(narrate_system(detail), user)).strip()
             if text:
                 return text, f"{self.provider}:{self.model}"
         except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
@@ -937,7 +962,7 @@ class LLMClient:
         return fallback, "template"
 
     async def narrate_stream(self, prompt: str, facts: dict, fallback: str, history: list[ChatTurn] | None,
-                             on_delta: Callable[[str], Awaitable[None]]) -> tuple[str, str]:
+                             on_delta: Callable[[str], Awaitable[None]], detail: str = "normal") -> tuple[str, str]:
         """`narrate`, but each piece of the answer is passed to `on_delta` as the model writes it. Falls back to the
         template (sent as one piece) when no model is set up or it fails before writing anything."""
         if not self._available() or not prompt.strip():
@@ -948,7 +973,7 @@ class LLMClient:
             f"TODAY: {_today()}\n\nREQUEST: {prompt}\n\nFACTS: {json.dumps(round_facts(facts), default=float)}"
         parts: list[str] = []
         try:
-            async for piece in self._text_stream(NARRATE_SYSTEM, user):
+            async for piece in self._text_stream(narrate_system(detail), user):
                 if piece:
                     parts.append(piece)
                     await on_delta(piece)
@@ -997,7 +1022,7 @@ class LLMClient:
         raise ValueError("No LLM provider configured")
 
     async def answer(self, question: str, context: dict, history: list[ChatTurn] | None = None,
-                     spot_only: bool = False) -> tuple[str, str, list[dict[str, str]]] | None:
+                     spot_only: bool = False, detail: str = "normal") -> tuple[str, str, list[dict[str, str]]] | None:
         """A general question → (answer, "provider:model", web sources), with a web search where the provider has
         one (WEB_SEARCH=off turns it off). None when no model is available or every attempt failed."""
         if not self._available():
@@ -1005,7 +1030,7 @@ class LLMClient:
         convo = "\n".join(f"{t.role}: {t.text[:400]}" for t in (history or [])[-4:])
         user = (f"CONVERSATION SO FAR:\n{convo}\n\n" if convo else "") + \
             f"CONTEXT: {json.dumps(context, default=str)}\n\nQUESTION: {question}"
-        system = GENERAL_SYSTEM.format(spot=SPOT_LINE if spot_only else "")
+        system = general_system(detail).format(spot=SPOT_LINE if spot_only else "")
         engine = f"{self.provider}:{self.model}"
         if self.s.web_search:
             try:

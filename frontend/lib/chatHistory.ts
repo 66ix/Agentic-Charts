@@ -52,3 +52,23 @@ export function searchSessions(list: ChatSession[], query: string): ChatSession[
     return words.every((w) => hay.includes(w));
   });
 }
+
+/** The agent's newest answer on `symbol` in an earlier conversation, so a new question can follow up on it. */
+export function lastAnswerOn(
+  list: ChatSession[],
+  symbol: string,
+  excludeId: string,
+): { time: number; prompt: string; summary: string; interval?: Interval; price?: number } | null {
+  let best: { time: number; prompt: string; summary: string; interval?: Interval; price?: number } | null = null;
+  for (const s of list) {
+    if (s.id === excludeId) continue;
+    s.messages.forEach((m, i) => {
+      if (m.role !== "agent" || m.symbol !== symbol || !m.text.trim() || !m.prompt) return;
+      const time = m.at ?? s.updatedAt - (s.messages.length - 1 - i) * 1000;
+      if (!best || time > best.time) {
+        best = { time, prompt: m.prompt.slice(0, 500), summary: m.text.slice(0, 1500), interval: m.interval, price: m.lastPrice };
+      }
+    });
+  }
+  return best;
+}

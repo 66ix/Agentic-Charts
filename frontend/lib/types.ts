@@ -138,6 +138,9 @@ export interface AnalysisIntent {
 
 export type ScanKind = "setups" | "spot_buys" | "grid_coins";
 
+/** How long the agent's answers are. */
+export type AnswerDetail = "short" | "normal" | "detailed";
+
 export interface Navigate {
   symbol: string;
   interval: Interval;
