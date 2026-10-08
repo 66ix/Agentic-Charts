@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -31,6 +32,7 @@ import httpx
 from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import StreamingResponse
 
 from .agent import run_analysis
 from .alerts import AlertPatch, AlertService
@@ -249,6 +251,50 @@ async def agent_analyze(req: AnalyzeRequest, request: Request) -> AnalyzeRespons
         raise HTTPException(502, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/agent/analyze/stream")
+async def agent_analyze_stream(req: AnalyzeRequest, request: Request) -> StreamingResponse:
+    """`/api/agent/analyze` as server-sent events (not gzipped, so each arrives at once): {"type":"result","response"}
+    with the drawings, plan and the rest as soon as they are ready (summary still empty), {"type":"delta","text"}
+    pieces of the summary as the model writes it, then {"type":"done","response"} with everything, or
+    {"type":"error","status","detail"}."""
+    st = request.app.state
+    queue: asyncio.Queue[dict | None] = asyncio.Queue()
+
+    async def on_result(res: AnalyzeResponse) -> None:
+        await queue.put({"type": "result", "response": res.model_dump(mode="json")})
+
+    async def on_delta(text: str) -> None:
+        await queue.put({"type": "delta", "text": text})
+
+    async def work() -> None:
+        try:
+            res = await run_analysis(req, st.market, st.llm, st.derivatives, st.kimi,
+                                     getattr(st, "futures", None), getattr(st, "events", None),
+                                     getattr(st, "market_scanner", None), levels=getattr(st, "session_levels", None),
+                                     gridbots=getattr(st, "gridbots", None), on_result=on_result, on_delta=on_delta)
+            await queue.put({"type": "done", "response": res.model_dump(mode="json")})
+        except MarketDataError as exc:
+            await queue.put({"type": "error", "status": 502, "detail": str(exc)})
+        except ValueError as exc:
+            await queue.put({"type": "error", "status": 422, "detail": str(exc)})
+        except Exception as exc:  # noqa: BLE001 - the client gets an error line instead of a cut-off stream
+            log.exception("Streamed analysis failed")
+            await queue.put({"type": "error", "status": 500, "detail": f"Analysis failed: {type(exc).__name__}"})
+        finally:
+            await queue.put(None)
+
+    async def lines():
+        task = asyncio.create_task(work())
+        try:
+            while (event := await queue.get()) is not None:
+                yield f"data: {json.dumps(event, default=float)}\n\n"
+        finally:
+            task.cancel()
+
+    return StreamingResponse(lines(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
 
 # ------------------------------- signal alerts, history and the brief --

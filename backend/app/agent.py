@@ -17,6 +17,7 @@ import logging
 import re
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 
 from . import general
 from .agent_loop import Toolbox, plan_with_tools
@@ -452,7 +453,11 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
                        events: EventsService | None = None,
                        scanner: MarketScanner | None = None,
                        levels: SessionLevelsService | None = None,
-                       gridbots: GridBotService | None = None) -> AnalyzeResponse:
+                       gridbots: GridBotService | None = None,
+                       on_result: Callable[[AnalyzeResponse], Awaitable[None]] | None = None,
+                       on_delta: Callable[[str], Awaitable[None]] | None = None) -> AnalyzeResponse:
+    """The agent's answer to one request. With `on_result` and `on_delta` (the streaming endpoint) the drawings,
+    plan and the rest go to `on_result` before the summary is written, and the summary to `on_delta` as it is."""
     settings = get_settings()
     scanner = scanner or MarketScanner(market)
     chart = ChartContext(req.symbol, req.interval, req.watchlist, req.spot_only)
@@ -692,26 +697,15 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
                     "The sell check could not run right now.")
     if lead:
         fallback = " ".join(lead) + " " + fallback
-    sources: list[dict[str, str]] = []
-    if want_general and general_ctx is not None:
-        answered = await llm.answer(req.prompt, general_ctx, req.history, req.spot_only)
-        if answered:
-            summary, narrate_engine, sources = answered
-        else:
-            summary, narrate_engine = general.template_answer(req.prompt, general_ctx), "template"
-        sources = sources or general.sources_from(general_ctx)
-    else:
-        summary, narrate_engine = await llm.narrate(req.prompt, narrate_facts, fallback, req.history)
-
-    return AnalyzeResponse(
+    res = AnalyzeResponse(
         symbol=symbol,
         interval=chart_interval,
         analysis_interval=tf,
         overlays=overlays,
-        summary=summary,
+        summary="",
         intent=intent,
         stats=result.stats,
-        engine={"intent": intent_engine, "summary": narrate_engine, "detector": "scipy"},
+        engine={"intent": intent_engine, "summary": "pending", "detector": "scipy"},
         data_source=source,
         alerts=alerts,
         navigate=navigate,
@@ -725,10 +719,29 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         grid_coins=grid_coins,
         top_down=walked.model_dump() if walked else None,
         ladder=ladder.model_dump() if ladder else None,
-        sources=sources,
+        sources=[],
         sells=sells or [],
         sell_watch=SellWatch(symbols=sell_symbols[:40], interval=sell_tf) if sells is not None else None,
     )
+    if on_result is not None:
+        await on_result(res)
+    sources: list[dict[str, str]] = []
+    if want_general and general_ctx is not None:
+        # Web-searched answers come back in one piece.
+        answered = await llm.answer(req.prompt, general_ctx, req.history, req.spot_only)
+        if answered:
+            summary, narrate_engine, sources = answered
+        else:
+            summary, narrate_engine = general.template_answer(req.prompt, general_ctx), "template"
+        sources = sources or general.sources_from(general_ctx)
+        if on_delta is not None:
+            await on_delta(summary)
+    elif on_delta is not None:
+        summary, narrate_engine = await llm.narrate_stream(req.prompt, narrate_facts, fallback, req.history, on_delta)
+    else:
+        summary, narrate_engine = await llm.narrate(req.prompt, narrate_facts, fallback, req.history)
+    return res.model_copy(update={"summary": summary, "sources": sources,
+                                  "engine": {**res.engine, "summary": narrate_engine}})
 
 
 async def _trigger_alerts(intent: AnalysisIntent, market: MarketData, symbol: str, tf: str, custom_chart: bool,

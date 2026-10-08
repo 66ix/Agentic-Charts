@@ -19,6 +19,7 @@ import logging
 import re
 import time
 import uuid
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -920,6 +921,66 @@ class LLMClient:
             self._trip(exc)
         return fallback, "template"
 
+    async def narrate_stream(self, prompt: str, facts: dict, fallback: str, history: list[ChatTurn] | None,
+                             on_delta: Callable[[str], Awaitable[None]]) -> tuple[str, str]:
+        """`narrate`, but each piece of the answer is passed to `on_delta` as the model writes it. Falls back to the
+        template (sent as one piece) when no model is set up or it fails before writing anything."""
+        if not self._available() or not prompt.strip():
+            await on_delta(fallback)
+            return fallback, "template"
+        convo = "\n".join(f"{t.role}: {t.text[:400]}" for t in (history or [])[-4:])
+        user = (f"CONVERSATION SO FAR:\n{convo}\n\n" if convo else "") + \
+            f"TODAY: {_today()}\n\nREQUEST: {prompt}\n\nFACTS: {json.dumps(round_facts(facts), default=float)}"
+        parts: list[str] = []
+        try:
+            async for piece in self._text_stream(NARRATE_SYSTEM, user):
+                if piece:
+                    parts.append(piece)
+                    await on_delta(piece)
+        except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+            log.warning("LLM streamed narration failed (%s: %s)", type(exc).__name__, exc)
+            self._trip(exc)
+        text = "".join(parts).strip()
+        if text:
+            return text, f"{self.provider}:{self.model}"
+        await on_delta(fallback)
+        return fallback, "template"
+
+    async def _text_stream(self, system: str, user: str) -> AsyncIterator[str]:
+        """`_text` as it is written: ollama sends JSON lines, OpenAI and Anthropic server-sent events."""
+        msgs = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+        if self.provider == "ollama":
+            async with self._client.stream("POST", f"{self.s.ollama_url}/api/chat", json={
+                "model": self.model, "stream": True, "options": self._ollama_options(0.2), "messages": msgs,
+            }) as r:
+                r.raise_for_status()
+                async for line in r.aiter_lines():
+                    if line.strip():
+                        yield json.loads(line).get("message", {}).get("content", "")
+            return
+        if self.provider == "openai":
+            async with self._client.stream("POST", f"{self.s.openai_base_url}/chat/completions",
+                                           headers=self._openai_headers(),
+                                           json={"model": self.model, "temperature": 0.2, "stream": True,
+                                                 "messages": msgs}) as r:
+                r.raise_for_status()
+                async for data in _sse(r):
+                    choices = data.get("choices") or [{}]
+                    yield (choices[0].get("delta") or {}).get("content") or ""
+            return
+        if self.provider == "anthropic":
+            async with self._client.stream("POST", "https://api.anthropic.com/v1/messages",
+                                           headers=self._anthropic_headers(),
+                                           json={"model": self.model, "max_tokens": ANTHROPIC_MAX_TOKENS,
+                                                 "system": system, "stream": True,
+                                                 "messages": [{"role": "user", "content": user}]}) as r:
+                r.raise_for_status()
+                async for data in _sse(r):
+                    if data.get("type") == "content_block_delta":
+                        yield (data.get("delta") or {}).get("text", "")
+            return
+        raise ValueError("No LLM provider configured")
+
     async def answer(self, question: str, context: dict, history: list[ChatTurn] | None = None,
                      spot_only: bool = False) -> tuple[str, str, list[dict[str, str]]] | None:
         """A general question → (answer, "provider:model", web sources), with a web search where the provider has
@@ -1066,6 +1127,18 @@ class LLMClient:
 
     def _anthropic_headers(self) -> dict[str, str]:
         return {"x-api-key": self.s.anthropic_api_key, "anthropic-version": "2023-06-01"}
+
+
+async def _sse(r: httpx.Response) -> AsyncIterator[dict]:
+    """The JSON `data:` payloads of a server-sent event stream, up to `[DONE]`."""
+    async for line in r.aiter_lines():
+        if not line.startswith("data:"):
+            continue
+        body = line[5:].strip()
+        if body == "[DONE]":
+            return
+        if body:
+            yield json.loads(body)
 
 
 def _dedupe_sources(rows: list[dict[str, str]], n: int = 5) -> list[dict[str, str]]:

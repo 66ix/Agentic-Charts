@@ -56,6 +56,8 @@ export interface AgentMessage {
   id: string;
   role: "user" | "agent" | "error";
   text: string;
+  /** The summary is still being written. */
+  streaming?: boolean;
   overlays?: Overlay[];
   meta?: string;
   alerts?: number;
@@ -600,6 +602,7 @@ export default function AgentPanel(p: Props) {
                     )}
                     <p className={clsx(m.role === "user" ? "text-mute" : m.role === "error" ? "text-down" : "text-ink")}>
                       {m.role === "agent" ? emphasize(m.text, m.lastPrice) : m.text}
+                      {m.streaming && <span className="ml-0.5 inline-block h-3 w-1.5 animate-pulse bg-accent/70 align-middle" aria-label="Writing" />}
                     </p>
                     {m.plan && (
                       <PlanCard

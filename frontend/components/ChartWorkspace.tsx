@@ -10,7 +10,7 @@ import { useIsMobile } from "@/hooks/useMediaQuery";
 import { readStored, usePersistentState, writeStored } from "@/hooks/usePersistentState";
 import { useUndo } from "@/hooks/useUndo";
 import { alertFromDrawing, alertOverlays, chartZones, SELL_SIGNALS } from "@/lib/alerts";
-import { analyze } from "@/lib/api";
+import { analyzeStream } from "@/lib/api";
 import { DEFAULT_INTERVAL, DEFAULT_SYMBOL } from "@/lib/config";
 import { isCustom } from "@/lib/customSymbols";
 import { CHAT_ID_KEY, CHATS_KEY, toSession, upsertSession, worthKeeping, type ChatSession } from "@/lib/chatHistory";
@@ -499,53 +499,81 @@ export default function ChartWorkspace() {
           .filter((m) => m.role !== "error")
           .slice(-10)
           .map((m) => ({ role: m.role as "user" | "agent", text: m.text }));
-        const res = await analyze(
+        const body = {
+          symbol,
+          interval,
+          prompt,
+          candles: candles.length >= 100 ? candles.slice(-500) : undefined,
+          history: opts.silent ? [] : history,
+          overlays: opts.silent ? [] : convo.overlays,
+          previous_intent: opts.silent ? null : convo.lastIntent,
+          watchlist: convo.watchlist,
+          spot_only: convo.spotOnly,
+        };
+        const id = uid();
+        const lead = opts.silent ? "Auto-detected levels. " : "";
+        const toMessage = (res: AnalyzeResponse, text: string, streaming: boolean): AgentMessage => {
+          const target = res.navigate ?? { symbol, interval };
+          return {
+            id,
+            role: "agent",
+            text: lead + text,
+            streaming: streaming || undefined,
+            overlays: res.overlays,
+            meta: streaming ? undefined : engineNote(res),
+            alerts: (res.alerts?.length ?? 0) + (res.trigger_alerts?.length ?? 0) || undefined,
+            plan: res.plan ?? undefined,
+            scan: res.scan?.length ? res.scan : undefined,
+            setups: res.setups?.length ? res.setups : undefined,
+            gridCoins: res.grid_coins?.length ? res.grid_coins : undefined,
+            walk: res.top_down ?? undefined,
+            ladder: res.ladder ?? undefined,
+            sources: res.sources?.length ? res.sources : undefined,
+            sells: res.sells?.length ? res.sells : undefined,
+            sellWatch: res.sell_watch?.symbols.length ? res.sell_watch : undefined,
+            steps: res.steps?.length ? res.steps : undefined,
+            symbol: target.symbol,
+            interval: target.interval,
+            prompt: prompt || undefined,
+            lastPrice: res.stats?.last_price,
+          };
+        };
+        const show = (msg: AgentMessage) => {
+          setMessages((m) => (m.some((x) => x.id === id) ? m.map((x) => (x.id === id ? msg : x)) : [...m, msg]));
+          if (!opts.silent) setQuickAnswer(msg);
+        };
+        // The drawings, plan and cards show as soon as they are ready; the summary is written into the same message.
+        const got: { first: AnalyzeResponse | null; written: string } = { first: null, written: "" };
+        const apply = (r: AnalyzeResponse) => {
+          got.first = r;
+          const target = r.navigate ?? { symbol, interval };
+          // Saved under the chart the answer belongs to; when the agent moves the chart, that chart loads them.
+          changeOverlays(`ac:overlays:${target.symbol}:${target.interval}`, r.overlays, opts.silent ? "auto levels" : "agent answer");
+          if (r.navigate) setCell({ symbol: r.navigate.symbol, interval: r.navigate.interval });
+          if (Object.keys(r.indicators ?? {}).length) setIndicators((ind) => ({ ...ind, ...r.indicators }));
+          if (prompt) setLastIntent(r.intent);
+          addAlerts(r.alerts ?? [], r.symbol);
+          for (const t of r.trigger_alerts ?? []) void addTrigger(t);
+        };
+        const res = await analyzeStream(
+          body,
           {
-            symbol,
-            interval,
-            prompt,
-            candles: candles.length >= 100 ? candles.slice(-500) : undefined,
-            history: opts.silent ? [] : history,
-            overlays: opts.silent ? [] : convo.overlays,
-            previous_intent: opts.silent ? null : convo.lastIntent,
-            watchlist: convo.watchlist,
-            spot_only: convo.spotOnly,
+            onResult: (r) => {
+              if (ctrl.signal.aborted) return;
+              apply(r);
+              show(toMessage(r, "", true));
+            },
+            onDelta: (t) => {
+              if (ctrl.signal.aborted || !got.first) return;
+              got.written += t;
+              show(toMessage(got.first, got.written, true));
+            },
           },
           ctrl.signal,
         );
         if (ctrl.signal.aborted) return;
-        const target = res.navigate ?? { symbol, interval };
-        // Saved under the chart the answer belongs to; when the agent moves the chart, that chart loads them.
-        changeOverlays(`ac:overlays:${target.symbol}:${target.interval}`, res.overlays, opts.silent ? "auto levels" : "agent answer");
-        if (res.navigate) setCell({ symbol: res.navigate.symbol, interval: res.navigate.interval });
-        if (Object.keys(res.indicators ?? {}).length) setIndicators((ind) => ({ ...ind, ...res.indicators }));
-        if (prompt) setLastIntent(res.intent);
-        addAlerts(res.alerts ?? [], res.symbol);
-        for (const t of res.trigger_alerts ?? []) void addTrigger(t);
-        const answer: AgentMessage = {
-          id: uid(),
-          role: "agent",
-          text: opts.silent ? `Auto-detected levels. ${res.summary}` : res.summary,
-          overlays: res.overlays,
-          meta: engineNote(res),
-          alerts: (res.alerts?.length ?? 0) + (res.trigger_alerts?.length ?? 0) || undefined,
-          plan: res.plan ?? undefined,
-          scan: res.scan?.length ? res.scan : undefined,
-          setups: res.setups?.length ? res.setups : undefined,
-          gridCoins: res.grid_coins?.length ? res.grid_coins : undefined,
-          walk: res.top_down ?? undefined,
-          ladder: res.ladder ?? undefined,
-          sources: res.sources?.length ? res.sources : undefined,
-          sells: res.sells?.length ? res.sells : undefined,
-          sellWatch: res.sell_watch?.symbols.length ? res.sell_watch : undefined,
-          steps: res.steps?.length ? res.steps : undefined,
-          symbol: target.symbol,
-          interval: target.interval,
-          prompt: prompt || undefined,
-          lastPrice: res.stats?.last_price,
-        };
-        setMessages((m) => [...m, answer]);
-        if (!opts.silent) setQuickAnswer(answer);
+        if (!got.first) apply(res);
+        show(toMessage(res, res.summary, false));
         if (res.grid_plan && !opts.silent) {
           // "Plan a grid bot on INJ": the Grid bots tab takes the plan to test, edit and track it.
           offerGridPlan(res.grid_plan);
