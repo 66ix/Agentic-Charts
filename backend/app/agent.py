@@ -43,6 +43,7 @@ from .schemas import (
     FEATURE_KINDS,
     TARGET_KINDS,
     AlertSpec,
+    MetricAlertSpec,
     AnalysisIntent,
     AnalyzeRequest,
     AnalyzeResponse,
@@ -60,6 +61,8 @@ from .ta_agent import (GREEN, ORANGE, TEAL, _fmt, analyze, describe, higher_time
                        rgba)
 from .top_down import TopDownResult, describe_walk, walk, walk_facts
 from .trade_plan import build_plan, plan_overlays
+from .metric_alerts import MetricAlertService
+from .metric_alerts import describe as describe_metric_alert
 from .zone_triggers import describe_trigger, detect_now, spec_from_intent
 
 CUSTOM_COLOR = "#a78bfa"
@@ -532,6 +535,7 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
                        levels: SessionLevelsService | None = None,
                        gridbots: GridBotService | None = None,
                        metrics: MarketMetricsService | None = None,
+                       metric_alerts: MetricAlertService | None = None,
                        on_result: Callable[[AnalyzeResponse], Awaitable[None]] | None = None,
                        on_delta: Callable[[str], Awaitable[None]] | None = None) -> AnalyzeResponse:
     """The agent's answer to one request. With `on_result` and `on_delta` (the streaming endpoint) the drawings,
@@ -772,6 +776,8 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         off = [INDICATOR_NAMES.get(k, k.upper()) for k, v in toggles.items() if not v]
         actions.append(" ".join(filter(None, [f"Turned on {', '.join(on)}." if on else "",
                                               f"Turned off {', '.join(off)}." if off else ""])))
+    if intent.metric_alerts:
+        actions.append(await _set_metric_alerts(intent.metric_alerts, metric_alerts))
     if nav:
         facts["navigation"] = nav
     if actions:
@@ -847,6 +853,17 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
                                                     detail=req.detail)
     return res.model_copy(update={"summary": summary, "sources": sources,
                                   "engine": {**res.engine, "summary": narrate_engine}})
+
+
+async def _set_metric_alerts(specs: list[MetricAlertSpec], service: MetricAlertService | None) -> str:
+    """"Alert me when Fear & Greed drops below 25" → the alert set, and its action line."""
+    if service is None:
+        return "Market alerts aren't available here."
+    try:
+        made = await service.add(specs)
+    except ValueError as exc:
+        return f"Couldn't set the market alert: {exc}."
+    return "Set a market alert: " + "; ".join(describe_metric_alert(a) for a in made) + "."
 
 
 async def _trigger_alerts(intent: AnalysisIntent, market: MarketData, symbol: str, tf: str, custom_chart: bool,

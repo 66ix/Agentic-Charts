@@ -12,6 +12,8 @@ import type {
   KimiResult,
   LadderResult,
   MarketMetrics,
+  MetricAlert,
+  MetricAlertSpec,
   Overlay,
   PriceAlert,
   ScanResult,
@@ -267,4 +269,17 @@ export function updateAlert(id: string, patch: AlertPatch) {
 /** Sends a test message to every configured channel → which ones delivered it. */
 export function testAlertChannels() {
   return apiRequest<{ results: Partial<Record<keyof AlertChannels, boolean>> }>("/api/alerts/test", { method: "POST" });
+}
+
+/** Alerts on the market header bar: Fear & Greed, BTC dominance, market cap... */
+export function fetchMetricAlerts(signal?: AbortSignal) {
+  return apiRequest<{ alerts: MetricAlert[] }>("/api/metric-alerts", { signal });
+}
+
+export function createMetricAlert(spec: MetricAlertSpec) {
+  return apiRequest<{ alerts: MetricAlert[] }>("/api/metric-alerts", { method: "POST", body: JSON.stringify({ alerts: [spec] }) });
+}
+
+export function deleteMetricAlert(id: string) {
+  return apiRequest<{ ok: boolean }>(`/api/metric-alerts/${encodeURIComponent(id)}`, { method: "DELETE" });
 }

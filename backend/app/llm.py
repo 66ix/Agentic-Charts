@@ -30,6 +30,7 @@ from pydantic import ValidationError
 from .config import Settings, get_settings
 from .pricefmt import round_facts
 from .schemas import (
+    MetricAlertSpec,
     ALL_FEATURES,
     SCAN_KINDS,
     CONFIRMATIONS,
@@ -58,7 +59,7 @@ INTENT_SCHEMA: dict[str, Any] = {
                  "remove", "keep_existing", "alert_prices", "alert_targets", "symbol", "switch_chart",
                  "scan_watchlist", "scan_filter", "scan_market", "trade_plan", "grid_plan", "indicators_on",
                  "indicators_off", "zone_trigger", "scan_kind", "top_down", "take_profit", "dip_ladder",
-                 "general_question", "sell_check"],
+                 "general_question", "sell_check", "metric_alerts"],
     "properties": {
         "features": {
             "type": "array",
@@ -218,6 +219,27 @@ INTENT_SCHEMA: dict[str, Any] = {
             "description": "true for a spot buy-the-dip ladder: 'plan a dip-buy ladder', 'DCA into the dips', 'where "
                            "should I place my buy orders?'. The app splits a budget across the demand zones below "
                            "price and tests it on 90 days. features empty, keep_existing true.",
+        },
+        "metric_alerts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["metric", "condition", "value", "note"],
+                "properties": {
+                    "metric": {"type": "string", "enum": ["fear_greed", "btc_dominance", "market_cap", "volume_24h",
+                                                          "open_interest", "liquidations"]},
+                    "condition": {"type": "string", "enum": ["above", "below", "moves"]},
+                    "value": {"type": "number", "description": "The level (25, 58.5, 3000000000000), or for moves "
+                                                               "the distance: points for fear_greed and "
+                                                               "btc_dominance, percent for the dollar metrics."},
+                    "note": {"type": ["string", "null"]},
+                },
+            },
+            "description": "Alerts on the market header stats, not a coin's price: 'alert me when Fear & Greed "
+                           "drops below 25' → {fear_greed, below, 25}; 'tell me if BTC dominance moves 1%' → "
+                           "{btc_dominance, moves, 1}; 'ping me when total market cap is above $3T' → {market_cap, "
+                           "above, 3000000000000}. The BTC in 'BTC dominance' is not a symbol. Empty otherwise.",
         },
         "sell_check": {
             "type": "boolean",
@@ -488,6 +510,54 @@ def _zone_trigger(p: str) -> tuple[ZoneTriggerIntent | None, tuple[int, int]]:
     return (ZoneTriggerIntent(timeframe=tf, confirm=confirm, zone_kind=kind,  # type: ignore[arg-type]
                               zone_timeframe=higher[0] if higher else None), (verb.start(), stop))
 
+_METRICS: list[tuple[str, str]] = [
+    (r"\bfear\s*(?:&|and|n)?\s*greed\b|\bf&g\b|\bfng\b", "fear_greed"),
+    (r"\b(?:btc|bitcoin)\s*(?:dominance|\.d\b)|\bdominance\b", "btc_dominance"),
+    (r"\b(?:total\s+)?(?:crypto\s+)?market\s*cap\b", "market_cap"),
+    (r"\b(?:total|24h|24 hour)\s+(?:crypto\s+)?volume\b", "volume_24h"),
+    (r"\btotal\s+open interest\b|\btotal oi\b", "open_interest"),
+    (r"\b(?:total\s+)?liquidations\b", "liquidations"),
+]
+_METRIC_COND: list[tuple[str, str]] = [
+    (r"\b(?:moves?|moving|changes?|swings?|shifts?)\b", "moves"),
+    (r"\b(?:below|under|drops?|falls?|dips?|goes down|sinks?|less than)\b", "below"),
+    (r"\b(?:above|over|rises?|climbs?|exceeds?|goes up|tops|more than|hits|reaches|breaks)\b", "above"),
+]
+_METRIC_NUM = r"\$?\s*(\d+(?:[.,]\d+)?)\s*(t|b|m|k|trillion|billion|million)?\b\s*(%|percent|points?|pts?)?"
+_SCALE = {"t": 1e12, "trillion": 1e12, "b": 1e9, "billion": 1e9, "m": 1e6, "million": 1e6, "k": 1e3}
+
+
+def _metric_alerts(p: str) -> tuple[list[MetricAlertSpec], list[tuple[int, int]]]:
+    """'alert me when fear & greed drops below 25' → (the alerts, the spans of their sentences). Needs an alert
+    verb, a header metric, a condition and a number in the same sentence."""
+    out: list[MetricAlertSpec] = []
+    spans: list[tuple[int, int]] = []
+    for verb in re.finditer(_ALERT_VERB, p):
+        if spans and verb.start() < spans[-1][1]:
+            continue
+        start = max(p.rfind(c, 0, verb.start()) for c in ".;!?") + 1
+        end = re.compile(r"[;!?]|\.(?!\d)|$").search(p, verb.end())
+        stop = end.start() if end else len(p)
+        clause = p[start:stop]
+        metric = next(((m, k) for pat, k in _METRICS if (m := re.search(pat, clause))), None)
+        if not metric:
+            continue
+        m, key = metric
+        after = clause[m.end():]
+        cond = next((c for pat, c in _METRIC_COND if re.search(pat, after) or re.search(pat, clause)), None)
+        num = re.search(_METRIC_NUM, after) or re.search(_METRIC_NUM, clause[:m.start()])
+        if not cond or not num:
+            continue
+        value = float(num.group(1).replace(",", ""))
+        if cond != "moves" and key not in ("fear_greed", "btc_dominance") and num.group(2):
+            value *= _SCALE[num.group(2)]
+        if value <= 0:
+            continue
+        out.append(MetricAlertSpec(metric=key, condition=cond, value=value))  # type: ignore[arg-type]
+        spans.append((start, stop))
+    return out[:5], spans
+
+
 # "plan a grid bot on INJ", "grid trading settings for SOL", "suggest a grid": a Spot Grid bot plan (not grid lines).
 _GRID = (r"\bgrid[ -]?(?:bots?|trading|strateg(?:y|ies))\b(?:\s+(?:setup|settings?|plan|range))?|"
          r"\bgrid (?:setup|settings?|parameters|params)\b|"
@@ -569,11 +639,23 @@ def _scan_filter(p: str) -> str:
 def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases: set[str] | None = None,
                 chart_symbol: str | None = None) -> AnalysisIntent:
     """Keyword parser used when no LLM is available."""
+    asked = prompt
     p = prompt.lower()
     symbol = find_symbol(prompt, known_bases)
     names_coin = symbol is not None
     if symbol == chart_symbol:
         symbol = None
+
+    # Alerts on the market header ("alert me when BTC dominance moves 1%"): their sentences are spent, so the BTC in
+    # "BTC dominance" is no symbol and their numbers are no price alert.
+    metric_alerts, m_spans = _metric_alerts(p)
+    if metric_alerts:
+        for a, b in m_spans:
+            p, prompt = p[:a] + " " * (b - a) + p[b:], prompt[:a] + " " * (b - a) + prompt[b:]
+        symbol = find_symbol(prompt, known_bases)
+        names_coin = symbol is not None
+        if symbol == chart_symbol:
+            symbol = None
 
     indicators_on, indicators_off, p_ind = _indicator_toggles(p)
     # A trigger alert ("alert me when 1m shows a CHoCH inside the 4h demand"): its sentence is spent, so its
@@ -708,7 +790,7 @@ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases
         re.search(r"\b(?:chart|timeframe|tf)\b", p)) and not feats and not scan_market)
 
     acting = bool(custom or remove or alert_prices or alert_targets or indicators_on or indicators_off
-                  or scan_watchlist or scan_market or trade_plan or grid_plan or zone_trigger or top_down or dip_ladder or sell_check)
+                  or scan_watchlist or scan_market or trade_plan or grid_plan or zone_trigger or top_down or dip_ladder or sell_check or metric_alerts)
     navigating = symbol is not None or switch_chart
     # Not about a chart: the date, macro results, project news, "what is staking?". Answered in plain words.
     general = not feats and not acting and not navigating and not names_coin and not re.search(_CHART_WORDS, p) and (
@@ -732,13 +814,14 @@ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases
     if trade_plan and not remove:
         keep = keep and bool(re.search(r"\b(also|add|plus|too|as well|keep|on top)\b", p))
     return AnalysisIntent(features=feats, timeframe=timeframe, window_timeframes=windows, max_zones=max_zones,
-                          answer_hint=prompt.strip()[:200], custom_levels=custom, remove=remove,
+                          answer_hint=asked.strip()[:200], custom_levels=custom, remove=remove,
                           keep_existing=keep, alert_prices=alert_prices[:10], alert_targets=alert_targets,
                           symbol=symbol, switch_chart=switch_chart, scan_watchlist=scan_watchlist,
                           scan_filter=scan_filter, scan_market=scan_market, trade_plan=trade_plan, grid_plan=grid_plan,
                           indicators_on=indicators_on, indicators_off=indicators_off, zone_trigger=zone_trigger,
                           scan_kind=scan_kind, top_down=top_down, take_profit=take_profit, dip_ladder=dip_ladder,  # type: ignore[arg-type]
-                          general_question=general, sell_check=sell_check)
+                          general_question=general, sell_check=sell_check,
+                          metric_alerts=metric_alerts)
 
 
 _FEATURE_GROUPS: dict[str, list[str]] = {

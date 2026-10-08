@@ -865,3 +865,22 @@ export interface KimiResult {
   notes: string[];
   seconds: number;
 }
+
+export type MetricKey = "fear_greed" | "btc_dominance" | "market_cap" | "volume_24h" | "open_interest" | "liquidations";
+
+export interface MetricAlertSpec {
+  metric: MetricKey;
+  condition: "above" | "below" | "moves";
+  value: number;
+  note?: string | null;
+}
+
+/** An alert on a market header stat (backend metric_alerts.py). */
+export interface MetricAlert extends MetricAlertSpec {
+  id: string;
+  created_at: number;
+  armed: boolean;
+  base_value: number | null;
+  triggered_at: number | null;
+  triggered_value: number | null;
+}

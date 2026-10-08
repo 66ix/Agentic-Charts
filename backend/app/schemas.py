@@ -248,6 +248,19 @@ ScanKind = Literal["setups", "spot_buys", "grid_coins"]
 SCAN_KINDS: tuple[str, ...] = ("setups", "spot_buys", "grid_coins")
 
 
+MetricKey = Literal["fear_greed", "btc_dominance", "market_cap", "volume_24h", "open_interest", "liquidations"]
+
+
+class MetricAlertSpec(BaseModel):
+    """An alert on a market header metric (metric_alerts.py)."""
+
+    metric: MetricKey
+    condition: Literal["above", "below", "moves"]
+    value: float = Field(..., gt=0, description="The level, or for moves the distance (points for Fear & Greed and "
+                                               "BTC dominance, percent for the dollar metrics)")
+    note: Optional[str] = Field(None, max_length=200)
+
+
 class AnalysisIntent(BaseModel):
     """What the user asked for, normalised. Produced by the LLM or the rule parser."""
 
@@ -271,6 +284,8 @@ class AnalysisIntent(BaseModel):
     indicators_on: list[IndicatorName] = Field(default_factory=list)
     indicators_off: list[IndicatorName] = Field(default_factory=list)
     zone_trigger: Optional[ZoneTriggerIntent] = Field(None, description="Set a lower-timeframe trigger alert")
+    metric_alerts: list[MetricAlertSpec] = Field(default_factory=list, max_length=5,
+                                                 description="Alerts on the market header (Fear & Greed, dominance...)")
     scan_kind: ScanKind = Field("setups", description="What a market scan ranks: trade setups, spot buys, grid coins")
     top_down: bool = Field(False, description="Walk 1D → 4H → 1H → 15m drawing only the valid levels (top_down.py)")
     take_profit: bool = Field(False, description="Where to sell spot holdings: the zones above price")
@@ -306,7 +321,7 @@ class AnalysisIntent(BaseModel):
         return bool(self.custom_levels or self.remove or self.alert_prices or self.alert_targets or self.symbol
                     or self.switch_chart or self.scan_watchlist or self.scan_market or self.trade_plan or self.indicators_on
                     or self.indicators_off or self.zone_trigger or self.grid_plan or self.top_down or self.dip_ladder
-                    or self.general_question or self.sell_check)
+                    or self.general_question or self.sell_check or self.metric_alerts)
 
     @model_validator(mode="after")
     def _default_features(self) -> "AnalysisIntent":

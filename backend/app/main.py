@@ -77,6 +77,7 @@ from .symbols import find_symbol
 from .ta_agent import analyze as analyze_chart
 from .schemas import (INTERVALS, AnalyzeRequest, AnalyzeResponse, CreateAlertsRequest, KimiResponse, MarketMetrics,
                       ScanResult, ZoneTriggerSpec)
+from .metric_alerts import CreateMetricAlertsRequest, MetricAlertService
 from .signal_alerts import SIGNALS, CreateSignalAlertsRequest, SignalAlertPatch, SignalAlertService
 from .stream_hub import StreamHub
 from .trade_manager import NewManagedTrade, TradeManager, TradePatch, from_journal
@@ -117,6 +118,10 @@ async def lifespan(app: FastAPI):
     app.state.holdings_watch = HoldingsWatch(app.state.binance, app.state.signal_alerts)
     app.state.holdings_watch.start()
     await app.state.signal_alerts.start()
+    # Alerts on the header bar: Fear & Greed, BTC dominance, market cap... (metric_alerts.py).
+    app.state.metric_alerts = MetricAlertService(app.state.metrics, app.state.alerts,
+                                                 get_settings().metric_alerts_store)
+    app.state.metric_alerts.start()
     app.state.brief = BriefService(market, app.state.kimi, app.state.derivatives, app.state.alerts,
                                    events_provider=app.state.events.upcoming_events)
     app.state.brief.start()
@@ -147,6 +152,7 @@ async def lifespan(app: FastAPI):
     await app.state.binance.close()
     await app.state.binance.account.close()
     await app.state.signal_alerts.close()
+    await app.state.metric_alerts.close()
     await asyncio.gather(app.state.futures.close(), app.state.events.close(), app.state.indexes.close())
     await app.state.alerts.close()
     await app.state.hub.shutdown()
@@ -252,7 +258,8 @@ async def agent_analyze(req: AnalyzeRequest, request: Request) -> AnalyzeRespons
         return await run_analysis(req, st.market, st.llm, st.derivatives, st.kimi,
                                   getattr(st, "futures", None), getattr(st, "events", None),
                                   getattr(st, "market_scanner", None), levels=getattr(st, "session_levels", None),
-                                  gridbots=getattr(st, "gridbots", None), metrics=getattr(st, "metrics", None))
+                                  gridbots=getattr(st, "gridbots", None), metrics=getattr(st, "metrics", None),
+                                  metric_alerts=getattr(st, "metric_alerts", None))
     except MarketDataError as exc:
         raise HTTPException(502, str(exc)) from exc
     except ValueError as exc:
@@ -280,6 +287,7 @@ async def agent_analyze_stream(req: AnalyzeRequest, request: Request) -> Streami
                                      getattr(st, "futures", None), getattr(st, "events", None),
                                      getattr(st, "market_scanner", None), levels=getattr(st, "session_levels", None),
                                      gridbots=getattr(st, "gridbots", None), metrics=getattr(st, "metrics", None),
+                                     metric_alerts=getattr(st, "metric_alerts", None),
                                      on_result=on_result, on_delta=on_delta)
             await queue.put({"type": "done", "response": res.model_dump(mode="json")})
         except MarketDataError as exc:
@@ -309,6 +317,9 @@ async def agent_analyze_stream(req: AnalyzeRequest, request: Request) -> Streami
 #   PATCH  /api/alerts/{id}               edit price / zone / label / note / repeat / expires_at
 #   GET    /api/alerts/history?limit=     every fire (price, signal, brief), newest first
 #   DELETE /api/alerts/history            clear it
+#   GET    /api/metric-alerts             {alerts}: alerts on the header bar (Fear & Greed, BTC dominance...)
+#   POST   /api/metric-alerts             {alerts: [{metric, condition: above|below|moves, value, note?}]}
+#   DELETE /api/metric-alerts/{id}
 #   GET    /api/signal-alerts             {alerts, signals: [{id, name, description}]}
 #   POST   /api/signal-alerts             {symbols, interval, signal, repeat?, note?} → one alert per symbol
 #   PATCH  /api/signal-alerts/{id}        {armed?, repeat?, note?}
@@ -340,6 +351,27 @@ async def alert_history(request: Request, limit: int = Query(100, ge=1, le=500))
 @app.delete("/api/alerts/history")
 async def clear_alert_history(request: Request) -> dict:
     return {"removed": request.app.state.alerts.history.clear()}
+
+
+@app.get("/api/metric-alerts")
+async def list_metric_alerts(request: Request) -> dict:
+    return {"alerts": [a.model_dump() for a in request.app.state.metric_alerts.list()]}
+
+
+@app.post("/api/metric-alerts")
+async def create_metric_alerts(req: CreateMetricAlertsRequest, request: Request) -> dict:
+    try:
+        created = await request.app.state.metric_alerts.add(req.alerts)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"alerts": [a.model_dump() for a in created]}
+
+
+@app.delete("/api/metric-alerts/{alert_id}")
+async def delete_metric_alert(alert_id: str, request: Request) -> dict:
+    if not request.app.state.metric_alerts.remove(alert_id):
+        raise HTTPException(404, "No such market alert")
+    return {"ok": True}
 
 
 @app.get("/api/signal-alerts")

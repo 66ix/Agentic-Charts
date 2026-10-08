@@ -103,6 +103,9 @@ class Settings:
     # Server-side price alerts. ALERTS_STORE=memory keeps them in memory only (lost on restart).
     alerts_store: str = field(default_factory=lambda: _env(
         "ALERTS_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "alerts.json")))
+    # Alerts on the market header (metric_alerts.py). METRIC_ALERTS_STORE=memory keeps them in memory only.
+    metric_alerts_store: str = field(default_factory=lambda: _env(
+        "METRIC_ALERTS_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "metric_alerts.json")))
     telegram_bot_token: str = field(default_factory=lambda: _env("TELEGRAM_BOT_TOKEN", ""), repr=False)
     telegram_chat_id: str = field(default_factory=lambda: _env("TELEGRAM_CHAT_ID", ""))
     discord_webhook_url: str = field(default_factory=lambda: _env("DISCORD_WEBHOOK_URL", ""), repr=False)

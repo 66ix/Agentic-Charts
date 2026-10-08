@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
+import MarketAlerts from "@/components/MarketAlerts";
 import { requestNotificationPermission, type AlertsApi, type ChannelTestResult } from "@/hooks/useAlerts";
 import { usePersistentState } from "@/hooks/usePersistentState";
 import {
@@ -257,6 +258,7 @@ function PriceTab({ p }: { p: AlertsPanelProps }) {
           />
         ),
       )}
+      {api && <MarketAlerts />}
       <p className="px-3 py-2 text-[10px] text-mute">Alerts are checked on the server, so they fire even with this tab closed.</p>
     </div>
   );
