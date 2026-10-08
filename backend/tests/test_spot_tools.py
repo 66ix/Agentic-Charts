@@ -23,6 +23,7 @@ from app.main import app  # noqa: E402
 from app.market_data import MarketData  # noqa: E402
 from app.market_scanner import grid_candidate, spot_score  # noqa: E402
 from app.schemas import AnalyzeRequest, MarketSetup, SetupAgreement, TradePlan  # noqa: E402
+from app.sell_check import check as sell_check  # noqa: E402
 from app.top_down import build_step, ladder  # noqa: E402
 from app.trade_plan import Level  # noqa: E402
 
@@ -73,6 +74,10 @@ def test_rule_parser_understands_the_new_shortcuts():
         "key levels": {"general_question": False},
         "what is funding like?": {"general_question": False},
         "any news on INJ?": {"general_question": False},
+        "What should I sell or trim?": {"sell_check": True, "trade_plan": None, "scan_watchlist": False},
+        "which of my coins should I sell?": {"sell_check": True, "scan_watchlist": False},
+        "should I sell INJ?": {"sell_check": True, "trade_plan": None},
+        "give me a short setup": {"sell_check": False, "trade_plan": "short"},
     }
     for prompt, want in cases.items():
         got = rule_intent(prompt, chart_symbol="INJUSDT").model_dump()
@@ -313,3 +318,41 @@ def test_market_scan_ranks_spot_buys_and_grid_coins_and_the_agent_answers_from_t
         assert res.setups and all(s.direction == "long" for s in res.setups)  # spot mode: no shorts
     finally:
         asyncio.run(scanner.market.close())
+
+
+# ------------------------------------------------------------- sell or trim
+
+
+def test_sell_check_flags_lost_support_and_rejection_at_resistance_but_not_a_healthy_trend():
+    broke = _df(list(_wave(200, amp=0.05)) + [97, 95.5, 95.2, 94.0, 93.2])
+    lost = sell_check("XUSDT", "4h", broke, None, "t")
+    assert lost and lost.action == "sell" and lost.zone == "H4 support" and "Lost H4 support" in lost.reason
+    assert lost.sell_low > lost.last_price  # sell into the retest from below
+
+    top = _df(list(_wave(198, amp=0.05)))
+    top.loc[top.index[-1], "high"] = top["close"].iloc[-1] * 1.03  # a long upper wick into the zone
+    trim = sell_check("XUSDT", "4h", top, None, "t")
+    assert trim and trim.action == "trim" and trim.sell_high >= trim.last_price
+    assert trim.support_below and trim.support_below < trim.last_price and "rejection wick" in trim.reason
+
+    assert sell_check("XUSDT", "4h", _df(list(np.linspace(80, 100, 200))), None, "t") is None
+
+
+def test_agent_sell_check_answers_for_the_watchlist_and_a_spot_short_checks_this_coin():
+    res = _run("What should I sell or trim?", watchlist=["BTCUSDT", "ETHUSDT", "INJUSDT"])
+    assert res.intent.sell_check and res.plan is None and res.navigate is None
+    assert all(r.symbol in ("BTCUSDT", "ETHUSDT", "INJUSDT") for r in res.sells)
+    assert res.summary  # either the flagged coins or "nothing to sell"
+    res = _run("should I sell INJ?", watchlist=["BTCUSDT", "ETHUSDT"])
+    assert res.intent.sell_check and all(r.symbol == "INJUSDT" for r in res.sells)
+    res = _run("give me a short setup")
+    assert "Spot mode is on" in res.summary and all(r.symbol == "INJUSDT" for r in res.sells)
+    res = _run("give me a short setup", spot_only=False)
+    assert res.sells == []
+
+
+def test_sell_check_endpoint():
+    with TestClient(app) as c:
+        r = c.post("/api/sell-check", json={"symbols": ["BTCUSDT", "ETHUSDT"], "interval": "4h"})
+        assert r.status_code == 200 and all(x["action"] in ("sell", "trim") for x in r.json())
+        assert c.post("/api/sell-check", json={"symbols": "BTC"}).status_code == 422

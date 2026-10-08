@@ -57,7 +57,7 @@ INTENT_SCHEMA: dict[str, Any] = {
                  "remove", "keep_existing", "alert_prices", "alert_targets", "symbol", "switch_chart",
                  "scan_watchlist", "scan_filter", "scan_market", "trade_plan", "grid_plan", "indicators_on",
                  "indicators_off", "zone_trigger", "scan_kind", "top_down", "take_profit", "dip_ladder",
-                 "general_question"],
+                 "general_question", "sell_check"],
     "properties": {
         "features": {
             "type": "array",
@@ -215,6 +215,13 @@ INTENT_SCHEMA: dict[str, Any] = {
                            "should I place my buy orders?'. The app splits a budget across the demand zones below "
                            "price and tests it on 90 days. features empty, keep_existing true.",
         },
+        "sell_check": {
+            "type": "boolean",
+            "description": "true for 'what should I sell or trim?', 'should I sell INJ?', 'which coins should I "
+                           "sell?', 'any sell signals?': the app checks the coin (if one is named) or the watchlist "
+                           "for lost support and rejections at resistance. features empty, keep_existing true, "
+                           "scan_watchlist false.",
+        },
         "general_question": {
             "type": "boolean",
             "description": "true when the question isn't about reading a chart: today's date or time, macro results "
@@ -247,7 +254,7 @@ INTENT_SYSTEM = (
     "'Grid bot' or 'grid trading' means grid_plan (a Binance Spot Grid bot), not a trade plan; 'best grid bot coins' "
     "is a market scan with scan_kind grid_coins instead. 'Best spot buys' or 'what should I buy' is a market scan with "
     "scan_kind spot_buys. 'Top-down' is top_down. 'Where do I take profit' is take_profit. 'Dip-buy ladder' is "
-    "dip_ladder. A question that isn't about a chart (the date, FOMC or CPI results, coin upgrades, what something "
+    "dip_ladder. 'What should I sell or trim' or 'should I sell X' is sell_check, not a short plan. A question that isn't about a chart (the date, FOMC or CPI results, coin upgrades, what something "
     "means) is general_question with no features and keep_existing true. "
     "When the context says SPOT ONLY the user buys coins outright and never shorts: 'what's the trade here?' is "
     "trade_plan long, and a market scan is for longs or spot buys. "
@@ -285,6 +292,9 @@ NARRATE_SYSTEM = (
     "out across them. FACTS.top_down is a top-down walk: say which timeframes got levels (and the key ones) and which "
     "were skipped and why; the levels stay visible on the lower timeframes. FACTS.ladder is a dip-buy ladder: give "
     "the buy prices and shares, the average price if all fill, the take profit, and the backtest against holding. "
+    "FACTS.sell_check lists coins to sell or trim, strongest first: for each give the action, why (lost support or "
+    "rejected at resistance), the zone to sell into and the next support below; if none is flagged, say nothing needs "
+    "selling right now. "
     "When FACTS.trading_style says spot only, never suggest shorting, futures or leverage: a bearish read means wait "
     "for a lower buy zone or take profit on coins already held. "
     "No disclaimers, no markdown."
@@ -385,6 +395,10 @@ _SPOT_BUYS = (r"\b(?:best |good |top )?spot (?:buys?|coins?|opportunit\w+|entrie
               r"\bwhat(?:'s| is) (?:worth|good) buying\b")
 _TAKE_PROFIT = (r"\btake[- ]?profits?\b|\bwhere (?:do|should|would|can) i (?:sell|exit|take (?:some )?profits?)\b|"
                 r"\bwhen (?:do|should) i sell\b|\bprofit targets?\b|\bwhere to (?:sell|take profits?)\b")
+# Spot holders' answer to a short: which coins to sell or trim ("what should I sell or trim?", "should I sell INJ?").
+_SELL = (r"\bsell or trim\b|\bwhat (?:should|do|can) i (?:sell|trim)\b|\bshould i (?:sell|trim|dump)\b|"
+         r"\b(?:which|any|anything)\b[^.?!]{0,30}?\b(?:to |should i )?(?:sell|trim)\b|\bsell signals?\b|"
+         r"\btime to sell\b")
 _DATE_Q = (r"\bwhat(?:'s| is)? (?:the |today'?s )?(?:date|day|time)\b|\bwhat day is (?:it|today)\b|"
            r"\btoday'?s date\b|\bwhat time is it\b|\bwhat (?:year|month) is it\b")
 _MACRO = (r"\b(?:fomc|the fed|federal reserve|powell|cpi|ppi|nfp|payrolls?|inflation|interest rates?|"
@@ -585,6 +599,9 @@ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases
     take_profit = bool(re.search(_TAKE_PROFIT, scan))
     if take_profit:
         scan = re.sub(_TAKE_PROFIT, " ", scan)
+    sell_check = not take_profit and bool(re.search(_SELL, scan))
+    if sell_check:
+        scan = re.sub(_SELL, " ", scan)
 
     scan_market = scan_kind != "setups" or (
         symbol is None and bool(re.search(_MARKET_SCAN, scan)) and not re.search(_NOT_MARKET, scan))
@@ -648,7 +665,7 @@ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases
         re.search(r"\b(?:chart|timeframe|tf)\b", p)) and not feats and not scan_market)
 
     acting = bool(custom or remove or alert_prices or alert_targets or indicators_on or indicators_off
-                  or scan_watchlist or scan_market or trade_plan or grid_plan or zone_trigger or top_down or dip_ladder)
+                  or scan_watchlist or scan_market or trade_plan or grid_plan or zone_trigger or top_down or dip_ladder or sell_check)
     navigating = symbol is not None or switch_chart
     # Not about a chart: the date, macro results, project news, "what is staking?". Answered in plain words.
     general = not feats and not acting and not navigating and not names_coin and not re.search(_CHART_WORDS, p) and (
@@ -678,7 +695,7 @@ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases
                           scan_filter=scan_filter, scan_market=scan_market, trade_plan=trade_plan, grid_plan=grid_plan,
                           indicators_on=indicators_on, indicators_off=indicators_off, zone_trigger=zone_trigger,
                           scan_kind=scan_kind, top_down=top_down, take_profit=take_profit, dip_ladder=dip_ladder,  # type: ignore[arg-type]
-                          general_question=general)
+                          general_question=general, sell_check=sell_check)
 
 
 _FEATURE_GROUPS: dict[str, list[str]] = {

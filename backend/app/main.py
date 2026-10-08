@@ -40,6 +40,7 @@ from .derivatives import DerivativesService
 from .gridbot import GridBotCreate, GridBotPatch, GridBotService, GridSimulateRequest, error_text
 from .grid_planner import GridBacktestRequest, GridPlanRequest, backtest_grid, plan_grid
 from .dip_ladder import LadderRequest, plan_ladder
+from .sell_check import sell_scan
 from .top_down import ladder as walk_ladder
 from .top_down import walk
 from .binance_account import BinanceAccount, BinanceApiError, BinanceKeyError
@@ -57,7 +58,7 @@ from .model_choice import ModelChoice, ModelChooser
 from .market_scanner import MarketScanner
 from .orderbook_heatmap import OrderbookHeatmapService
 from .ratelimit import RateLimitMiddleware
-from .scanner import WatchlistCache, tickers
+from .scanner import DEFAULT_WATCHLIST, WatchlistCache, tickers
 from .session_levels import SessionLevelsService
 from .schemas import (INTERVALS, AnalyzeRequest, AnalyzeResponse, CreateAlertsRequest, KimiResponse, MarketMetrics,
                       ScanResult, ZoneTriggerSpec)
@@ -580,6 +581,7 @@ async def gridbot_backtest(request: Request, body: dict = Body(...)) -> dict:
 # Spot tools:
 #   POST   /api/top-down                  {symbol, start?, end?} → TopDownResult (top_down.py)
 #   POST   /api/dip-ladder                {symbol, budget?, rungs?, timeframe?, days?, fee_rate?} → LadderResult
+#   POST   /api/sell-check                {symbols, interval?} → [SellSignal] (sell_check.py)
 
 
 @app.post("/api/top-down")
@@ -601,6 +603,16 @@ async def dip_ladder(request: Request, body: dict = Body(...)) -> dict:
         raise HTTPException(502, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/sell-check")
+async def sell_check(request: Request, body: dict = Body(...)) -> list[dict]:
+    raw = body.get("symbols") or DEFAULT_WATCHLIST
+    if not isinstance(raw, list):
+        raise HTTPException(422, "symbols must be a list")
+    symbols = [s for s in (_norm_symbol(str(x)) for x in raw[:40]) if s]
+    rows = await sell_scan(request.app.state.market, symbols, str(body.get("interval") or "4h"))
+    return [r.model_dump() for r in rows]
 
 
 @app.get("/api/gridbots")

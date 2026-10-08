@@ -132,6 +132,8 @@ export interface AnalysisIntent {
   dip_ladder?: boolean;
   /** Not about a chart (the date, FOMC results, coin upgrades): answered in plain language. */
   general_question?: boolean;
+  /** Spot: which coins to sell or trim (lost support, rejected at resistance). */
+  sell_check?: boolean;
 }
 
 export type ScanKind = "setups" | "spot_buys" | "grid_coins";
@@ -354,6 +356,25 @@ export interface LadderResult {
 }
 
 /** A web page or headline an answer used. */
+/** A coin to sell or trim (backend/app/sell_check.py). Mirrors SellSignal in schemas.py. */
+export interface SellSignal {
+  symbol: string;
+  interval: Interval;
+  last_price: number;
+  change_pct: number | null;
+  action: "sell" | "trim";
+  reason: string;
+  sell_low: number;
+  sell_high: number;
+  /** "D1 support", "H4 supply" */
+  zone: string;
+  support_below: number | null;
+  drop_pct: number | null;
+  rsi: number | null;
+  score: number;
+  data_source: string;
+}
+
 export interface AnswerSource {
   title: string;
   url: string;
@@ -500,6 +521,8 @@ export interface AnalyzeResponse {
   ladder?: LadderResult | null;
   /** Web pages or headlines a plain-language answer used. */
   sources?: AnswerSource[];
+  /** Sell or trim signals, strongest first. */
+  sells?: SellSignal[];
   generated_at: string;
 }
 

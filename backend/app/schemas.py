@@ -276,6 +276,8 @@ class AnalysisIntent(BaseModel):
     take_profit: bool = Field(False, description="Where to sell spot holdings: the zones above price")
     dip_ladder: bool = Field(False, description="Plan a spot buy-the-dip ladder and test it (dip_ladder.py)")
     general_question: bool = Field(False, description="Not about a chart: answered in plain language (general.py)")
+    sell_check: bool = Field(False, description="Spot: which coins to sell or trim, lost support or at resistance "
+                                                "(sell_check.py)")
 
     @field_validator("symbol")
     @classmethod
@@ -304,7 +306,7 @@ class AnalysisIntent(BaseModel):
         return bool(self.custom_levels or self.remove or self.alert_prices or self.alert_targets or self.symbol
                     or self.switch_chart or self.scan_watchlist or self.scan_market or self.trade_plan or self.indicators_on
                     or self.indicators_off or self.zone_trigger or self.grid_plan or self.top_down or self.dip_ladder
-                    or self.general_question)
+                    or self.general_question or self.sell_check)
 
     @model_validator(mode="after")
     def _default_features(self) -> "AnalysisIntent":
@@ -443,6 +445,25 @@ class MarketSetup(BaseModel):
     data_source: str = "binance"
 
 
+class SellSignal(BaseModel):
+    """Mirrors SellSignal in frontend/lib/types.ts."""
+
+    symbol: str
+    interval: str
+    last_price: float
+    change_pct: Optional[float] = None
+    action: Literal["sell", "trim"]
+    reason: str
+    sell_low: float = Field(..., description="Bottom of the zone to sell into")
+    sell_high: float = Field(..., description="Top of the zone to sell into")
+    zone: str = Field("", description="The zone it sells into: 'D1 support', 'H4 supply'")
+    support_below: Optional[float] = Field(None, description="Top of the next support below price")
+    drop_pct: Optional[float] = Field(None, description="Distance to that support, % of price")
+    rsi: Optional[float] = None
+    score: float
+    data_source: str = "binance"
+
+
 class GridCoin(BaseModel):
     """A coin that has been ranging well enough for a Spot Grid bot (market_scanner.grid_candidate). Mirrors GridCoin
     in frontend/lib/types.ts."""
@@ -551,6 +572,7 @@ class AnalyzeResponse(BaseModel):
     top_down: Optional[dict[str, Any]] = Field(None, description="A top-down walk for the client to play (top_down.py)")
     ladder: Optional[dict[str, Any]] = Field(None, description="A dip-buy ladder and its backtest (dip_ladder.py)")
     sources: list[dict[str, str]] = Field(default_factory=list, description="Web pages or headlines an answer used")
+    sells: list[SellSignal] = Field(default_factory=list, description="Sell or trim signals (sell_check.py)")
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

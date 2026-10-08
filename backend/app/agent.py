@@ -33,6 +33,7 @@ from .llm import ChartContext, LLMClient
 from .market_data import INTERVAL_SECONDS, MarketData, candles_to_df
 from .market_scanner import MarketScanner, MarketScanResult
 from .scanner import DEFAULT_WATCHLIST, scan, tickers
+from .sell_check import describe_sells, sell_facts, sell_scan, timeframe_for
 from .session_levels import SessionLevelsService, level_facts
 from .schemas import (
     FEATURE_KINDS,
@@ -386,6 +387,22 @@ def describe_grid_coins(res: MarketScanResult) -> str:
     return f"Best grid bot coins on {res.interval}: " + "; ".join(f"{g.symbol}: {g.note}" for g in rows)
 
 
+def sell_overlays(rows: list, symbol: str) -> list:
+    """The zone to sell into for the chart's own coin."""
+    return [BoxOverlay(id=_new_id(), kind="plan_target", price_low=r.sell_low, price_high=r.sell_high,
+                       color=rgba(ORANGE, 0.12), border_color=rgba(ORANGE, 0.85),
+                       label=f"{'Sell' if r.action == 'sell' else 'Trim'} zone ({r.zone})")
+            for r in rows if r.symbol == symbol][:1]
+
+
+async def _sells(market: MarketData, symbols: list[str], tf: str) -> list | None:
+    try:
+        return await sell_scan(market, symbols, tf)
+    except Exception as exc:  # the answer goes out without it and says so
+        log.warning("Sell check failed: %s", exc)
+        return None
+
+
 SPOT_SHORT_NOTE = ("Spot mode is on, so there is no short plan. For spot that means waiting for a lower buy zone, or "
                    "taking profit on coins already held.")
 
@@ -525,7 +542,15 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
     want_walk = intent.top_down and not custom_chart
     want_ladder = intent.dip_ladder and not custom_chart
     want_general = intent.general_question and bool(req.prompt.strip())
+    # "What should I sell?" checks the watchlist, "should I sell INJ?" that coin; a short asked for in spot mode
+    # checks this coin, the spot holder's version of a short.
+    want_sell = (intent.sell_check or spot_note is not None) and not custom_chart
+    base = re.sub(r"(?:USDT|USDC|FDUSD|BUSD|BTC)$", "", symbol) or symbol
+    one_coin = bool(intent.symbol or spot_note or re.search(rf"\b{re.escape(base)}\b", req.prompt, re.I))
+    sell_symbols = [symbol] if one_coin else (req.watchlist or DEFAULT_WATCHLIST)
+    sell_tf = timeframe_for(tf)
     extras = asyncio.gather(
+        _sells(market, sell_symbols, sell_tf) if want_sell else _none(),
         _walk(market, symbol) if want_walk else _none(),
         _ladder(market, symbol, tf) if want_ladder else _none(),
         general.context(events, req.prompt) if want_general else _none())
@@ -539,7 +564,7 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         _headlines(events, symbol) if want_news else _empty(), market_scan(),
         _guarded(levels.get(symbol, tf), "session levels") if want_levels else _none(),
         _grid_plan(gridbots, symbol) if want_grid else _none(), extras)
-    walked, ladder, general_ctx = extra
+    sells, walked, ladder, general_ctx = extra
 
     df = candles_to_df(candles)
     # Detection is CPU-bound (SciPy); keep the event loop free for streams.
@@ -570,6 +595,10 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
     if ladder:
         facts["ladder"] = ladder_facts(ladder)
         plan_ovs = plan_ovs + [ov.model_copy(update={"id": _new_id()}) for ov in ladder.overlays]
+    if want_sell:
+        facts["sell_check"] = sell_facts(sells, len(sell_symbols)) if sells is not None else {
+            "error": "The sell check could not run right now."}
+        plan_ovs = plan_ovs + sell_overlays(sells or [], symbol)
     if walked:
         facts["top_down"] = walk_facts(walked)
     elif want_walk:
@@ -657,6 +686,9 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         lead.append(describe_grid_coins(mscan))
     if spot_note:
         lead.append(spot_note)
+    if want_sell:
+        lead.append(describe_sells(sells, len(sell_symbols), sell_tf) if sells is not None else
+                    "The sell check could not run right now.")
     if lead:
         fallback = " ".join(lead) + " " + fallback
     sources: list[dict[str, str]] = []
@@ -693,6 +725,7 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         top_down=walked.model_dump() if walked else None,
         ladder=ladder.model_dump() if ladder else None,
         sources=sources,
+        sells=sells or [],
     )
 
 

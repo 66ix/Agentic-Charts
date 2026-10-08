@@ -531,6 +531,7 @@ export default function ChartWorkspace() {
           walk: res.top_down ?? undefined,
           ladder: res.ladder ?? undefined,
           sources: res.sources?.length ? res.sources : undefined,
+          sells: res.sells?.length ? res.sells : undefined,
           steps: res.steps?.length ? res.steps : undefined,
           symbol: target.symbol,
           interval: target.interval,

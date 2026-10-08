@@ -39,6 +39,7 @@ import {
   type MarketSetup,
   type Overlay,
   type ScanResult,
+  type SellSignal,
   type TopDownResult,
   type TradePlan,
   type TriggerInterval,
@@ -65,6 +66,8 @@ export interface AgentMessage {
   walk?: TopDownResult;
   /** A spot buy-the-dip ladder with its backtest. */
   ladder?: LadderResult;
+  /** Coins to sell or trim. */
+  sells?: SellSignal[];
   /** Web pages a general answer was based on. */
   sources?: AnswerSource[];
   /** The chart the answer was drawn on, and the question it answered (for pins and the journal). */
@@ -96,6 +99,7 @@ const SHORTCUTS = [
   "Best grid bot coins",
   "Where do I take profit?",
   "Plan a dip-buy ladder",
+  "What should I sell or trim?",
 ];
 
 const FOLLOW_UPS = ["Also show swings", "Same on daily", "Does the daily agree?", "Alert me on these levels", "Add RSI"];
@@ -326,6 +330,39 @@ function LadderCard({ ladder }: { ladder: LadderResult }) {
   );
 }
 
+function SellList({ rows, onPick }: { rows: SellSignal[]; onPick(symbol: string): void }) {
+  return (
+    <div className="mt-1.5 overflow-hidden rounded-md border border-line">
+      {rows.slice(0, 8).map((r) => (
+        <button
+          key={r.symbol}
+          type="button"
+          onClick={() => onPick(r.symbol)}
+          className="flex w-full items-start gap-2 border-b border-line px-2 py-1 text-left text-[11px] last:border-b-0 hover:bg-panel2"
+          title={r.reason}
+        >
+          <span className="w-20 shrink-0 font-medium text-ink">{displaySymbol(r.symbol)}</span>
+          <span className={clsx("w-9 shrink-0 font-semibold uppercase", r.action === "sell" ? "text-down" : "text-yellow-300")}>
+            {r.action}
+          </span>
+          <span className="min-w-0 flex-1 text-mute">
+            <span className="font-mono text-ink">
+              {formatPrice(r.sell_low)}–{formatPrice(r.sell_high)}
+            </span>{" "}
+            {r.zone}
+            {r.support_below != null && r.drop_pct != null && (
+              <>
+                {" "}
+                · next support <span className="font-mono">{formatPrice(r.support_below)}</span> ({r.drop_pct.toFixed(1)}%)
+              </>
+            )}
+          </span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function Sources({ rows }: { rows: AnswerSource[] }) {
   return (
     <div className="mt-1.5 space-y-0.5 text-[11px]">
@@ -505,6 +542,7 @@ export default function AgentPanel(p: Props) {
                         <GridCoinList rows={m.gridCoins} onPick={(c) => (p.onOpenGridCoin ? p.onOpenGridCoin(c) : p.onPickSymbol(c.symbol))} />
                       </div>
                     )}
+                    {m.sells && <SellList rows={m.sells} onPick={p.onPickSymbol} />}
                     {m.sources && <Sources rows={m.sources} />}
                     {m.overlays && m.overlays.length > 0 && (
                       <div className="mt-1.5 flex flex-wrap gap-1">
