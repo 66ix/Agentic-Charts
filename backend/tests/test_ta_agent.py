@@ -110,3 +110,23 @@ def test_rule_intent(prompt, feature, tf):
     intent = rule_intent(prompt)
     assert feature in intent.features
     assert intent.timeframe == tf
+
+
+def test_zone_record_counts_held_and_broken_tests_from_the_zones_side():
+    import numpy as np
+    import pandas as pd
+
+    from app.ta_agent import Zone, zone_record
+
+    # Support at 100–101 (ATR 1): away, back to 100.8 and up to 103 (held), away, back and up again (held),
+    # back and a close at 99 (broke), then a test still open at the end (left out).
+    closes = [104, 104, 103, 101.5, 101.2, 102.5, 103.5, 104, 102, 101.3, 102.8, 104, 103, 101.4, 100.5, 99.0,
+              102, 103, 101.3]
+    c = np.asarray(closes, dtype=float)
+    o = np.r_[c[0], c[:-1]]
+    lows = np.minimum(o, c) - 0.6
+    df = pd.DataFrame({"time": 1_700_000_000 + np.arange(len(c)) * 3600, "open": o,
+                       "high": np.maximum(o, c) + 0.2, "low": lows, "close": c, "volume": 1.0})
+    z = Zone(100.0, 101.0, "support", 3, 1_700_000_000, 0, 0.5)
+    r = zone_record(df, z, 1.0)
+    assert r == {"held": 2, "broke": 1, "tests": 3}

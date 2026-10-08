@@ -5,7 +5,7 @@ import { Eye, EyeOff, PinOff, Trash2 } from "lucide-react";
 
 import { displaySymbol, formatPrice } from "@/lib/format";
 import { isVisible, LAYERS, type LayerId, type LayerVisibility } from "@/lib/layers";
-import type { Drawing } from "@/lib/types";
+import type { Drawing, Overlay } from "@/lib/types";
 
 export interface PinnedSet {
   id: string;
@@ -41,6 +41,15 @@ interface Props {
   onUnpin(id: string): void;
   onSelectDrawing(id: string): void;
   onDeleteDrawing(id: string): void;
+  /** The agent's levels on the active chart, each removable on its own. */
+  aiLevels: Overlay[];
+  onDeleteAiLevel(index: number): void;
+}
+
+function levelTitle(o: Overlay): string {
+  const where =
+    o.type === "box" ? `${formatPrice(o.price_low)}–${formatPrice(o.price_high)}` : o.type === "horizontal_line" ? formatPrice(o.price) : "";
+  return `${o.label || o.kind || o.type}${where && !(o.label ?? "").includes(where) ? ` · ${where}` : ""}`;
 }
 
 /** Eye toggles per layer, the pinned answers and the user's drawings on the active chart. */
@@ -80,6 +89,20 @@ export default function LayersPanel(p: Props) {
                 </button>
               );
             })}
+          </div>
+        ))}
+
+        <div className="px-3 pb-1 pt-4 text-[10px] font-semibold uppercase tracking-wide text-mute">AI levels on this chart</div>
+        {p.aiLevels.length === 0 && <p className="px-3 text-[11px] text-mute">The agent hasn&apos;t drawn anything on this chart.</p>}
+        {p.aiLevels.map((o, i) => (
+          <div key={o.id ?? i} className="flex items-center gap-2 px-3 py-1">
+            <span className="h-2.5 w-2.5 shrink-0 rounded-sm" style={{ background: o.color }} />
+            <span className="min-w-0 flex-1 truncate text-ink" title={levelTitle(o)}>
+              {levelTitle(o)}
+            </span>
+            <button type="button" className="btn-ghost h-6 w-6 p-0 hover:text-down" title="Remove this level" aria-label="Remove AI level" onClick={() => p.onDeleteAiLevel(i)}>
+              <Trash2 className="h-3.5 w-3.5" />
+            </button>
           </div>
         ))}
 

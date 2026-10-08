@@ -99,6 +99,95 @@ export function analyze(
   });
 }
 
+/**
+ * `analyze`, streamed: `onResult` gets the drawings, plan and the rest as soon as they are ready (summary still
+ * empty) and `onDelta` each piece of the summary as the model writes it. Resolves with the full answer. Uses the
+ * plain request when the backend has no stream endpoint.
+ */
+export async function analyzeStream(
+  body: Parameters<typeof analyze>[0],
+  handlers: { onResult: (res: AnalyzeResponse) => void; onDelta: (text: string) => void },
+  signal?: AbortSignal,
+): Promise<AnalyzeResponse> {
+  const ctrl = new AbortController();
+  // Long answers keep streaming, so the timeout only covers waiting for the next event.
+  let timer = setTimeout(() => ctrl.abort(), 90_000);
+  const touch = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => ctrl.abort(), 90_000);
+  };
+  signal?.addEventListener("abort", () => ctrl.abort(), { once: true });
+  let res: Response;
+  try {
+    res = await fetch(`${API_URL}/api/agent/analyze/stream`, {
+      method: "POST",
+      body: JSON.stringify(body),
+      signal: ctrl.signal,
+      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+    });
+  } catch (err) {
+    clearTimeout(timer);
+    if ((err as Error).name === "AbortError") {
+      if (signal?.aborted) throw err;
+      throw new ApiError("Request timed out", 0);
+    }
+    throw new ApiError(`Cannot reach the API at ${API_URL}. Is the backend running?`, 0);
+  }
+  if (res.status === 404 || res.status === 405 || !res.body) {
+    clearTimeout(timer);
+    const full = await analyze(body, signal);
+    handlers.onResult({ ...full, summary: "" });
+    handlers.onDelta(full.summary);
+    return full;
+  }
+  try {
+    if (!res.ok) {
+      let detail = res.statusText;
+      try {
+        const err = await res.json();
+        detail = typeof err.detail === "string" ? err.detail : JSON.stringify(err.detail ?? err);
+      } catch {
+        /* non-JSON error body */
+      }
+      throw new ApiError(detail, res.status);
+    }
+    const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+    let buf = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      touch();
+      buf += value;
+      let cut: number;
+      while ((cut = buf.indexOf("\n\n")) >= 0) {
+        const chunk = buf.slice(0, cut);
+        buf = buf.slice(cut + 2);
+        const data = chunk
+          .split("\n")
+          .filter((l) => l.startsWith("data:"))
+          .map((l) => l.slice(5).trimStart())
+          .join("\n");
+        if (!data) continue;
+        const ev = JSON.parse(data) as
+          | { type: "result"; response: AnalyzeResponse }
+          | { type: "done"; response: AnalyzeResponse }
+          | { type: "delta"; text: string }
+          | { type: "error"; status: number; detail: string };
+        if (ev.type === "result") handlers.onResult(ev.response);
+        else if (ev.type === "delta") handlers.onDelta(ev.text);
+        else if (ev.type === "done") return ev.response;
+        else throw new ApiError(ev.detail, ev.status);
+      }
+    }
+    throw new ApiError("The answer was cut off. Try again.", 0);
+  } catch (err) {
+    if ((err as Error).name === "AbortError" && !signal?.aborted) throw new ApiError("Request timed out", 0);
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** Kimi Cooked on the chart's closed candles. The first run on a chart takes a second or two. */
 /** Top-down S/R walk on its own (the agent's "Top-down S/R walk" does the same and plays it on the chart). */
 export function fetchTopDown(symbol: string, signal?: AbortSignal) {

@@ -251,3 +251,36 @@ export async function classifyAccount(keys: string[], kind: FillKind | null, bot
 export function fetchAccountPositions(refresh = false, signal?: AbortSignal) {
   return apiRequest<AccountPositions>(`/api/binance/positions${refresh ? "?refresh=true" : ""}`, { signal, timeoutMs: 60_000 });
 }
+
+/** Holdings watch (backend/app/holdings_watch.py): sell-or-trim alerts kept on the coins you hold. */
+export interface HoldingsWatchSettings {
+  enabled: boolean;
+  interval: "1h" | "4h" | "1d";
+  include_bots: boolean;
+  min_value: number;
+}
+
+export interface HoldingsWatchStatus {
+  settings: HoldingsWatchSettings;
+  last: {
+    at: number;
+    coins: { symbol: string; value: number | null; source: "spot" | "grid bot" }[];
+    added: string[];
+    removed: string[];
+    notes: string[];
+    error: string | null;
+  } | null;
+  bot_note: string;
+}
+
+export function fetchHoldingsWatch(signal?: AbortSignal) {
+  return apiRequest<HoldingsWatchStatus>("/api/holdings-watch", { signal });
+}
+
+export function saveHoldingsWatch(settings: HoldingsWatchSettings) {
+  return apiRequest<HoldingsWatchStatus>("/api/holdings-watch", { method: "PUT", body: JSON.stringify(settings), timeoutMs: 60_000 });
+}
+
+export function runHoldingsWatch() {
+  return apiRequest<HoldingsWatchStatus>("/api/holdings-watch/run", { method: "POST", timeoutMs: 60_000 });
+}

@@ -396,6 +396,41 @@ class AnalysisResult:
     bias: str | None = None  # direction of the latest structure break
 
 
+HOLD_ATR = 1.0    # a test held when price then closes this many ATRs away from the zone, on its side
+BREAK_ATR = 0.25  # and failed when it closes this far through the zone first
+AWAY_ATR = 0.3    # price must have closed this far away before touching again counts as a new test
+
+
+def zone_record(df: pd.DataFrame, z: Zone, atr_v: float) -> dict:
+    """How `z` held up after it formed: each time price came back to it from its current side (from above for
+    support/demand, from below for resistance/supply) is a test; it held when price then closed HOLD_ATR away on
+    that side before closing BREAK_ATR through the zone, else it broke. A test still open at the last candle is
+    left out. → {"held", "broke", "tests"}."""
+    times = df["time"].to_numpy(dtype=np.int64)
+    start = int(np.searchsorted(times, z.first_time, "right"))
+    if z.kind in ("supply", "demand"):
+        start = max(start, z.last_idx + 1)  # after the impulse that made it
+    below = z.kind in ("support", "demand")  # price sits above it
+    h, lo_, c = (df[k].to_numpy(dtype=float) for k in ("high", "low", "close"))
+    zl, zh = z.price_low, z.price_high
+    held = broke = 0
+    away = False
+    testing = False
+    for i in range(start, len(df)):
+        if testing:
+            if (below and c[i] >= zh + HOLD_ATR * atr_v) or (not below and c[i] <= zl - HOLD_ATR * atr_v):
+                held, testing, away = held + 1, False, True
+            elif (below and c[i] < zl - BREAK_ATR * atr_v) or (not below and c[i] > zh + BREAK_ATR * atr_v):
+                broke, testing, away = broke + 1, False, False
+            continue
+        if not away:
+            away = c[i] >= zh + AWAY_ATR * atr_v if below else c[i] <= zl - AWAY_ATR * atr_v
+            continue
+        if (below and lo_[i] <= zh) or (not below and h[i] >= zl):
+            testing = True
+    return {"held": held, "broke": broke, "tests": held + broke}
+
+
 def _zone_fact(z: Zone, last: float, atr_v: float, count_key: str, count: int) -> dict:
     inside = z.price_low <= last <= z.price_high
     edge = z.price_low if z.price_low > last else z.price_high
@@ -403,12 +438,16 @@ def _zone_fact(z: Zone, last: float, atr_v: float, count_key: str, count: int) -
            "distance_atr": 0.0 if inside else round(abs(edge - last) / atr_v, 2), "inside": inside}
     if z.meta.get("htf"):
         out["htf_confluence"] = z.meta["htf"]
+    if z.meta.get("record", {}).get("tests"):
+        out["held"], out["tests_resolved"] = z.meta["record"]["held"], z.meta["record"]["tests"]
     return out
 
 
 def _zone_label(tfl: str, z: Zone, suffix: str = "") -> str:
     htf = z.meta.get("htf")
-    return f"{tfl} {z.kind.title()}{suffix}" + (f" + {'/'.join(htf)}" if htf else "")
+    rec = z.meta.get("record")
+    tail = f" · {rec['held']}/{rec['tests']} held" if rec and rec.get("tests") else ""
+    return f"{tfl} {z.kind.title()}{suffix}" + (f" + {'/'.join(htf)}" if htf else "") + tail
 
 
 def analyze(
@@ -472,6 +511,7 @@ def analyze(
         mark_confluence(zones, htf)
         sr_zones = pick_nearest(zones, last, intent.max_zones)
         for z in sr_zones:
+            z.meta["record"] = zone_record(df, z, atr_v)
             color = RED if z.kind == "resistance" else GREEN
             label = _zone_label(tfl, z)
             overlays.append(BoxOverlay(
@@ -491,6 +531,7 @@ def analyze(
         mark_confluence(sd, htf)
         sd = pick_nearest(sd, last, intent.max_zones)
         for z in sd:
+            z.meta["record"] = zone_record(df, z, atr_v)
             color = ORANGE if z.kind == "supply" else TEAL
             label = _zone_label(tfl, z, " (fresh)" if z.tests == 0 else "")
             overlays.append(BoxOverlay(
@@ -644,6 +685,11 @@ def analyze(
     return AnalysisResult(overlays, stats, facts, levels, [s.price for s in highs], [s.price for s in lows], bias)
 
 
+def _held(z: dict) -> str:
+    t = z.get("tests_resolved")
+    return f", held {z['held']} of {t} test{'s' if t != 1 else ''}" if t else ""
+
+
 def _touches(n: int) -> str:
     return f"{n} touch" if n == 1 else f"{n} touches"
 
@@ -729,11 +775,11 @@ def describe(facts: dict, symbol: str) -> str:
     if facts.get("resistance"):
         z = facts["resistance"][0]
         lines.append(f"Nearest {tf} resistance {_fmt(z['low'])}–{_fmt(z['high'])} ({_touches(z['touches'])}"
-                     f"{_where(z)}{_htf(z)}).")
+                     f"{_held(z)}{_where(z)}{_htf(z)}).")
     if facts.get("support"):
         z = facts["support"][0]
         lines.append(f"Nearest {tf} support {_fmt(z['low'])}–{_fmt(z['high'])} ({_touches(z['touches'])}"
-                     f"{_where(z)}{_htf(z)}).")
+                     f"{_held(z)}{_where(z)}{_htf(z)}).")
     if "supply" in facts and not facts["supply"]:
         lines.append(f"No unmitigated {tf} supply zone above price right now.")
     if "demand" in facts and not facts["demand"]:
@@ -742,7 +788,8 @@ def describe(facts: dict, symbol: str) -> str:
         if facts.get(key):
             z = facts[key][0]
             tested = " (untested" if z["tests"] == 0 else f" (tested {z['tests']}x"
-            lines.append(f"Unmitigated {key} {_fmt(z['low'])}–{_fmt(z['high'])}{tested}{_where(z)}{_htf(z)}).")
+            lines.append(f"Unmitigated {key} {_fmt(z['low'])}–{_fmt(z['high'])}{tested}{_held(z)}{_where(z)}"
+                         f"{_htf(z)}).")
     for w in facts.get("windows", []):
         lines.append(f"{w['tf']} window: high {_fmt(w['high'])}, low {_fmt(w['low'])}.")
     if facts.get("structure"):

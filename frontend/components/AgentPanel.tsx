@@ -23,6 +23,7 @@ import {
   Target,
   Trash2,
   User,
+  ImagePlus,
 } from "lucide-react";
 import { Fragment, useEffect, useImperativeHandle, useRef, useState, type ReactNode, type Ref } from "react";
 
@@ -32,6 +33,7 @@ import { displaySymbol, formatPct, formatPrice } from "@/lib/format";
 import { DEFAULT_SIZING, orderText, qtyText, sizePlan, type SizingSettings } from "@/lib/sizing";
 import { openDockPanel } from "@/lib/dock";
 import { ladderToPaperOrders, planToPaperOrders, placePaperOrders, type NewPaperOrder } from "@/lib/paper";
+import { imageFrom } from "@/lib/screenshot";
 import { ladderTestLine } from "@/lib/spot";
 import {
   TIMEFRAMES,
@@ -56,6 +58,8 @@ export interface AgentMessage {
   id: string;
   role: "user" | "agent" | "error";
   text: string;
+  /** The summary is still being written. */
+  streaming?: boolean;
   overlays?: Overlay[];
   meta?: string;
   alerts?: number;
@@ -466,6 +470,8 @@ interface Props {
   /** Ids of answers whose drawings are pinned to their chart. */
   pinned: Set<string>;
   onSubmit(prompt: string): void;
+  /** A chart screenshot pasted, dropped or picked: read its levels and drawings onto the chart. */
+  onImage?(file: File): void;
   onClearOverlays(): void;
   /** Files the conversation in the history and starts an empty one. */
   onNewChat(): void;
@@ -497,6 +503,7 @@ export default function AgentPanel(p: Props) {
   const [value, setValue] = useState("");
   const [showHistory, setShowHistory] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
   useImperativeHandle(p.handleRef, () => ({ focus: () => inputRef.current?.focus() }));
@@ -527,7 +534,7 @@ export default function AgentPanel(p: Props) {
           {p.spotOnly ? "Spot only" : "Spot + futures"}
         </button>
         {p.overlayCount > 0 && (
-          <button type="button" onClick={p.onClearOverlays} className="btn-ghost h-6 shrink-0 gap-1 px-1.5 text-[11px]" title="Remove the agent's drawings from this chart (Ctrl+Z brings them back)">
+          <button type="button" onClick={p.onClearOverlays} className="btn-ghost h-6 shrink-0 gap-1 px-1.5 text-[11px]" title="Remove all the agent's drawings from this chart (Ctrl+Z brings them back). To remove one level, use its bin in the Layers tab (L).">
             <Eraser className="h-3.5 w-3.5" /> Clear {p.overlayCount}
           </button>
         )}
@@ -600,6 +607,7 @@ export default function AgentPanel(p: Props) {
                     )}
                     <p className={clsx(m.role === "user" ? "text-mute" : m.role === "error" ? "text-down" : "text-ink")}>
                       {m.role === "agent" ? emphasize(m.text, m.lastPrice) : m.text}
+                      {m.streaming && <span className="ml-0.5 inline-block h-3 w-1.5 animate-pulse bg-accent/70 align-middle" aria-label="Writing" />}
                     </p>
                     {m.plan && (
                       <PlanCard
@@ -704,19 +712,59 @@ export default function AgentPanel(p: Props) {
               e.preventDefault();
               submit(value);
             }}
+            onDragOver={(e) => {
+              if (p.onImage && Array.from(e.dataTransfer.items).some((i) => i.type.startsWith("image/"))) e.preventDefault();
+            }}
+            onDrop={(e) => {
+              const file = imageFrom(e.dataTransfer);
+              if (!file || !p.onImage) return;
+              e.preventDefault();
+              p.onImage(file);
+            }}
           >
+            {p.onImage && (
+              <>
+                <input
+                  ref={fileRef}
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp,image/gif"
+                  className="hidden"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    e.target.value = "";
+                    if (file) p.onImage!(file);
+                  }}
+                />
+                <button
+                  type="button"
+                  disabled={p.busy}
+                  onClick={() => fileRef.current?.click()}
+                  className="btn-ghost grid h-9 w-9 shrink-0 place-items-center border border-line p-0 disabled:opacity-40"
+                  title="Read a chart screenshot: its levels, boxes and patterns are drawn on the chart (or paste one with Ctrl+V)"
+                  aria-label="Read a chart screenshot"
+                >
+                  <ImagePlus className="h-4 w-4" />
+                </button>
+              </>
+            )}
             <textarea
               ref={inputRef}
               rows={2}
               value={value}
               onChange={(e) => setValue(e.target.value)}
+              onPaste={(e) => {
+                const file = imageFrom(e.clipboardData);
+                if (!file || !p.onImage) return;
+                e.preventDefault();
+                p.onImage(file);
+              }}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
                   submit(value);
                 }
               }}
-              placeholder={p.messages.length ? 'Follow up, e.g. "same on ETH", "line at 25.4" or "alert me at the entry"' : 'Ask the agent, e.g. "Which of my coins are near demand?"'}
+              placeholder={p.messages.length ? 'Follow up, e.g. "same on ETH", "line at 25.4" or "alert me at the entry"' : 'Ask the agent, e.g. "Which of my coins are near demand?", or paste a chart screenshot'}
               className="min-h-9 flex-1 resize-none rounded-lg border border-line bg-base px-3 py-2 text-sm text-ink outline-none placeholder:text-mute focus:border-accent/60"
               aria-label="Agent prompt"
             />

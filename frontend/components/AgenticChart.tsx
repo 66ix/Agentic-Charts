@@ -119,6 +119,10 @@ interface Props {
   selectedId: string | null;
   onDrawingsChange(next: Drawing[]): void;
   onSelect(id: string | null): void;
+  /** Crosshair click on a drawn level or zone that is not one of the user's drawings (null: on nothing). */
+  onPickOverlay?(o: Overlay | null): void;
+  /** Replay mode: show only the candles up to this open time (live updates are held back until it ends). */
+  replayTime?: number | null;
   onToolDone(): void;
   onFeed(info: FeedInfo): void;
   onDataReady?(candles: Candle[]): void;
@@ -317,6 +321,8 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
   const kimiTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const rightOffsetRef = useRef(12); // bars of empty space right of the last candle (more for Kimi's forecast)
   const candlesRef = useRef<Candle[]>([]);
+  /** Every candle while replaying (candlesRef then holds the ones up to the replay point). */
+  const fullRef = useRef<Candle[] | null>(null);
   const pendingRef = useRef<ChartPoint[]>([]);
   const dragRef = useRef<{ id: string; start: ChartPoint; orig: ChartPoint[] } | null>(null);
   const alertDragRef = useRef<{ prim: LabeledRayPrimitive | BoxZonePrimitive; alertId: string; startPrice: number; orig: number[] } | null>(null);
@@ -673,6 +679,14 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
     layerRef.current?.setPreview(null);
 
     const applyCandle = (c: Candle) => {
+      const full = fullRef.current;
+      if (full) {
+        // Replaying: keep the live bar for later, don't draw it.
+        const last = full[full.length - 1];
+        if (last && c.time === last.time) full[full.length - 1] = c;
+        else if (!last || c.time > last.time) full.push(c);
+        return;
+      }
       const data = candlesRef.current;
       const last = data[data.length - 1];
       if (last && c.time < last.time) return; // stale
@@ -842,9 +856,32 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
         ws.close();
       }
       candlesRef.current = [];
+      fullRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.symbol, props.interval]);
+
+  // -------------------------------------------------- replay
+  useEffect(() => {
+    if (loading) return;
+    const t = props.replayTime ?? null;
+    if (t == null && !fullRef.current) return;
+    if (t != null && !fullRef.current) fullRef.current = candlesRef.current.slice();
+    const full = fullRef.current!;
+    const data = t == null ? full : full.filter((c) => c.time <= t);
+    if (t == null) fullRef.current = null;
+    candlesRef.current = data;
+    mapperRef.current.setData(data.map((d) => d.time), INTERVAL_SECONDS[props.interval], data);
+    candleRef.current?.setData(data.map((c) => ({ time: toTime(c.time), open: c.open, high: c.high, low: c.low, close: c.close })));
+    volumeRef.current?.setData(
+      data.map((c) => ({ time: toTime(c.time), value: c.volume, color: c.close >= c.open ? "rgba(34,197,94,0.35)" : "rgba(239,68,68,0.35)" })),
+    );
+    refreshIndicators(true);
+    const lastBar = data[data.length - 1];
+    setLegend(lastBar ? { c: lastBar, change: ((lastBar.close - lastBar.open) / lastBar.open) * 100 } : null);
+    setBarCount(data.length);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.replayTime, loading]);
 
   // -------------------------------------------------- indicator toggles
   useEffect(() => {
@@ -1026,6 +1063,26 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
   }, [compareKey, props.interval, loading]);
 
   // ---------------------------------------------------- AI overlays
+  /** The level under y (lines within 5 px), else the thinnest zone containing it. */
+  const overlayAt = useCallback((y: number): Overlay | null => {
+    const series = candleRef.current;
+    if (!series) return null;
+    let box: { o: Overlay; h: number } | null = null;
+    for (const prim of overlayPrims.current) {
+      if (prim instanceof LabeledRayPrimitive) {
+        const py = series.priceToCoordinate(prim.line.price);
+        if (py !== null && Math.abs(py - y) <= 5) return prim.line;
+      } else if (prim instanceof BoxZonePrimitive) {
+        const t = series.priceToCoordinate(prim.box.price_high);
+        const b = series.priceToCoordinate(prim.box.price_low);
+        if (t === null || b === null) continue;
+        const h = Math.abs(b - t);
+        if (y >= Math.min(t, b) - 3 && y <= Math.max(t, b) + 3 && (!box || h < box.h)) box = { o: prim.box, h };
+      }
+    }
+    return box?.o ?? null;
+  }, []);
+
   useEffect(() => {
     const series = candleRef.current;
     if (!series) return;
@@ -1191,7 +1248,9 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
       const p = propsRef.current;
       if (p.tool === "crosshair") {
         const width = chart.timeScale().width();
-        p.onSelect(p.locked ? null : (layerRef.current?.pick(x, y, width) ?? null));
+        const picked = p.locked ? null : (layerRef.current?.pick(x, y, width) ?? null);
+        p.onSelect(picked);
+        if (p.onPickOverlay) p.onPickOverlay(picked || p.locked ? null : overlayAt(y));
         return;
       }
       if (p.locked) return;
@@ -1243,7 +1302,7 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
       tapRef.current = null;
       chart.unsubscribeCrosshairMove(onMove);
     };
-  }, [toPoint]);
+  }, [toPoint, overlayAt]);
 
   // Drag-to-move the selected drawing, or an alert line / zone (crosshair tool, unlocked).
   useEffect(() => {

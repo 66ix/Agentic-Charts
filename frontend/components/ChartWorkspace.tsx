@@ -10,12 +10,15 @@ import { useIsMobile } from "@/hooks/useMediaQuery";
 import { readStored, usePersistentState, writeStored } from "@/hooks/usePersistentState";
 import { useUndo } from "@/hooks/useUndo";
 import { alertFromDrawing, alertOverlays, chartZones, SELL_SIGNALS } from "@/lib/alerts";
-import { analyze } from "@/lib/api";
+import { analyzeStream } from "@/lib/api";
+import { imageToDataUrl, readScreenshot } from "@/lib/screenshot";
+import { composeSnapshot, shareSnapshot } from "@/lib/snapshot";
 import { DEFAULT_INTERVAL, DEFAULT_SYMBOL } from "@/lib/config";
 import { isCustom } from "@/lib/customSymbols";
 import { CHAT_ID_KEY, CHATS_KEY, toSession, upsertSession, worthKeeping, type ChatSession } from "@/lib/chatHistory";
 import { createJournalEntry, planToJournalEntry } from "@/lib/journal";
 import { DEFAULT_SIZING, sizePlan, type SizingSettings } from "@/lib/sizing";
+import { apiRequest } from "@/lib/api";
 import { OPEN_PANEL_EVENT, type DockPanelProps } from "@/lib/dock";
 import { offerGridPlan } from "@/lib/gridbot";
 import { gridCoinOverlays, SPOT_ONLY_KEY } from "@/lib/spot";
@@ -61,6 +64,7 @@ import ChartHeader, { COMPARE_COLORS } from "./ChartHeader";
 import Dock, { type DockTab } from "./Dock";
 import { EXTRA_PANELS } from "./dockPanels";
 import DrawingStyleBar from "./DrawingStyleBar";
+import ReplayBar, { type ReplayState } from "./ReplayBar";
 import DrawingToolbar, { TOOL_HOTKEYS } from "./DrawingToolbar";
 import IndicatorSettingsDialog from "./IndicatorSettingsDialog";
 import LayersPanel from "./LayersPanel";
@@ -263,6 +267,8 @@ export default function ChartWorkspace() {
   const [magnet, setMagnet] = useState(false);
   const [locked, setLocked] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  /** An AI level clicked on the chart, to remove on its own. */
+  const [pickedLevel, setPickedLevel] = useState<Overlay | null>(null);
 
   const drawingsRef = useRef(drawings);
   drawingsRef.current = drawings;
@@ -495,53 +501,81 @@ export default function ChartWorkspace() {
           .filter((m) => m.role !== "error")
           .slice(-10)
           .map((m) => ({ role: m.role as "user" | "agent", text: m.text }));
-        const res = await analyze(
+        const body = {
+          symbol,
+          interval,
+          prompt,
+          candles: candles.length >= 100 ? candles.slice(-500) : undefined,
+          history: opts.silent ? [] : history,
+          overlays: opts.silent ? [] : convo.overlays,
+          previous_intent: opts.silent ? null : convo.lastIntent,
+          watchlist: convo.watchlist,
+          spot_only: convo.spotOnly,
+        };
+        const id = uid();
+        const lead = opts.silent ? "Auto-detected levels. " : "";
+        const toMessage = (res: AnalyzeResponse, text: string, streaming: boolean): AgentMessage => {
+          const target = res.navigate ?? { symbol, interval };
+          return {
+            id,
+            role: "agent",
+            text: lead + text,
+            streaming: streaming || undefined,
+            overlays: res.overlays,
+            meta: streaming ? undefined : engineNote(res),
+            alerts: (res.alerts?.length ?? 0) + (res.trigger_alerts?.length ?? 0) || undefined,
+            plan: res.plan ?? undefined,
+            scan: res.scan?.length ? res.scan : undefined,
+            setups: res.setups?.length ? res.setups : undefined,
+            gridCoins: res.grid_coins?.length ? res.grid_coins : undefined,
+            walk: res.top_down ?? undefined,
+            ladder: res.ladder ?? undefined,
+            sources: res.sources?.length ? res.sources : undefined,
+            sells: res.sells?.length ? res.sells : undefined,
+            sellWatch: res.sell_watch?.symbols.length ? res.sell_watch : undefined,
+            steps: res.steps?.length ? res.steps : undefined,
+            symbol: target.symbol,
+            interval: target.interval,
+            prompt: prompt || undefined,
+            lastPrice: res.stats?.last_price,
+          };
+        };
+        const show = (msg: AgentMessage) => {
+          setMessages((m) => (m.some((x) => x.id === id) ? m.map((x) => (x.id === id ? msg : x)) : [...m, msg]));
+          if (!opts.silent) setQuickAnswer(msg);
+        };
+        // The drawings, plan and cards show as soon as they are ready; the summary is written into the same message.
+        const got: { first: AnalyzeResponse | null; written: string } = { first: null, written: "" };
+        const apply = (r: AnalyzeResponse) => {
+          got.first = r;
+          const target = r.navigate ?? { symbol, interval };
+          // Saved under the chart the answer belongs to; when the agent moves the chart, that chart loads them.
+          changeOverlays(`ac:overlays:${target.symbol}:${target.interval}`, r.overlays, opts.silent ? "auto levels" : "agent answer");
+          if (r.navigate) setCell({ symbol: r.navigate.symbol, interval: r.navigate.interval });
+          if (Object.keys(r.indicators ?? {}).length) setIndicators((ind) => ({ ...ind, ...r.indicators }));
+          if (prompt) setLastIntent(r.intent);
+          addAlerts(r.alerts ?? [], r.symbol);
+          for (const t of r.trigger_alerts ?? []) void addTrigger(t);
+        };
+        const res = await analyzeStream(
+          body,
           {
-            symbol,
-            interval,
-            prompt,
-            candles: candles.length >= 100 ? candles.slice(-500) : undefined,
-            history: opts.silent ? [] : history,
-            overlays: opts.silent ? [] : convo.overlays,
-            previous_intent: opts.silent ? null : convo.lastIntent,
-            watchlist: convo.watchlist,
-            spot_only: convo.spotOnly,
+            onResult: (r) => {
+              if (ctrl.signal.aborted) return;
+              apply(r);
+              show(toMessage(r, "", true));
+            },
+            onDelta: (t) => {
+              if (ctrl.signal.aborted || !got.first) return;
+              got.written += t;
+              show(toMessage(got.first, got.written, true));
+            },
           },
           ctrl.signal,
         );
         if (ctrl.signal.aborted) return;
-        const target = res.navigate ?? { symbol, interval };
-        // Saved under the chart the answer belongs to; when the agent moves the chart, that chart loads them.
-        changeOverlays(`ac:overlays:${target.symbol}:${target.interval}`, res.overlays, opts.silent ? "auto levels" : "agent answer");
-        if (res.navigate) setCell({ symbol: res.navigate.symbol, interval: res.navigate.interval });
-        if (Object.keys(res.indicators ?? {}).length) setIndicators((ind) => ({ ...ind, ...res.indicators }));
-        if (prompt) setLastIntent(res.intent);
-        addAlerts(res.alerts ?? [], res.symbol);
-        for (const t of res.trigger_alerts ?? []) void addTrigger(t);
-        const answer: AgentMessage = {
-          id: uid(),
-          role: "agent",
-          text: opts.silent ? `Auto-detected levels. ${res.summary}` : res.summary,
-          overlays: res.overlays,
-          meta: engineNote(res),
-          alerts: (res.alerts?.length ?? 0) + (res.trigger_alerts?.length ?? 0) || undefined,
-          plan: res.plan ?? undefined,
-          scan: res.scan?.length ? res.scan : undefined,
-          setups: res.setups?.length ? res.setups : undefined,
-          gridCoins: res.grid_coins?.length ? res.grid_coins : undefined,
-          walk: res.top_down ?? undefined,
-          ladder: res.ladder ?? undefined,
-          sources: res.sources?.length ? res.sources : undefined,
-          sells: res.sells?.length ? res.sells : undefined,
-          sellWatch: res.sell_watch?.symbols.length ? res.sell_watch : undefined,
-          steps: res.steps?.length ? res.steps : undefined,
-          symbol: target.symbol,
-          interval: target.interval,
-          prompt: prompt || undefined,
-          lastPrice: res.stats?.last_price,
-        };
-        setMessages((m) => [...m, answer]);
-        if (!opts.silent) setQuickAnswer(answer);
+        if (!got.first) apply(res);
+        show(toMessage(res, res.summary, false));
         if (res.grid_plan && !opts.silent) {
           // "Plan a grid bot on INJ": the Grid bots tab takes the plan to test, edit and track it.
           offerGridPlan(res.grid_plan);
@@ -558,6 +592,47 @@ export default function ChartWorkspace() {
       }
     },
     [symbol, interval, activeChart, setMessages, changeOverlays, setLastIntent, addAlerts, addTrigger, setCell, setIndicators, playWalk],
+  );
+
+  /**
+   * A chart screenshot: the AI reads its coin, timeframe and drawings, the chart moves there, and the drawings go
+   * on it (dashed) next to the levels the app finds itself, with a message saying which of them agree.
+   */
+  const readShot = useCallback(
+    async (file: File) => {
+      analysisCtrl.current?.abort();
+      const ctrl = new AbortController();
+      analysisCtrl.current = ctrl;
+      setMessages((m) => [...m, { id: uid(), role: "user", text: `Read this chart screenshot (${file.name || "pasted image"})` }]);
+      setBusy(true);
+      try {
+        const res = await readScreenshot(await imageToDataUrl(file), symbol, interval, ctrl.signal);
+        if (ctrl.signal.aborted) return;
+        const target = { symbol: res.symbol ?? symbol, interval: res.symbol ? res.interval : interval };
+        const drawn = [...res.overlays, ...res.detected];
+        changeOverlays(`ac:overlays:${target.symbol}:${target.interval}`, drawn, "screenshot levels");
+        if (target.symbol !== symbol || target.interval !== interval) setCell(target);
+        const msg: AgentMessage = {
+          id: uid(),
+          role: "agent",
+          text: res.summary,
+          overlays: drawn,
+          meta: `Screenshot read by ${res.engine}`,
+          symbol: target.symbol,
+          interval: target.interval,
+        };
+        setMessages((m) => [...m, msg]);
+        setQuickAnswer(msg);
+      } catch (err) {
+        if ((err as Error).name === "AbortError") return;
+        const msg: AgentMessage = { id: uid(), role: "error", text: (err as Error).message };
+        setMessages((m) => [...m, msg]);
+        setQuickAnswer(msg);
+      } finally {
+        if (analysisCtrl.current === ctrl) setBusy(false);
+      }
+    },
+    [symbol, interval, setMessages, changeOverlays, setCell],
   );
 
   // Auto-detect levels on load, unless this chart already has saved AI overlays.
@@ -595,18 +670,57 @@ export default function ChartWorkspace() {
     setUndoNote("Alert set");
   }, [selectedAlert, addAlerts, symbol]);
 
+  /** Alt+S: the chart with the latest agent answer about it (summary, plan, levels) in one image. */
   const screenshot = useCallback(() => {
     const canvas = activeChart()?.screenshot();
     if (!canvas) return;
-    canvas.toBlob((blob) => {
-      if (!blob) return;
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = `${symbol.replace(/[/:]/g, "-")}-${interval}-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.png`;
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-    });
-  }, [symbol, interval, activeChart]);
+    const answer = [...messages].reverse().find((m) => m.role === "agent" && m.symbol === symbol && m.interval === interval && !m.streaming);
+    const levels = overlays
+      .filter((o) => (o.type === "horizontal_line" || o.type === "box") && o.label)
+      .sort((x, y) => (y.strength ?? 0) - (x.strength ?? 0))
+      .slice(0, 6)
+      .map((o) => o.label);
+    const out = composeSnapshot(canvas, { symbol, interval, summary: answer?.text, plan: answer?.plan, levels });
+    const name = `${symbol.replace(/[/:]/g, "-")}-${interval}-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.png`;
+    void shareSnapshot(out, name).then(setUndoNote);
+  }, [symbol, interval, activeChart, messages, overlays]);
+
+  // ------------------------------------------------------------------ replay
+  const [replay, setReplay] = useState<ReplayState | null>(null);
+  const [replayLevels, setReplayLevels] = useState<{ busy: boolean; note: string | null; overlays: Overlay[] }>({ busy: false, note: null, overlays: [] });
+  const startReplay = useCallback(() => {
+    const bars = (activeChart()?.getCandles() ?? []).map((c) => c.time);
+    if (bars.length < 80) return;
+    setReplay({ bars, i: Math.max(60, bars.length - 120), playing: false, speed: 2 });
+    setReplayLevels({ busy: false, note: null, overlays: [] });
+  }, [activeChart]);
+  const exitReplay = useCallback(() => {
+    setReplay(null);
+    setReplayLevels({ busy: false, note: null, overlays: [] });
+  }, []);
+  useEffect(() => exitReplay(), [symbol, interval, exitReplay]);
+  const playing = !!replay?.playing;
+  const speed = replay?.speed ?? 1;
+  useEffect(() => {
+    if (!playing) return;
+    const id = window.setInterval(
+      () => setReplay((r) => (r ? (r.i >= r.bars.length - 1 ? { ...r, playing: false } : { ...r, i: r.i + 1 }) : r)),
+      1000 / speed,
+    );
+    return () => window.clearInterval(id);
+  }, [playing, speed]);
+  const replayTime = replay ? replay.bars[replay.i] : null;
+  const loadReplayLevels = useCallback(async () => {
+    if (replayTime == null) return;
+    setReplayLevels((l) => ({ ...l, busy: true }));
+    try {
+      const q = new URLSearchParams({ symbol, interval, time: String(replayTime) });
+      const r = await apiRequest<{ overlays: Overlay[] }>(`/api/replay/levels?${q}`, { timeoutMs: 60_000 });
+      setReplayLevels({ busy: false, note: `${r.overlays.length} zones as of then`, overlays: r.overlays });
+    } catch (err) {
+      setReplayLevels({ busy: false, note: (err as Error).message, overlays: [] });
+    }
+  }, [replayTime, symbol, interval]);
 
   // ------------------------------------------------------------------ side panel
   const agentVisible = mobile ? mobileTab === "agent" : dock.open && dock.tab === "agent";
@@ -712,6 +826,11 @@ export default function ChartWorkspace() {
     if ((e.key === "Delete" || e.key === "Backspace") && selectedId) {
       e.preventDefault();
       deleteSelected();
+      return;
+    }
+    if ((e.key === "Delete" || e.key === "Backspace") && pickedLevel) {
+      e.preventDefault();
+      removePickedLevel();
       return;
     }
     if (e.key === "/") {
@@ -823,6 +942,14 @@ export default function ChartWorkspace() {
     },
     [addSignal],
   );
+  const removePickedLevel = useCallback(() => {
+    if (!pickedLevel) return;
+    const cur = readStored<Overlay[]>(overlaysKey, []);
+    const same = (o: Overlay) => JSON.stringify(o) === JSON.stringify(pickedLevel);
+    changeOverlays(overlaysKey, cur.filter((o) => !same(o)), `remove ${pickedLevel.label || "AI level"}`);
+    setPickedLevel(null);
+  }, [pickedLevel, overlaysKey, changeOverlays]);
+  useEffect(() => setPickedLevel(null), [overlaysKey]);
   const triggerZones = useMemo(() => chartZones(overlays, drawings, selectedId), [overlays, drawings, selectedId]);
 
   const dockProps: DockPanelProps = { symbol, interval, price, watchlist, onPickSymbol: pickSymbol, onChartOverlays };
@@ -839,6 +966,7 @@ export default function ChartWorkspace() {
           overlayCount={overlays.length}
           pinned={pinnedSet}
           onSubmit={(p) => void runAnalysis(p)}
+          onImage={(f) => void readShot(f)}
           onClearOverlays={() => changeOverlays(overlaysKey, [], "clear AI levels")}
           onNewChat={newChat}
           chats={chats}
@@ -919,6 +1047,11 @@ export default function ChartWorkspace() {
             setSelectedId(id);
           }}
           onDeleteDrawing={(id) => changeDrawings(drawings.filter((d) => d.id !== id))}
+          aiLevels={overlays}
+          onDeleteAiLevel={(i) => {
+            const o = overlays[i];
+            changeOverlays(overlaysKey, overlays.filter((_, j) => j !== i), `remove ${o?.label || "AI level"}`);
+          }}
         />
       ),
     },
@@ -954,6 +1087,7 @@ export default function ChartWorkspace() {
         onCompareSearch={() => setSearchMode("compare")}
         onOpenSymbol={setSymbol}
         onScreenshot={screenshot}
+        onReplay={isCustom(symbol) || replay ? undefined : startReplay}
         onFit={() => activeChart()?.fitContent()}
         onSettings={() => setDialog("settings")}
         onShortcuts={() => setDialog("shortcuts")}
@@ -1013,11 +1147,14 @@ export default function ChartWorkspace() {
                           tool,
                           magnet,
                           locked,
-                          overlays: composed.visible,
+                          // Replaying: only the levels drawn from the past, not today's.
+                          overlays: replay ? replayLevels.overlays : composed.visible,
+                          replayTime,
                           drawings: shownDrawings,
                           selectedId,
                           onDrawingsChange: onChartDrawings,
                           onSelect: setSelectedId,
+                          onPickOverlay: (o) => setPickedLevel(o && overlays.includes(o) ? o : null),
                           onToolDone: () => setTool("crosshair"),
                           onFeed: setFeed,
                           onDataReady,
@@ -1030,6 +1167,28 @@ export default function ChartWorkspace() {
               );
             })}
           </div>
+          {replay && (
+            <ReplayBar
+              state={replay}
+              levelsBusy={replayLevels.busy}
+              levelsNote={replayLevels.note}
+              onChange={setReplay}
+              onLevels={() => void loadReplayLevels()}
+              onExit={exitReplay}
+            />
+          )}
+          {pickedLevel && !selectedDrawing && (
+            <div className="absolute left-1/2 top-2 z-20 flex -translate-x-1/2 items-center gap-2 rounded-md border border-line bg-panel px-2 py-1 text-[11px] shadow-lg">
+              <span className="h-2.5 w-2.5 rounded-sm" style={{ background: pickedLevel.color }} />
+              <span className="max-w-[16rem] truncate text-ink">{pickedLevel.label || "AI level"}</span>
+              <button type="button" className="btn-ghost h-6 px-1.5 text-[11px] hover:text-down" onClick={removePickedLevel} title="Remove this level (Del); Ctrl+Z brings it back">
+                Remove
+              </button>
+              <button type="button" className="btn-ghost h-6 w-6 p-0" aria-label="Close" onClick={() => setPickedLevel(null)}>
+                ×
+              </button>
+            </div>
+          )}
           {selectedDrawing && !locked && (
             <DrawingStyleBar
               drawing={selectedDrawing}

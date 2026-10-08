@@ -23,13 +23,17 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
+import re
+import time
 from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import StreamingResponse
 
 from .agent import run_analysis
 from .alerts import AlertPatch, AlertService
@@ -46,13 +50,15 @@ from .top_down import walk
 from .binance_account import BinanceAccount, BinanceApiError, BinanceKeyError
 from .binance_import import BinanceImportService, ClassifyRequest, ImportSettings
 from .journal import JournalPatch, JournalService, NewJournalEntry, entry_json
+from .dca import DcaRequest, plan_dca
+from .holdings_watch import HoldingsWatch, WatchSettings
 from .paper import NewPaperOrder, PaperService
 from .events import EventsService
 from .futures_data import FUTURES_PERIODS, FuturesDataService
 from .kimi_service import KimiService
 from .llm import LLMClient
 from .postmortem import PostMortemService, ReviewSettings
-from .market_data import MarketData, MarketDataError
+from .market_data import INTERVAL_SECONDS, MarketData, MarketDataError, candles_to_df
 from .market_index import MarketIndexService
 from .market_metrics import MarketMetricsService
 from .model_choice import ModelChoice, ModelChooser
@@ -61,6 +67,13 @@ from .orderbook_heatmap import OrderbookHeatmapService
 from .ratelimit import RateLimitMiddleware
 from .scanner import DEFAULT_WATCHLIST, WatchlistCache, tickers
 from .session_levels import SessionLevelsService
+from .schemas import AnalysisIntent
+from .schemas import norm_symbol as schemas_norm
+from .screenshot import SCHEMA as SHOT_SCHEMA
+from .screenshot import SYSTEM as SHOT_SYSTEM
+from .screenshot import ScreenshotRead, ScreenshotRequest, clean, compare, describe, split_image, to_overlays
+from .symbols import find_symbol
+from .ta_agent import analyze as analyze_chart
 from .schemas import (INTERVALS, AnalyzeRequest, AnalyzeResponse, CreateAlertsRequest, KimiResponse, MarketMetrics,
                       ScanResult, ZoneTriggerSpec)
 from .signal_alerts import SIGNALS, CreateSignalAlertsRequest, SignalAlertPatch, SignalAlertService
@@ -99,6 +112,9 @@ async def lifespan(app: FastAPI):
     # Signal alerts and the scheduled brief (signal_alerts.py, brief.py); both notify through app.state.alerts.
     # The brief lists today's high-impact economic events from the calendar.
     app.state.signal_alerts = SignalAlertService(app.state.hub, market, app.state.kimi, app.state.alerts)
+    # Sell-or-trim alerts kept in step with the coins held on Binance (holdings_watch.py).
+    app.state.holdings_watch = HoldingsWatch(app.state.binance, app.state.signal_alerts)
+    app.state.holdings_watch.start()
     await app.state.signal_alerts.start()
     app.state.brief = BriefService(market, app.state.kimi, app.state.derivatives, app.state.alerts,
                                    events_provider=app.state.events.upcoming_events)
@@ -126,6 +142,7 @@ async def lifespan(app: FastAPI):
     await app.state.models.close()
     await app.state.trades.close()
     await app.state.heatmap.close()
+    await app.state.holdings_watch.close()
     await app.state.binance.close()
     await app.state.binance.account.close()
     await app.state.signal_alerts.close()
@@ -239,6 +256,50 @@ async def agent_analyze(req: AnalyzeRequest, request: Request) -> AnalyzeRespons
         raise HTTPException(502, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/agent/analyze/stream")
+async def agent_analyze_stream(req: AnalyzeRequest, request: Request) -> StreamingResponse:
+    """`/api/agent/analyze` as server-sent events (not gzipped, so each arrives at once): {"type":"result","response"}
+    with the drawings, plan and the rest as soon as they are ready (summary still empty), {"type":"delta","text"}
+    pieces of the summary as the model writes it, then {"type":"done","response"} with everything, or
+    {"type":"error","status","detail"}."""
+    st = request.app.state
+    queue: asyncio.Queue[dict | None] = asyncio.Queue()
+
+    async def on_result(res: AnalyzeResponse) -> None:
+        await queue.put({"type": "result", "response": res.model_dump(mode="json")})
+
+    async def on_delta(text: str) -> None:
+        await queue.put({"type": "delta", "text": text})
+
+    async def work() -> None:
+        try:
+            res = await run_analysis(req, st.market, st.llm, st.derivatives, st.kimi,
+                                     getattr(st, "futures", None), getattr(st, "events", None),
+                                     getattr(st, "market_scanner", None), levels=getattr(st, "session_levels", None),
+                                     gridbots=getattr(st, "gridbots", None), on_result=on_result, on_delta=on_delta)
+            await queue.put({"type": "done", "response": res.model_dump(mode="json")})
+        except MarketDataError as exc:
+            await queue.put({"type": "error", "status": 502, "detail": str(exc)})
+        except ValueError as exc:
+            await queue.put({"type": "error", "status": 422, "detail": str(exc)})
+        except Exception as exc:  # noqa: BLE001 - the client gets an error line instead of a cut-off stream
+            log.exception("Streamed analysis failed")
+            await queue.put({"type": "error", "status": 500, "detail": f"Analysis failed: {type(exc).__name__}"})
+        finally:
+            await queue.put(None)
+
+    async def lines():
+        task = asyncio.create_task(work())
+        try:
+            while (event := await queue.get()) is not None:
+                yield f"data: {json.dumps(event, default=float)}\n\n"
+        finally:
+            task.cancel()
+
+    return StreamingResponse(lines(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
 
 # ------------------------------- signal alerts, history and the brief --
@@ -607,6 +668,99 @@ async def dip_ladder(request: Request, body: dict = Body(...)) -> dict:
         raise HTTPException(422, str(exc)) from exc
 
 
+@app.post("/api/dca")
+async def dca_plan(req: DcaRequest, request: Request) -> dict:
+    """Lump sum vs weekly / daily DCA vs buying the dips on one coin over the last `days` (dca.py)."""
+    req = req.model_copy(update={"symbol": _norm_symbol(schemas_norm(req.symbol))})
+    try:
+        df, source = await request.app.state.market.get_range(req.symbol, "1d",
+                                                              int(time.time()) - (req.days + 40) * 86400)
+        return plan_dca(df, req, source).model_dump()
+    except MarketDataError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.get("/api/replay/levels")
+async def replay_levels(request: Request, symbol: str = Query(...), interval: str = Query("4h"),
+                        time_: int = Query(..., alias="time", description="Last candle's open time, UNIX s")) -> dict:
+    """Replay mode: the support/resistance and supply/demand zones the detectors would have drawn with only the
+    candles up to `time`, so you can step forward and see how price treated them."""
+    sym, iv = _norm_symbol(symbol), _check_interval(interval)
+    step = INTERVAL_SECONDS[iv]
+    try:
+        df, source = await request.app.state.market.get_range(sym, iv, time_ - 400 * step, time_ + step - 1)
+    except MarketDataError as exc:
+        raise HTTPException(422 if "Unsupported" in str(exc) else 502, str(exc)) from exc
+    df = df[df["time"] <= time_].reset_index(drop=True)
+    if len(df) < 60:
+        raise HTTPException(422, "Not enough candles before this point")
+    intent = AnalysisIntent(features=["support_resistance", "supply_demand"], window_timeframes=[], max_zones=3)
+    res = await asyncio.to_thread(analyze_chart, df, intent, iv)
+    return {"symbol": sym, "interval": iv, "time": int(df["time"].iloc[-1]), "source": source,
+            "overlays": [o.model_dump() for o in res.overlays]}
+
+
+@app.post("/api/screenshot")
+async def read_screenshot(req: ScreenshotRequest, request: Request) -> dict:
+    """A pasted chart screenshot → the coin and timeframe it shows, its drawn levels, boxes, trendlines and
+    patterns as overlays, and how they compare with the levels the app's detectors find on the real candles."""
+    st = request.app.state
+    try:
+        image = split_image(req.image)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    llm: LLMClient = st.llm
+    if not llm.available():
+        raise HTTPException(503, "Reading a screenshot needs an AI model that can see images: set LLM_PROVIDER to "
+                                 "anthropic or openai, or use ollama with a vision model such as llama3.2-vision.")
+    hint = (f"The chart open in the app is {req.symbol} {req.interval or ''}; use it only when the image shows no "
+            "coin or timeframe." if req.symbol else "")
+    got = await llm.read_image(SHOT_SYSTEM, hint or "Read this chart.", image, SHOT_SCHEMA, "chart_screenshot")
+    if got is None:
+        raise HTTPException(502, "The AI model could not read the image. It may not support images.")
+    fields, engine = got
+    try:
+        raw = ScreenshotRead.model_validate(fields)
+    except ValueError as exc:  # pydantic's ValidationError
+        raise HTTPException(502, "The AI model's answer about the image was malformed") from exc
+    fallback = None
+    if req.symbol:
+        try:
+            fallback = _norm_symbol(schemas_norm(req.symbol))
+        except HTTPException:
+            fallback = None
+    read_sym = find_symbol(raw.symbol) if raw.symbol else None
+    if raw.symbol and not read_sym:
+        cleaned = re.sub(r"[^A-Za-z0-9]", "", raw.symbol).upper()
+        read_sym = cleaned if 5 <= len(cleaned) <= 20 and cleaned.endswith(("USDT", "USDC", "FDUSD")) else None
+    interval = raw.interval if raw.interval in INTERVALS else (req.interval if req.interval in INTERVALS else "4h")
+    symbol, df, source, detected = None, None, None, []
+    for sym in dict.fromkeys(x for x in (read_sym, fallback) if x):
+        try:
+            candles, source = await st.market.get_klines(sym, interval, 300)
+        except MarketDataError:
+            continue
+        if len(candles) >= 60:
+            symbol, df = sym, candles_to_df(candles)
+            break
+    if df is not None:
+        intent = AnalysisIntent(features=["support_resistance", "supply_demand"], window_timeframes=[], max_zones=4)
+        detected = (await asyncio.to_thread(analyze_chart, df, intent, interval)).overlays
+        read, dropped = clean(raw, (float(df["low"].min()), float(df["high"].max())))
+    else:
+        read, dropped = clean(raw)
+    matched = compare(read, detected) if df is not None else None
+    summary = describe(read, symbol or read_sym or raw.symbol, interval, matched, dropped)
+    if read_sym and symbol and symbol != read_sym:
+        summary += f" Could not load {read_sym}, so this is compared with {symbol}."
+    return {"symbol": symbol, "interval": interval, "read": read.model_dump(),
+            "overlays": [o.model_dump() for o in to_overlays(read)],
+            "detected": [o.model_dump() for o in detected], "summary": summary, "engine": engine,
+            "data_source": source}
+
+
 @app.post("/api/sell-check")
 async def sell_check(request: Request, body: dict = Body(...)) -> list[dict]:
     raw = body.get("symbols") or DEFAULT_WATCHLIST
@@ -955,6 +1109,23 @@ async def binance_classify(req: ClassifyRequest, request: Request) -> dict:
 @app.get("/api/binance/positions")
 async def binance_positions(request: Request, refresh: bool = Query(False)) -> dict:
     return await _binance_run(request.app.state.binance.positions(refresh))
+
+
+@app.get("/api/holdings-watch")
+async def holdings_watch_status(request: Request) -> dict:
+    return request.app.state.holdings_watch.status()
+
+
+@app.put("/api/holdings-watch")
+async def holdings_watch_update(new: WatchSettings, request: Request) -> dict:
+    """Turns the holdings watch on or off, or changes its timeframe; syncs the alerts at once."""
+    return await request.app.state.holdings_watch.update(new)
+
+
+@app.post("/api/holdings-watch/run")
+async def holdings_watch_run(request: Request) -> dict:
+    await request.app.state.holdings_watch.run()
+    return request.app.state.holdings_watch.status()
 
 
 @app.get("/api/binance/gridbots/{bot_id}/compare")

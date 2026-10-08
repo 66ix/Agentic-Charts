@@ -32,7 +32,8 @@ export type LayerId =
   | "compare"
   | "panels"
   | "sessions"
-  | "heatmap";
+  | "heatmap"
+  | "screenshot";
 
 export interface LayerInfo {
   id: LayerId;
@@ -49,6 +50,7 @@ export const LAYERS: LayerInfo[] = [
   { id: "htf", label: "Higher-timeframe levels", group: "Chart agent" },
   { id: "plan", label: "Trade plan", group: "Chart agent" },
   { id: "pinned", label: "Pinned answers", group: "Chart agent" },
+  { id: "screenshot", label: "Read from a screenshot", group: "Chart agent" },
   { id: "kimiSR", label: "S/R zones and odds", group: "Kimi Cooked" },
   { id: "kimiFib", label: "Fib ladder", group: "Kimi Cooked" },
   { id: "kimiForecast", label: "Forecast", group: "Kimi Cooked" },
@@ -84,6 +86,7 @@ const KIND_LAYER: Array<[RegExp, LayerId]> = [
   [/^custom_/, "custom"],
   [/^plan_/, "plan"],
   [/^(alert|trigger_zone)$/, "alerts"],
+  [/^screenshot$/, "screenshot"],
 ];
 
 /** Layer of an agent overlay, by its `kind`. */

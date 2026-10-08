@@ -129,6 +129,8 @@ class SignalAlert(BaseModel):
     last_key: Optional[str] = Field(None, description="The event it last fired on, so it never fires twice")
     trigger: Optional[ZoneTrigger] = Field(None, description="Signal zone_trigger: the zone and the confirmation")
     last_stop: Optional[float] = Field(None, description="Zone triggers: the suggested stop of the last fire")
+    owner: Optional[str] = Field(None, description="Set when the app manages it (\"holdings\": the holdings "
+                                                   "watch adds and removes it as coins are bought and sold)")
 
 
 class CreateSignalAlertsRequest(BaseModel):
@@ -393,7 +395,7 @@ class SignalAlertService:
         out: list[SignalAlert] = []
         for s in syms:
             old = existing.get((s, interval, signal))
-            a = (old.model_copy(update={"armed": True, "repeat": repeat, "note": note}) if old else
+            a = (old.model_copy(update={"armed": True, "repeat": repeat, "note": note, "owner": None}) if old else
                  SignalAlert.model_validate({"id": uuid.uuid4().hex[:10], "symbol": s, "interval": interval,
                                              "signal": signal, "repeat": repeat, "note": note, "created_at": now}))
             self._alerts[a.id] = a
@@ -421,6 +423,31 @@ class SignalAlertService:
         self._changed()
         await self._sync()
         return True
+
+    async def sync_owned(self, owner: str, symbols: list[str], interval: str, signals: list[str],
+                         note: str = "") -> dict:
+        """Makes `owner`'s alerts exactly `signals` on `interval` for `symbols`: adds the missing ones and removes
+        the owner's others. An alert the user made for the same coin, timeframe and signal is left alone and not
+        duplicated. → {"added": [...], "removed": [...], "kept": [...]} (symbols)."""
+        want = {(norm_symbol(s), interval, sig) for s in symbols for sig in signals}
+        mine = {(a.symbol, a.interval, a.signal): a for a in self._alerts.values() if a.owner == owner}
+        others = {(a.symbol, a.interval, a.signal) for a in self._alerts.values() if a.owner != owner}
+        removed = [a for key, a in mine.items() if key not in want]
+        new = sorted(k for k in want if k not in mine and k not in others)
+        room = MAX_SIGNAL_ALERTS - len(self._alerts) + len(removed)
+        new = new[:max(0, room)]
+        for a in removed:
+            self._alerts.pop(a.id, None)
+        now = int(time.time() * 1000)
+        for sym, iv, sig in new:
+            a = SignalAlert.model_validate({"id": uuid.uuid4().hex[:10], "symbol": sym, "interval": iv,
+                                            "signal": sig, "note": note[:500], "created_at": now, "owner": owner})
+            self._alerts[a.id] = a
+        if removed or new:
+            self._changed()
+            await self._sync()
+        return {"added": sorted({k[0] for k in new}), "removed": sorted({a.symbol for a in removed}),
+                "kept": sorted({k[0] for k in want if k in mine})}
 
     # ----------------------------------------------------------- preview
     async def preview(self, symbol: str, interval: str, signal: str, bars: int = 300) -> dict:
