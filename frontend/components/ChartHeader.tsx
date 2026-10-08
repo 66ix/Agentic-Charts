@@ -3,6 +3,7 @@
 import clsx from "clsx";
 import {
   Camera,
+  History,
   ChevronDown,
   Columns2,
   Divide,
@@ -59,6 +60,8 @@ interface Props {
   /** Make the active chart a ratio or index chart. */
   onOpenSymbol(symbol: string): void;
   onScreenshot(): void;
+  /** Starts replay mode on the active chart (absent: not available, e.g. ratio charts). */
+  onReplay?(): void;
   onFit(): void;
   onSettings(): void;
   onShortcuts(): void;
@@ -223,6 +226,11 @@ export default function ChartHeader(p: Props) {
       <button type="button" className="btn-ghost shrink-0" title="Save screenshot (Alt+S)" aria-label="Save screenshot" onClick={p.onScreenshot}>
         <Camera className="h-4 w-4" />
       </button>
+      {p.onReplay && (
+        <button type="button" className="btn-ghost shrink-0" title="Replay: step through past candles" aria-label="Replay" onClick={p.onReplay}>
+          <History className="h-4 w-4" />
+        </button>
+      )}
 
       <div className="flex-1" />
 

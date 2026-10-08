@@ -16,6 +16,7 @@ import { isCustom } from "@/lib/customSymbols";
 import { CHAT_ID_KEY, CHATS_KEY, toSession, upsertSession, worthKeeping, type ChatSession } from "@/lib/chatHistory";
 import { createJournalEntry, planToJournalEntry } from "@/lib/journal";
 import { DEFAULT_SIZING, sizePlan, type SizingSettings } from "@/lib/sizing";
+import { apiRequest } from "@/lib/api";
 import { OPEN_PANEL_EVENT, type DockPanelProps } from "@/lib/dock";
 import { offerGridPlan } from "@/lib/gridbot";
 import { gridCoinOverlays, SPOT_ONLY_KEY } from "@/lib/spot";
@@ -61,6 +62,7 @@ import ChartHeader, { COMPARE_COLORS } from "./ChartHeader";
 import Dock, { type DockTab } from "./Dock";
 import { EXTRA_PANELS } from "./dockPanels";
 import DrawingStyleBar from "./DrawingStyleBar";
+import ReplayBar, { type ReplayState } from "./ReplayBar";
 import DrawingToolbar, { TOOL_HOTKEYS } from "./DrawingToolbar";
 import IndicatorSettingsDialog from "./IndicatorSettingsDialog";
 import LayersPanel from "./LayersPanel";
@@ -610,6 +612,43 @@ export default function ChartWorkspace() {
     });
   }, [symbol, interval, activeChart]);
 
+  // ------------------------------------------------------------------ replay
+  const [replay, setReplay] = useState<ReplayState | null>(null);
+  const [replayLevels, setReplayLevels] = useState<{ busy: boolean; note: string | null; overlays: Overlay[] }>({ busy: false, note: null, overlays: [] });
+  const startReplay = useCallback(() => {
+    const bars = (activeChart()?.getCandles() ?? []).map((c) => c.time);
+    if (bars.length < 80) return;
+    setReplay({ bars, i: Math.max(60, bars.length - 120), playing: false, speed: 2 });
+    setReplayLevels({ busy: false, note: null, overlays: [] });
+  }, [activeChart]);
+  const exitReplay = useCallback(() => {
+    setReplay(null);
+    setReplayLevels({ busy: false, note: null, overlays: [] });
+  }, []);
+  useEffect(() => exitReplay(), [symbol, interval, exitReplay]);
+  const playing = !!replay?.playing;
+  const speed = replay?.speed ?? 1;
+  useEffect(() => {
+    if (!playing) return;
+    const id = window.setInterval(
+      () => setReplay((r) => (r ? (r.i >= r.bars.length - 1 ? { ...r, playing: false } : { ...r, i: r.i + 1 }) : r)),
+      1000 / speed,
+    );
+    return () => window.clearInterval(id);
+  }, [playing, speed]);
+  const replayTime = replay ? replay.bars[replay.i] : null;
+  const loadReplayLevels = useCallback(async () => {
+    if (replayTime == null) return;
+    setReplayLevels((l) => ({ ...l, busy: true }));
+    try {
+      const q = new URLSearchParams({ symbol, interval, time: String(replayTime) });
+      const r = await apiRequest<{ overlays: Overlay[] }>(`/api/replay/levels?${q}`, { timeoutMs: 60_000 });
+      setReplayLevels({ busy: false, note: `${r.overlays.length} zones as of then`, overlays: r.overlays });
+    } catch (err) {
+      setReplayLevels({ busy: false, note: (err as Error).message, overlays: [] });
+    }
+  }, [replayTime, symbol, interval]);
+
   // ------------------------------------------------------------------ side panel
   const agentVisible = mobile ? mobileTab === "agent" : dock.open && dock.tab === "agent";
   const openTab = useCallback(
@@ -974,6 +1013,7 @@ export default function ChartWorkspace() {
         onCompareSearch={() => setSearchMode("compare")}
         onOpenSymbol={setSymbol}
         onScreenshot={screenshot}
+        onReplay={isCustom(symbol) || replay ? undefined : startReplay}
         onFit={() => activeChart()?.fitContent()}
         onSettings={() => setDialog("settings")}
         onShortcuts={() => setDialog("shortcuts")}
@@ -1033,7 +1073,9 @@ export default function ChartWorkspace() {
                           tool,
                           magnet,
                           locked,
-                          overlays: composed.visible,
+                          // Replaying: only the levels drawn from the past, not today's.
+                          overlays: replay ? replayLevels.overlays : composed.visible,
+                          replayTime,
                           drawings: shownDrawings,
                           selectedId,
                           onDrawingsChange: onChartDrawings,
@@ -1051,6 +1093,16 @@ export default function ChartWorkspace() {
               );
             })}
           </div>
+          {replay && (
+            <ReplayBar
+              state={replay}
+              levelsBusy={replayLevels.busy}
+              levelsNote={replayLevels.note}
+              onChange={setReplay}
+              onLevels={() => void loadReplayLevels()}
+              onExit={exitReplay}
+            />
+          )}
           {pickedLevel && !selectedDrawing && (
             <div className="absolute left-1/2 top-2 z-20 flex -translate-x-1/2 items-center gap-2 rounded-md border border-line bg-panel px-2 py-1 text-[11px] shadow-lg">
               <span className="h-2.5 w-2.5 rounded-sm" style={{ background: pickedLevel.color }} />
