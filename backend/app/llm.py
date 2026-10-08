@@ -142,7 +142,8 @@ INTENT_SCHEMA: dict[str, Any] = {
                            "'scan my watchlist', 'anything oversold?'.",
         },
         "scan_filter": {"type": "string", "enum": list(SCAN_FILTERS),
-                        "description": "What the scan ranks by; 'any' when it is not a scan. For a market scan: "
+                        "description": "What the scan ranks by; 'any' when it is not a scan. volume ranks by "
+                                       "unusual volume ('which coins have unusual volume?'). For a market scan: "
                                        "bullish for longs only, bearish for shorts only, any for both."},
         "scan_market": {
             "type": "boolean",
@@ -554,7 +555,8 @@ def _indicator_toggles(p: str) -> tuple[list[str], list[str], str]:
 
 
 def _scan_filter(p: str) -> str:
-    for pat, f in ((r"oversold", "oversold"), (r"overbought", "overbought"),
+    for pat, f in ((r"\b(?:unusual|high|big|spik\w*|huge|heavy) volume\b|\bvolume (?:spikes?|surges?)\b", "volume"),
+                   (r"oversold", "oversold"), (r"overbought", "overbought"),
                    (r"\bbreak(?:ing|out|s)?\b", "breakout"), (r"\b(?:demand|support|bounce|dip)", "near_support"),
                    (r"\b(?:supply|resistance|reject)", "near_resistance"),
                    (r"\b(?:bullish|long|strong|uptrend|pump)", "bullish"),

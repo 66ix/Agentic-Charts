@@ -143,9 +143,9 @@ INDICATORS: tuple[str, ...] = ("rsi", "macd", "vwap", "ema20", "ema50", "psar", 
 
 # What a watchlist scan looks for.
 ScanFilter = Literal["any", "near_support", "near_resistance", "bullish", "bearish", "oversold", "overbought",
-                     "breakout"]
+                     "breakout", "volume"]
 SCAN_FILTERS: tuple[str, ...] = ("any", "near_support", "near_resistance", "bullish", "bearish", "oversold",
-                                 "overbought", "breakout")
+                                 "overbought", "breakout", "volume")
 
 
 def norm_symbol(v: str) -> str:
@@ -408,6 +408,8 @@ class ScanResult(BaseModel):
     signals: list[str] = Field(default_factory=list)
     score: float = 0.0
     data_source: str = "binance"
+    volume_ratio: Optional[float] = Field(None, description="Last bar's volume against the 20-bar average")
+    unusual_volume: bool = Field(False, description="Volume well above normal (3x on the last bar, or 2x over 5)")
 
 
 class SetupAgreement(BaseModel):

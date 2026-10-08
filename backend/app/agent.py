@@ -741,7 +741,7 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         facts["grid_plan"] = grid_plan_facts(grid) if grid else None
     if intent.scan_watchlist:
         facts["scan"] = [r.model_dump(include={"symbol", "last_price", "change_pct", "trend", "rsi", "signals",
-                                               "nearest_kind", "distance_pct"}) for r in rows[:6]]
+                                               "nearest_kind", "distance_pct", "unusual_volume"}) for r in rows[:6]]
     setups: list[MarketSetup] = []
     grid_coins = []
     if isinstance(mscan, MarketScanResult) and intent.scan_kind == "spot_buys":

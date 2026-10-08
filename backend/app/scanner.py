@@ -68,7 +68,8 @@ def summarize(res: AnalysisResult, df: pd.DataFrame, symbol: str, interval: str,
                       trend=res.stats.trend, rsi=rsi, nearest_kind=nearest[0] if nearest else None,
                       nearest_low=nearest[1]["low"] if nearest else None,
                       nearest_high=nearest[1]["high"] if nearest else None, distance_pct=dist_pct,
-                      signals=signals, data_source=source)
+                      signals=signals, data_source=source, volume_ratio=vol,
+                      unusual_volume=bool((f.get("volume") or {}).get("unusual")))
 
 
 def _closest(f: dict, kinds: tuple[str, ...]) -> float:
@@ -93,6 +94,9 @@ def score(r: ScanResult, f: dict, filt: str) -> float:
         up = filt == "bullish"
         return (0.4 * (r.trend == ("up" if up else "down")) + 0.3 * (br.get("direction") == filt)
                 + 0.2 * any(s["direction"] == filt for s in sweeps) + 0.1 * ((rsi > 50) if up else (rsi < 50)))
+    if filt == "volume":  # "which coins have unusual volume?"
+        v = f.get("volume") or {}
+        return max(v.get("last_vs_avg") or 1.0, (v.get("recent_vs_avg") or 1.0) * 1.5)
     if filt == "breakout":
         vol = (f.get("volume") or {}).get("last_vs_avg") or 1.0
         return (1 - br["bars_ago"] / 11 if recent_break else 0) + min(vol, 3) / 10

@@ -19,12 +19,13 @@ export interface WatchlistList {
   symbols: string[];
 }
 
-export type WatchlistSort = "manual" | "change" | "zone" | "name";
+export type WatchlistSort = "manual" | "change" | "zone" | "volume" | "name";
 
 const SORTS: { v: WatchlistSort; label: string }[] = [
   { v: "manual", label: "My order" },
   { v: "change", label: "24h change" },
   { v: "zone", label: "Nearest zone" },
+  { v: "volume", label: "Unusual volume" },
   { v: "name", label: "Name" },
 ];
 
@@ -155,6 +156,7 @@ export default function Watchlist(p: Props) {
   const ordered = [...symbols];
   if (p.sort === "change") ordered.sort((a, b) => (tickers[b]?.change_pct ?? -1e9) - (tickers[a]?.change_pct ?? -1e9));
   if (p.sort === "zone") ordered.sort((a, b) => Math.abs(scan[a]?.distance_pct ?? 1e9) - Math.abs(scan[b]?.distance_pct ?? 1e9));
+  if (p.sort === "volume") ordered.sort((a, b) => (scan[b]?.volume_ratio ?? 0) - (scan[a]?.volume_ratio ?? 0));
   if (p.sort === "name") ordered.sort();
 
   return (
@@ -311,6 +313,11 @@ export default function Watchlist(p: Props) {
                   <span className={clsx("flex items-center gap-1 font-medium", s === p.active ? "text-accent" : "text-ink")}>
                     {p.sort === "manual" && <GripVertical className="-ml-2 h-3 w-3 cursor-grab text-mute opacity-0 group-hover:opacity-60" />}
                     {displaySymbol(s)}
+                    {r?.unusual_volume && (
+                      <span className="rounded bg-orange-400/15 px-1 text-[9px] font-semibold text-orange-300" title={`Unusual volume: the last ${p.interval} bar is ${r.volume_ratio ?? "?"}x its 20-bar average`}>
+                        VOL {r.volume_ratio != null ? `${r.volume_ratio}x` : ""}
+                      </span>
+                    )}
                   </span>
                   <Sparkline closes={sparks[s]} />
                   <span className="font-mono text-ink">{t ? formatPrice(t.price) : "—"}</span>

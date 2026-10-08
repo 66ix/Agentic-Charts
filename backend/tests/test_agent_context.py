@@ -218,3 +218,13 @@ def test_session_clock_counts_down_to_the_next_open():
     # Saturday: the next London session is Monday's.
     sat = int(datetime(2026, 10, 10, 12, 0, tzinfo=timezone.utc).timestamp())
     assert {r["key"]: r for r in session_clock(sat)}["london"]["minutes"] == (2 * 24 - 5) * 60
+
+
+def test_unusual_volume_scan():
+    from app.llm import rule_intent
+    intent = rule_intent("which of my coins have unusual volume?")
+    assert intent.scan_watchlist and intent.scan_filter == "volume"
+    res = _run("which of my coins have unusual volume?")
+    assert res.scan and all(hasattr(r, "volume_ratio") for r in res.scan)
+    scores = [r.score for r in res.scan]
+    assert scores == sorted(scores, reverse=True) and scores[0] >= max(r.volume_ratio or 0 for r in res.scan)

@@ -405,6 +405,10 @@ export interface ScanResult {
   signals: string[];
   score: number;
   data_source: string;
+  /** Last bar's volume against its 20-bar average. */
+  volume_ratio?: number | null;
+  /** Volume well above normal (3x on the last bar, or 2x over the last 5). */
+  unusual_volume?: boolean;
 }
 
 export interface Ticker {
