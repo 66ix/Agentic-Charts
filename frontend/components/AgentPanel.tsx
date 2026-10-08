@@ -169,6 +169,27 @@ function factLines(obj: unknown, prefix = ""): [string, string][] {
   return [[prefix, fmt(obj)]];
 }
 
+/** Copies an answer's text, for Discord or the journal. */
+function CopyAnswer({ text }: { text: string }) {
+  const [done, setDone] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={() =>
+        void navigator.clipboard?.writeText(text).then(() => {
+          setDone(true);
+          setTimeout(() => setDone(false), 1500);
+        })
+      }
+      className="inline-flex shrink-0 items-center gap-1 rounded px-1 py-0.5 text-[10px] text-mute opacity-70 hover:bg-panel2 hover:text-ink group-hover:opacity-100"
+      title="Copy this answer"
+    >
+      {done ? <Check className="h-3 w-3" /> : <ClipboardCopy className="h-3 w-3" />}
+      {done ? "Copied" : "Copy"}
+    </button>
+  );
+}
+
 function NumbersUsed({ facts }: { facts: Record<string, unknown> }) {
   const [open, setOpen] = useState(false);
   return (
@@ -745,6 +766,7 @@ export default function AgentPanel(p: Props) {
                     ) : null}
                     <div className="mt-1 flex items-center gap-2">
                       {m.meta && <p className="text-[10px] text-mute">{m.meta}</p>}
+                      {m.role === "agent" && !m.streaming && m.text && <CopyAnswer text={m.text} />}
                       {drawable && (
                         <button
                           type="button"

@@ -54,7 +54,8 @@ from .schemas import (
     ZoneTriggerSpec,
     is_custom_symbol,
 )
-from .ta_agent import GREEN, ORANGE, TEAL, _fmt, analyze, describe, higher_timeframes, htf_zones, rgba
+from .ta_agent import (GREEN, ORANGE, TEAL, _fmt, analyze, describe, higher_timeframes, htf_readings, htf_zones,
+                       rgba)
 from .top_down import TopDownResult, describe_walk, walk, walk_facts
 from .trade_plan import build_plan, plan_overlays
 from .zone_triggers import describe_trigger, detect_now, spec_from_intent
@@ -612,9 +613,9 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         general.context(events, req.prompt) if want_general else _none(),
         # The market header bar and the chart's CVD pane, read whether or not the user has them on screen.
         _market_overview(metrics), _chart_cvd(futures, symbol, tf) if not custom_chart else _none())
-    (candles, source), higher, frames, rows, deriv, kimi_facts, fut, upcoming, headlines, mscan, lvl, grid, extra = await asyncio.gather(
+    (candles, source), higher, htf_frames, rows, deriv, kimi_facts, fut, upcoming, headlines, mscan, lvl, grid, extra = await asyncio.gather(
         candles_for_chart(), windows(),
-        _confluence_frames(market, symbol, tf, [] if custom_chart else features), scan_rows(),
+        _confluence_frames(market, symbol, tf, [] if custom_chart else ["support_resistance"]), scan_rows(),
         derivatives.symbol_snapshot(symbol) if want_deriv else _none(),
         _kimi_facts(kimi, symbol, tf) if want_kimi else _none(),
         _guarded(futures.futures_context(symbol), "futures context") if want_futures else _none(),
@@ -626,6 +627,8 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
     if general_ctx is not None and overview:
         general_ctx["market_overview"] = overview
 
+    # The next two timeframes up are always read (htf_readings); their zones only count when zones are drawn.
+    frames = htf_frames if {"support_resistance", "supply_demand"} & set(features) else {}
     df = candles_to_df(candles)
     # Detection is CPU-bound (SciPy); keep the event loop free for streams.
     result = await asyncio.to_thread(analyze, df, run_intent, tf, higher, frames, req.indicator_settings)
@@ -679,6 +682,8 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
 
     if chart_cvd:
         facts["indicators"]["cvd"] = chart_cvd
+    if htf_frames and (htf := htf_readings(htf_frames, req.indicator_settings)):
+        facts["higher_timeframes"] = htf
     if overview:
         facts["market_overview"] = overview
     if deriv:

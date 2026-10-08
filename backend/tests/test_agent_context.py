@@ -144,3 +144,18 @@ def test_asking_about_an_indicator_reads_it_without_putting_it_on_the_chart():
 def test_the_answer_carries_the_numbers_it_used():
     res = _run("what's the RSI?")
     assert "indicators" in res.facts and "last_price" in res.facts and "research" not in res.facts
+
+
+def test_higher_timeframes_are_read_without_asking():
+    res = _run("what's the RSI?")
+    assert set(res.facts["higher_timeframes"]) == {"D1", "W1"}
+    assert {"trend", "rsi", "price_vs_ema"} <= set(res.facts["higher_timeframes"]["D1"])
+
+
+def test_scans_open_with_the_market_mood():
+    from app.ta_agent import market_mood
+    assert market_mood({"fear_greed": {"display": "31/100 · Fear", "change_pct": -5.0},
+                        "unavailable": ["BTC Dominance"]}) == "Market mood: Fear & Greed 31/100 · Fear (-5% 24h)."
+    assert market_mood({"unavailable": ["Fear & Greed"]}) is None
+    res = _run("which of my coins are near demand?", metrics=FakeMetrics())
+    assert "Market mood: Fear & Greed 31/100 · Fear" in res.summary

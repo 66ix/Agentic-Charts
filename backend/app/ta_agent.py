@@ -196,6 +196,27 @@ def indicator_snapshot(df: pd.DataFrame, lengths: IndicatorLengths | None = None
     return out
 
 
+def htf_readings(frames: dict[str, pd.DataFrame], lengths: IndicatorLengths | None = None) -> dict:
+    """The higher timeframes in brief, so "does the daily agree?" needs no second question: trend from the EMAs,
+    RSI, MACD histogram, Stoch RSI zone and price against the EMAs and VWAP on each."""
+    out: dict = {}
+    for tf, df in frames.items():
+        if len(df) < 60:
+            continue
+        snap = indicator_snapshot(df.reset_index(drop=True), lengths)
+        fast, slow, where = snap["ema_fast"], snap["ema_slow"], snap["price_vs_ema"]
+        row: dict = {"trend": "up" if fast > slow and where == "above both" else
+                     "down" if fast < slow and where == "below both" else "mixed",
+                     "price_vs_ema": where, "rsi": snap.get("rsi"), "price_vs_vwap": snap["vwap"]["price"]}
+        if (m := snap.get("macd")):
+            row["macd_hist"] = m["hist"]
+            row["macd_momentum"] = ("rising" if m["hist_rising"] else "falling")
+        if (st := snap.get("stoch_rsi")):
+            row["stoch_rsi_zone"] = st["zone"]
+        out[TF_LABEL.get(tf, tf)] = row
+    return out
+
+
 # ------------------------------------------------------------------ swings
 
 
@@ -855,6 +876,18 @@ def _futures_lines(f: dict) -> list[str]:
     return out
 
 
+def market_mood(overview: dict | None) -> str | None:
+    """'Market mood: Fear & Greed 31/100 · Fear, BTC dominance 57.30% (+0.12% 24h).' from the header bar's live
+    values; None when neither is live."""
+    bits = []
+    for key, name in (("fear_greed", "Fear & Greed"), ("btc_dominance", "BTC dominance")):
+        row = (overview or {}).get(key)
+        if row:
+            chg = f" ({row['change_pct']:+g}% 24h)" if row.get("change_pct") is not None else ""
+            bits.append(f"{name} {row['display']}{chg}")
+    return f"Market mood: {', '.join(bits)}." if bits else None
+
+
 def describe(facts: dict, symbol: str) -> str:
     """Plain-English summary of the analysis, used when no LLM is configured."""
     tf = facts["timeframe"]
@@ -939,6 +972,9 @@ def describe(facts: dict, symbol: str) -> str:
             lines.append(f"Track record: {p['track_record']['summary']}.")
     elif "plan" in facts:
         lines.append("No clean trade plan here: no zone or swing to put a stop behind.")
+    if any(k in facts for k in ("scan", "market_scan", "spot_buys", "grid_coins")) and (
+            mood := market_mood(facts.get("market_overview"))):
+        lines.append(mood)
     if facts.get("scan"):
         best = facts["scan"][:3]
         lines.append("Watchlist: " + "; ".join(f"{r['symbol']} " + (", ".join(r["signals"][:2]) or r["trend"])
