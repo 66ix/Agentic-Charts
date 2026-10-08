@@ -77,6 +77,7 @@ from .symbols import find_symbol
 from .ta_agent import analyze as analyze_chart
 from .schemas import (INTERVALS, AnalyzeRequest, AnalyzeResponse, CreateAlertsRequest, KimiResponse, MarketMetrics,
                       ScanResult, ZoneTriggerSpec)
+from .level_review import LevelLog
 from .metric_alerts import CreateMetricAlertsRequest, MetricAlertService
 from .signal_alerts import SIGNALS, CreateSignalAlertsRequest, SignalAlertPatch, SignalAlertService
 from .stream_hub import StreamHub
@@ -122,8 +123,17 @@ async def lifespan(app: FastAPI):
     app.state.metric_alerts = MetricAlertService(app.state.metrics, app.state.alerts,
                                                  get_settings().metric_alerts_store)
     app.state.metric_alerts.start()
+    # Zones the agent draws, checked weekly: did they hold? (level_review.py)
+    app.state.levels = LevelLog(market, get_settings().level_log_store)
+
+    async def holdings() -> dict | None:
+        if not app.state.binance.account.status().get("configured"):
+            return None
+        return await app.state.binance.positions()
+
     app.state.brief = BriefService(market, app.state.kimi, app.state.derivatives, app.state.alerts,
-                                   events_provider=app.state.events.upcoming_events)
+                                   events_provider=app.state.events.upcoming_events, metrics=app.state.metrics,
+                                   holdings_provider=holdings, levels=app.state.levels)
     app.state.brief.start()
     # Trade manager: live trades it watches on closed candles, advising through the same channels.
     app.state.trades = TradeManager(market, app.state.alerts)
@@ -259,7 +269,8 @@ async def agent_analyze(req: AnalyzeRequest, request: Request) -> AnalyzeRespons
                                   getattr(st, "futures", None), getattr(st, "events", None),
                                   getattr(st, "market_scanner", None), levels=getattr(st, "session_levels", None),
                                   gridbots=getattr(st, "gridbots", None), metrics=getattr(st, "metrics", None),
-                                  metric_alerts=getattr(st, "metric_alerts", None))
+                                  metric_alerts=getattr(st, "metric_alerts", None),
+                                  level_log=getattr(st, "levels", None), binance=getattr(st, "binance", None))
     except MarketDataError as exc:
         raise HTTPException(502, str(exc)) from exc
     except ValueError as exc:
@@ -288,6 +299,7 @@ async def agent_analyze_stream(req: AnalyzeRequest, request: Request) -> Streami
                                      getattr(st, "market_scanner", None), levels=getattr(st, "session_levels", None),
                                      gridbots=getattr(st, "gridbots", None), metrics=getattr(st, "metrics", None),
                                      metric_alerts=getattr(st, "metric_alerts", None),
+                                     level_log=getattr(st, "levels", None), binance=getattr(st, "binance", None),
                                      on_result=on_result, on_delta=on_delta)
             await queue.put({"type": "done", "response": res.model_dump(mode="json")})
         except MarketDataError as exc:
@@ -469,6 +481,29 @@ async def brief_preview(request: Request, symbols: str | None = Query(None, desc
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     return brief.model_dump(mode="json")
+
+
+@app.put("/api/brief/notes")
+async def save_brief_notes(request: Request, body: dict = Body(...)) -> dict:
+    """{notes: {symbol: text}} → the coin notes the brief shows (the app's note per coin)."""
+    notes = body.get("notes")
+    if not isinstance(notes, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in notes.items()):
+        raise HTTPException(422, "notes must map symbols to text")
+    return {"notes": request.app.state.brief.set_notes(notes)}
+
+
+@app.get("/api/levels/review")
+async def level_review(request: Request, days: int = Query(7, ge=1, le=30)) -> dict:
+    """The zones the agent drew in the last `days` days and whether each held, broke or hasn't been reached."""
+    return await request.app.state.levels.review(days)
+
+
+@app.post("/api/levels/review/send")
+async def level_review_send(request: Request, days: int = Query(7, ge=1, le=30)) -> dict:
+    try:
+        return await request.app.state.brief.send_review(days)
+    except NoChannelError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @app.post("/api/brief/send")

@@ -207,7 +207,8 @@ def test_api_settings_preview_and_send(monkeypatch):
             assert r.status_code == 200, r.text
             assert r.json()["settings"]["times"] == ["07:30", "13:00"]
             assert r.json()["settings"]["sections"] == {"zones": True, "kimi": False, "derivatives": True,
-                                                        "events": True, "levels": True}
+                                                        "events": True, "levels": True, "market": True, "holdings": True,
+                                                        "notes": True}
             assert client.put("/api/brief/settings", json={"timezone": "Nowhere"}).status_code == 422
 
             p = client.get("/api/brief/preview")

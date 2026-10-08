@@ -691,6 +691,8 @@ export interface IndicatorState {
   heatmap?: boolean;
   /** Estimated liquidation clusters as shaded bands (backend/app/futures_data.py), refreshed every minute. */
   liqZones?: boolean;
+  /** Your Binance average entry (and futures entry / liquidation) on the chart; on unless switched off. */
+  myEntry?: boolean;
 }
 
 /** One chart in the multi-chart grid. */

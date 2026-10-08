@@ -9,7 +9,8 @@ import { useHigherTfOverlays } from "@/hooks/useHigherTfOverlays";
 import { useIsMobile } from "@/hooks/useMediaQuery";
 import { readStored, usePersistentState, writeStored } from "@/hooks/usePersistentState";
 import { useUndo } from "@/hooks/useUndo";
-import { alertFromDrawing, alertOverlays, chartZones, SELL_SIGNALS } from "@/lib/alerts";
+import { alertFromDrawing, alertOverlays, chartZones, saveBriefNotes, SELL_SIGNALS } from "@/lib/alerts";
+import { fetchAccountPositions, fetchBinanceKey, positionOverlays } from "@/lib/binance";
 import { analyzeStream } from "@/lib/api";
 import { imageToDataUrl, readScreenshot } from "@/lib/screenshot";
 import { composeSnapshot, shareSnapshot } from "@/lib/snapshot";
@@ -383,6 +384,31 @@ export default function ChartWorkspace() {
     };
   }, [liqZonesOn, symbol, onChartOverlays]);
 
+  // Your own Binance position on this coin (average entry, futures entry and liquidation), when a read-only key
+  // is set; refreshed every minute.
+  const myEntryOn = indicators.myEntry !== false && !isCustom(symbol);
+  useEffect(() => {
+    if (!myEntryOn) return;
+    const ctrl = new AbortController();
+    let timer = 0;
+    const load = () =>
+      fetchAccountPositions(false, ctrl.signal)
+        .then((pos) => onChartOverlays("myentry", symbol, positionOverlays(pos, symbol)))
+        .catch(() => undefined);
+    fetchBinanceKey(ctrl.signal)
+      .then((k) => {
+        if (!k.configured || ctrl.signal.aborted) return;
+        void load();
+        timer = window.setInterval(load, 60_000);
+      })
+      .catch(() => undefined);
+    return () => {
+      ctrl.abort();
+      window.clearInterval(timer);
+      onChartOverlays("myentry", symbol, []);
+    };
+  }, [myEntryOn, symbol, onChartOverlays]);
+
   // ------------------------------------------------------------------ alerts
   const [toasts, setToasts] = useState<Toast[]>([]);
   const onAlertsFired = useCallback((fired: FiredAlert[]) => {
@@ -482,7 +508,12 @@ export default function ChartWorkspace() {
       }),
     [setCoinNotes],
   );
-  const convoRef = useRef({ messages, overlays, lastIntent, watchlist, spotOnly, indicatorSettings, answerDetail, coinNotes, chats, chatId });
+    // The daily brief shows your note on each coin: keep the server's copy in step (brief.py).
+  useEffect(() => {
+    const id = window.setTimeout(() => void saveBriefNotes(coinNotes).catch(() => undefined), 1500);
+    return () => window.clearTimeout(id);
+  }, [coinNotes]);
+const convoRef = useRef({ messages, overlays, lastIntent, watchlist, spotOnly, indicatorSettings, answerDetail, coinNotes, chats, chatId });
   convoRef.current = { messages, overlays, lastIntent, watchlist, spotOnly, indicatorSettings, answerDetail, coinNotes, chats, chatId };
 
   // Cancel in-flight analysis when the market changes (unless a top-down walk is the one changing it).

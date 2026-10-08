@@ -890,6 +890,38 @@ def market_mood(overview: dict | None) -> str | None:
     return f"Market mood: {', '.join(bits)}." if bits else None
 
 
+def _spot_text(r: dict) -> str:
+    out = f"{r['qty']:g} {r['coin']}" + (f" (${r['value_usd']:,.0f})" if r.get("value_usd") else "")
+    if r.get("avg_entry"):
+        out += f", average entry {_fmt(r['avg_entry'])}"
+        if r.get("pnl_pct") is not None:
+            out += f", {r['pnl_pct']:+.1f}%"
+    return out
+
+
+def _position_lines(position: dict | None, holdings: dict | None) -> list[str]:
+    """'You hold 120 INJ ($936), average entry 7.21, +8.3%.' and the whole portfolio when asked."""
+    lines = []
+    if position:
+        if position.get("spot"):
+            lines.append(f"You hold {_spot_text(position['spot'])}.")
+        for p in position.get("futures", []):
+            line = f"Your futures {p['side']}: {p['qty']:g} at {_fmt(p['entry_price'])}"
+            line += f", {p['leverage']}x" if p.get("leverage") else ""
+            line += f", PnL {p['unrealized_pnl']:+,.2f}" if p.get("unrealized_pnl") is not None else ""
+            line += f", liquidation {_fmt(p['liquidation_price'])}" if p.get("liquidation_price") else ""
+            lines.append(line + ".")
+    if holdings:
+        spot = holdings.get("spot", [])
+        lines.append(f"Your holdings: ${holdings['spot_value_usd']:,.0f} in {len(spot)} coins"
+                     + (f" plus ${holdings['stablecoins_usd']:,.0f} in stablecoins" if holdings.get("stablecoins_usd")
+                        else "") + (": " + "; ".join(_spot_text(r) for r in spot[:8]) if spot else "") + ".")
+        for p in holdings.get("futures", []):
+            lines.append(f"Futures {p['symbol']} {p['side']} {p['qty']:g} at {_fmt(p['entry_price'])}"
+                         + (f", PnL {p['unrealized_pnl']:+,.2f}" if p.get("unrealized_pnl") is not None else "") + ".")
+    return lines
+
+
 def describe(facts: dict, symbol: str) -> str:
     """Plain-English summary of the analysis, used when no LLM is configured."""
     tf = facts["timeframe"]
@@ -1001,6 +1033,7 @@ def describe(facts: dict, symbol: str) -> str:
                      f"{v['recent_vs_avg']}x.")
     if facts.get("your_note_on_this_coin"):
         lines.append(f"Your note on this coin: {facts['your_note_on_this_coin']}")
+    lines += _position_lines(facts.get("your_position"), facts.get("your_holdings"))
     lines += facts.get("actions", [])
     if len(lines) == 1:
         lines.append("No qualifying levels found for this request.")

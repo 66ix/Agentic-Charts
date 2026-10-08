@@ -18,6 +18,7 @@ import re
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 from . import general
 from .agent_loop import Toolbox, plan_with_tools
@@ -61,6 +62,7 @@ from .ta_agent import (GREEN, ORANGE, TEAL, _fmt, analyze, describe, higher_time
                        rgba)
 from .top_down import TopDownResult, describe_walk, walk, walk_facts
 from .trade_plan import build_plan, plan_overlays
+from .level_review import LevelLog
 from .metric_alerts import MetricAlertService
 from .metric_alerts import describe as describe_metric_alert
 from .zone_triggers import describe_trigger, detect_now, spec_from_intent
@@ -266,6 +268,69 @@ async def _vs_btc(market: MarketData, symbol: str) -> dict | None:
         log.info("Skipped vs BTC for %s: %s", symbol, exc)
         return None
     return vs_btc(candles_to_df(coin), candles_to_df(btc))
+
+
+HOLDINGS_WORDS = re.compile(r"\b(?:my|our)\s+(?:holdings?|portfolio|bags?|positions?|spot coins|coins|account|"
+                            r"balances?|wallet)\b|\bwhat (?:do )?i (?:hold|own)\b|\bi'?m holding\b", re.I)
+
+
+async def _positions(binance: Any) -> dict | None:
+    """The user's Binance holdings and positions (binance_import.positions, cached 30 s), or None without a
+    read-only key or on any error."""
+    if binance is None or not binance.account.status().get("configured"):
+        return None
+    try:
+        return await asyncio.wait_for(binance.positions(), 10.0)
+    except Exception as exc:  # the answer goes out without it
+        log.info("Skipped Binance holdings: %s", exc)
+        return None
+
+
+def _spot_row(r: dict) -> dict:
+    out = {"coin": r["asset"], "qty": r["own_qty"], "value_usd": r.get("value"), "price": r.get("price")}
+    if r.get("avg_entry"):
+        out["avg_entry"] = r["avg_entry"]
+        if r.get("price"):
+            out["pnl_pct"] = round((r["price"] / r["avg_entry"] - 1) * 100, 2)
+        if r.get("unrealized_pnl") is not None:
+            out["unrealized_pnl_usd"] = r["unrealized_pnl"]
+    if r.get("untracked_qty"):
+        out["qty_without_known_entry"] = r["untracked_qty"]
+    return out
+
+
+def _futures_row(p: dict) -> dict:
+    return {k: p.get(k) for k in ("symbol", "side", "qty", "entry_price", "mark_price", "leverage",
+                                  "liquidation_price", "unrealized_pnl") if p.get(k) is not None}
+
+
+def holding_facts(pos: dict, symbol: str) -> dict | None:
+    """What the user holds of `symbol` on Binance: their spot holding (with average entry from imported fills)
+    and any USD-M position on it."""
+    base = re.sub(r"(?:USDT|USDC|FDUSD|BUSD)$", "", symbol)
+    manual = pos.get("manual", {})
+    spot = next((r for r in manual.get("spot", []) if r["asset"] == base and (r.get("value") or 0) >= 5), None)
+    fut = [p for p in manual.get("futures", []) if p["symbol"] == symbol]
+    if not spot and not fut:
+        return None
+    out: dict = {}
+    if spot:
+        out["spot"] = _spot_row(spot)
+    if fut:
+        out["futures"] = [_futures_row(p) for p in fut]
+    return out
+
+
+def portfolio_facts(pos: dict) -> dict:
+    """All the user's own holdings and positions, biggest first."""
+    manual = pos.get("manual", {})
+    spot = sorted((r for r in manual.get("spot", []) if (r.get("value") or 0) >= 5), key=lambda r: -(r["value"] or 0))
+    cash = sum(c["qty"] for c in manual.get("cash", []))
+    out: dict = {"spot_value_usd": round(sum(r["value"] for r in spot), 2), "stablecoins_usd": round(cash, 2),
+                 "spot": [_spot_row(r) for r in spot[:20]]}
+    if manual.get("futures"):
+        out["futures"] = [_futures_row(p) for p in manual["futures"][:10]]
+    return out
 
 
 def past_answer_facts(prev: PastAnswer, price_now: float, now: float | None = None) -> dict | None:
@@ -536,6 +601,8 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
                        gridbots: GridBotService | None = None,
                        metrics: MarketMetricsService | None = None,
                        metric_alerts: MetricAlertService | None = None,
+                       level_log: LevelLog | None = None,
+                       binance: Any = None,
                        on_result: Callable[[AnalyzeResponse], Awaitable[None]] | None = None,
                        on_delta: Callable[[str], Awaitable[None]] | None = None) -> AnalyzeResponse:
     """The agent's answer to one request. With `on_result` and `on_delta` (the streaming endpoint) the drawings,
@@ -648,7 +715,7 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         general.context(events, req.prompt) if want_general else _none(),
         # The market header bar and the chart's CVD pane, read whether or not the user has them on screen.
         _market_overview(metrics), _chart_cvd(futures, symbol, tf) if not custom_chart else _none(),
-        _vs_btc(market, symbol) if not custom_chart else _none())
+        _vs_btc(market, symbol) if not custom_chart else _none(), _positions(binance))
     (candles, source), higher, htf_frames, rows, deriv, kimi_facts, fut, upcoming, headlines, mscan, lvl, grid, extra = await asyncio.gather(
         candles_for_chart(), windows(),
         _confluence_frames(market, symbol, tf, [] if custom_chart else ["support_resistance"]), scan_rows(),
@@ -659,9 +726,11 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         _headlines(events, symbol) if want_news else _empty(), market_scan(),
         _guarded(levels.get(symbol, tf), "session levels") if want_levels else _none(),
         _grid_plan(gridbots, symbol) if want_grid else _none(), extras)
-    sells, walked, ladder, general_ctx, overview, chart_cvd, vs_btc_facts = extra
+    sells, walked, ladder, general_ctx, overview, chart_cvd, vs_btc_facts, positions = extra
     if general_ctx is not None and overview:
         general_ctx["market_overview"] = overview
+    if general_ctx is not None and positions and HOLDINGS_WORDS.search(req.prompt):
+        general_ctx["your_holdings"] = portfolio_facts(positions)
 
     # The next two timeframes up are always read (htf_readings); their zones only count when zones are drawn.
     frames = htf_frames if {"support_resistance", "supply_demand"} & set(features) else {}
@@ -725,6 +794,11 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
     facts["session_clock"] = clock_facts(int(time.time()))
     if req.coin_note and req.coin_note.strip():
         facts["your_note_on_this_coin"] = req.coin_note.strip()
+    if positions:  # read-only Binance key set: what the user holds of this coin, and everything when asked
+        if not custom_chart and (mine := holding_facts(positions, symbol)):
+            facts["your_position"] = mine
+        if HOLDINGS_WORDS.search(req.prompt):
+            facts["your_holdings"] = portfolio_facts(positions)
     if req.previous_answer and (past := past_answer_facts(req.previous_answer, result.stats.last_price)):
         facts["last_time_you_asked"] = past
     if overview:
@@ -805,6 +879,8 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
                     "The sell check could not run right now.")
     if lead:
         fallback = " ".join(lead) + " " + fallback
+    if level_log is not None and not custom_chart:  # for the weekly "did the levels hold?" check
+        level_log.record(symbol, tf, overlays, result.stats.last_price, source)
     res = AnalyzeResponse(
         symbol=symbol,
         interval=chart_interval,

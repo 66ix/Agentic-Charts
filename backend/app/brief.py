@@ -9,6 +9,12 @@ day's economic events when an events provider is wired in (`events_provider`). E
 engines the chart uses (scanner / ta_agent, kimi_service, derivatives); nothing is invented, and synthetic demo
 candles or demo calendar entries are labelled as such.
 
+It can also open with the market mood (the header bar's live Fear & Greed, BTC dominance and market cap), list your
+Binance holdings and futures positions when a read-only key is set (`holdings_provider`), cover the coins you hold
+as well as the watchlist (`include_holdings`), and show your note on each coin (synced from the app with
+PUT /api/brief/notes). Once a week (`weekly_review`, on `review_day` at the first brief time) it sends the level
+check from level_review.py: whether the zones the agent drew that week held.
+
 Settings and the scheduler's memory live in BRIEF_STORE. The scheduler checks every 30 s and sends each configured
 local time once per day; the last sent slot is saved before sending, so a restart never sends a slot twice. A slot
 missed by more than an hour (server down) is skipped rather than sent late. Each send is added to the alert history
@@ -25,7 +31,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone, tzinfo
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, Field, field_validator
@@ -41,10 +47,13 @@ from .ta_agent import TF_LABEL, analyze
 if TYPE_CHECKING:
     from .derivatives import DerivativesService
     from .kimi_service import KimiService
+    from .level_review import LevelLog
+    from .market_metrics import MarketMetricsService
 
 log = logging.getLogger(__name__)
 
 EventsProvider = Callable[[], Awaitable[list[dict]]]
+HoldingsProvider = Callable[[], Awaitable[Optional[dict]]]
 
 CHECK_SECONDS = 30.0
 GRACE_SECONDS = 3600.0     # a slot missed by more than this (server down) is skipped, not sent late
@@ -73,6 +82,9 @@ class BriefSections(BaseModel):
     derivatives: bool = True
     events: bool = True
     levels: bool = True
+    market: bool = True     # the market mood: Fear & Greed, BTC dominance, market cap (live values only)
+    holdings: bool = True   # your Binance holdings and positions, when a read-only key is set
+    notes: bool = True      # your note on each coin
 
 
 class BriefSettings(BaseModel):
@@ -86,6 +98,10 @@ class BriefSettings(BaseModel):
                                description="Coins to cover; empty = the default watchlist")
     interval: Interval = "4h"
     sections: BriefSections = Field(default_factory=BriefSections)
+    include_holdings: bool = Field(False, description="Also cover the coins held on Binance")
+    weekly_review: bool = Field(False, description="Once a week, check whether the agent's zones held")
+    review_day: int = Field(6, ge=0, le=6, description="Day of the weekly check, 0 = Monday; sent at the first "
+                                                         "brief time that day")
 
     @field_validator("times")
     @classmethod
@@ -260,8 +276,49 @@ def _event_lines(events: list[dict], tz: tzinfo, today: datetime) -> tuple[list[
     return [line for _, _, line in sorted(rows, key=lambda r: r[1])], demo
 
 
+def market_line(metrics: Any) -> Optional[str]:
+    """'Market: Fear & Greed 31/100 · Fear · BTC dominance 57.30% (+0.12%) · Market cap $2.92T (+0.88%)' from the
+    header bar's live values; None when none is live."""
+    bits = []
+    for m in getattr(metrics, "metrics", []) or []:
+        if m.source == "live" and m.key in ("fear_greed", "btc_dominance", "market_cap"):
+            bits.append(f"{m.label} {m.display}" + (f" ({m.change_pct:+.2f}%)" if m.change_pct is not None else ""))
+    return "Market: " + " · ".join(bits) if bits else None
+
+
+def holdings_lines(pos: dict) -> list[str]:
+    """Your own spot holdings (worth $5 or more) and USD-M positions from binance_import.positions."""
+    spot = sorted((r for r in pos.get("manual", {}).get("spot", []) if (r.get("value") or 0) >= 5),
+                  key=lambda r: -(r.get("value") or 0))
+    futures = pos.get("manual", {}).get("futures", [])
+    if not spot and not futures:
+        return []
+    total = sum(r["value"] for r in spot)
+    out = [f"Your holdings: ${total:,.0f} in {len(spot)} coin{'s' if len(spot) != 1 else ''}" if spot
+           else "Your holdings"]
+    for r in spot[:15]:
+        line = f"{r['asset']} {r['own_qty']:g} · ${r['value']:,.0f}"
+        if r.get("avg_entry") and r.get("price"):
+            line += f" · avg {fmt_price(r['avg_entry'])}, {(r['price'] / r['avg_entry'] - 1) * 100:+.1f}%"
+            if r.get("unrealized_pnl") is not None:
+                line += f" ({'+' if r['unrealized_pnl'] >= 0 else '-'}${abs(r['unrealized_pnl']):,.0f})"
+        out.append(line)
+    for p in futures[:10]:
+        line = f"{p['symbol']} {p['side']} {p['qty']:g} @ {fmt_price(p['entry_price'])}"
+        if p.get("leverage"):
+            line += f" {p['leverage']}x"
+        pnl = p.get("unrealized_pnl")
+        if pnl is not None:
+            line += f" · PnL {'+' if pnl >= 0 else '-'}${abs(pnl):,.2f}"
+        if p.get("liquidation_price"):
+            line += f" · liq {fmt_price(p['liquidation_price'])}"
+        out.append(line)
+    return out
+
+
 def render_brief(now: datetime, tz_name: str, interval: str, coins: list[CoinBrief], sections: BriefSections,
-                 events: Optional[list[dict]] = None) -> str:
+                 events: Optional[list[dict]] = None, market: Optional[str] = None,
+                 holdings: Optional[list[str]] = None) -> str:
     """The brief's plain text. `now` is local to `tz_name`."""
     tfl = TF_LABEL.get(interval, interval)
     out = [f"Market brief — {now:%a %d %b %Y, %H:%M} ({tz_name})",
@@ -277,7 +334,12 @@ def render_brief(now: datetime, tz_name: str, interval: str, coins: list[CoinBri
     if sections.zones and in_zone:
         overview.append("In a zone: " + ", ".join(f"{c.symbol} ({c.zone.nearest_kind})" for c in in_zone
                                                   if c.zone))
-    blocks = ["\n".join(out + overview)] + [_coin_block(c, tfl, sections) for c in coins]
+    if market:
+        overview.insert(0, market)
+    blocks = ["\n".join(out + overview)]
+    if holdings:
+        blocks.append("\n".join([holdings[0]] + [f"  {x}" for x in holdings[1:]]))
+    blocks += [_coin_block(c, tfl, sections) for c in coins]
     if sections.events and events:
         lines, demo = _event_lines(events, now.tzinfo or timezone.utc, now)
         if lines:
@@ -296,7 +358,9 @@ class NoChannelError(ValueError):
 class BriefService:
     def __init__(self, market: MarketData, kimi: Optional[KimiService], derivatives: Optional[DerivativesService],
                  alerts: AlertService, settings: Settings | None = None,
-                 events_provider: Optional[EventsProvider] = None, check_seconds: float = CHECK_SECONDS) -> None:
+                 events_provider: Optional[EventsProvider] = None, check_seconds: float = CHECK_SECONDS,
+                 metrics: Optional[MarketMetricsService] = None, holdings_provider: Optional[HoldingsProvider] = None,
+                 levels: Optional[LevelLog] = None) -> None:
         self.market = market
         self.kimi = kimi
         self.derivatives = derivatives
@@ -306,6 +370,10 @@ class BriefService:
         # economic calendar, e.g. `app.state.brief.events_provider = calendar.today`.
         self.events_provider = events_provider
         self.check_seconds = check_seconds
+        self.metrics = metrics
+        # async () -> binance_import.positions(), or None without a read-only key
+        self.holdings_provider = holdings_provider
+        self.levels = levels
         self._path = store_path(self.s.brief_store)
         data = read_store(self._path) or {}
         try:
@@ -317,6 +385,8 @@ class BriefService:
         self._last_prices: dict[str, float] = {k: float(v) for k, v in (data.get("last_prices") or {}).items()
                                                if isinstance(v, (int, float))}
         self._last_sent_at: Optional[int] = data.get("last_sent_at")
+        self._notes: dict[str, str] = {k: str(v) for k, v in (data.get("notes") or {}).items() if v}
+        self._last_review: str = str(data.get("last_review") or "")  # ISO week of the last weekly check, "2026-W41"
         self._task: asyncio.Task | None = None
         self._send_lock = asyncio.Lock()
 
@@ -328,7 +398,18 @@ class BriefService:
     def status(self) -> dict:
         """Settings plus what the panel shows next to them."""
         return {"settings": self._settings.model_dump(), "channels": self.alerts.channel_status,
-                "last_sent_at": self._last_sent_at, "default_symbols": DEFAULT_WATCHLIST}
+                "last_sent_at": self._last_sent_at, "default_symbols": DEFAULT_WATCHLIST,
+                "holdings_available": self.holdings_provider is not None}
+
+    @property
+    def notes(self) -> dict[str, str]:
+        return dict(self._notes)
+
+    def set_notes(self, notes: dict[str, str]) -> dict[str, str]:
+        """Replace the coin notes (the app's note per coin, synced from the browser)."""
+        self._notes = {norm_symbol(k): v.strip()[:500] for k, v in list(notes.items())[:200] if v and v.strip()}
+        self._save()
+        return self.notes
 
     def update_settings(self, new: BriefSettings, now: Optional[float] = None) -> BriefSettings:
         """Save new settings. Send times that already passed today do not fire at once; the next one does."""
@@ -344,10 +425,15 @@ class BriefService:
         watchlist) on `interval` (default: the saved one)."""
         cfg = self._settings
         syms = [norm_symbol(s) for s in (symbols or cfg.symbols or DEFAULT_WATCHLIST)][:40]
+        secs = sections or cfg.sections
+        positions = await self._holdings() if (secs.holdings or cfg.include_holdings) else None
+        if cfg.include_holdings and positions and not symbols:
+            held = [r["symbol"] for r in sorted(positions.get("manual", {}).get("spot", []),
+                                                key=lambda r: -(r.get("value") or 0)) if (r.get("value") or 0) >= 5]
+            syms = list(dict.fromkeys(syms + held))[:40]
         iv = interval or cfg.interval
         if iv not in INTERVAL_SECONDS:
             raise ValueError(f"unsupported interval {iv!r}")
-        secs = sections or cfg.sections
         ts = time.time() if now is None else now
         local = datetime.fromtimestamp(ts, _tz(cfg.timezone))
         sem = asyncio.Semaphore(4)
@@ -360,8 +446,14 @@ class BriefService:
                     log.info("Brief: %s failed: %s", sym, exc)
                     return CoinBrief(sym, error="data unavailable")
 
-        coins, events = await asyncio.gather(asyncio.gather(*(one(s) for s in syms)), self._events(secs))
-        text = render_brief(local, cfg.timezone, iv, list(coins), secs, events)
+        coins, events, market = await asyncio.gather(asyncio.gather(*(one(s) for s in syms)), self._events(secs),
+                                                     self._market(secs))
+        if secs.notes:
+            for c in coins:
+                if note := self._notes.get(c.symbol):
+                    c.notes.append(f"Your note: {note}")
+        holdings = holdings_lines(positions) if secs.holdings and positions else None
+        text = render_brief(local, cfg.timezone, iv, list(coins), secs, events, market, holdings)
         limit = min((c.limit for c in self.alerts.channels), default=4000)
         return BriefResult(text=text, messages=split_message(text, limit),
                            generated_at=datetime.fromtimestamp(ts, timezone.utc), symbols=syms, interval=iv,
@@ -419,6 +511,24 @@ class BriefService:
                 log.info("Brief: %s %s unavailable: %s", sym, name, result)
         return c
 
+    async def _market(self, secs: BriefSections) -> Optional[str]:
+        if not secs.market or self.metrics is None:
+            return None
+        try:
+            return market_line(await asyncio.wait_for(self.metrics.get(), EVENTS_TIMEOUT))
+        except Exception as exc:
+            log.info("Brief: market metrics unavailable: %s", exc)
+            return None
+
+    async def _holdings(self) -> Optional[dict]:
+        if self.holdings_provider is None:
+            return None
+        try:
+            return await asyncio.wait_for(self.holdings_provider(), EVENTS_TIMEOUT * 3)
+        except Exception as exc:
+            log.info("Brief: holdings unavailable: %s", exc)
+            return None
+
     async def _events(self, secs: BriefSections) -> Optional[list[dict]]:
         if not secs.events or self.events_provider is None:
             return None
@@ -453,6 +563,7 @@ class BriefService:
         """Send the brief if a configured time is due → whether it was sent."""
         cfg = self._settings
         ts = time.time() if now is None else now
+        await self._weekly(ts)
         if not cfg.enabled:
             return False
         slot = due_slot(cfg, ts, self._last_slot)
@@ -467,6 +578,39 @@ class BriefService:
             await self.send(now=ts)
         except Exception:
             log.exception("Scheduled brief failed")
+            return False
+        return True
+
+    async def send_review(self, days: int = 7, now: Optional[float] = None) -> dict:
+        """Build the weekly level check and send it to Telegram / Discord → the review plus the send results."""
+        if not self.alerts.channels:
+            raise NoChannelError("No notification channel is configured. Set TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID "
+                                 "or DISCORD_WEBHOOK_URL on the backend to receive the weekly check.")
+        if self.levels is None:
+            raise ValueError("The level log is not available")
+        review = await self.levels.review(days, now)
+        results = await self.alerts.send_text(review["text"])
+        self.alerts.record("brief", "", "Weekly level check", review["text"],
+                           time_ms=int((time.time() if now is None else now) * 1000))
+        return {**review, "results": results}
+
+    async def _weekly(self, ts: float) -> bool:
+        """Send the weekly level check on the chosen day, at the first brief time → whether it was sent."""
+        cfg = self._settings
+        if not cfg.weekly_review or self.levels is None or not self.alerts.channels:
+            return False
+        local = datetime.fromtimestamp(ts, _tz(cfg.timezone))
+        y, w, _ = local.isocalendar()
+        week = f"{y}-W{w:02d}"
+        h, m = (int(x) for x in cfg.times[0].split(":"))
+        if local.weekday() != cfg.review_day or (local.hour, local.minute) < (h, m) or week == self._last_review:
+            return False
+        self._last_review = week
+        self._save()  # before sending, like the brief: never twice in one week
+        try:
+            await self.send_review(now=ts)
+        except Exception:
+            log.exception("Weekly level check failed")
             return False
         return True
 
@@ -491,4 +635,5 @@ class BriefService:
 
     def _save(self) -> None:
         write_store(self._path, {"settings": self._settings.model_dump(), "last_slot": self._last_slot,
-                                 "last_prices": self._last_prices, "last_sent_at": self._last_sent_at})
+                                 "last_prices": self._last_prices, "last_sent_at": self._last_sent_at,
+                                 "notes": self._notes, "last_review": self._last_review})
