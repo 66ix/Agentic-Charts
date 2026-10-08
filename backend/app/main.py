@@ -55,7 +55,7 @@ from .futures_data import FUTURES_PERIODS, FuturesDataService
 from .kimi_service import KimiService
 from .llm import LLMClient
 from .postmortem import PostMortemService, ReviewSettings
-from .market_data import MarketData, MarketDataError
+from .market_data import INTERVAL_SECONDS, MarketData, MarketDataError
 from .market_index import MarketIndexService
 from .market_metrics import MarketMetricsService
 from .model_choice import ModelChoice, ModelChooser
@@ -64,7 +64,9 @@ from .orderbook_heatmap import OrderbookHeatmapService
 from .ratelimit import RateLimitMiddleware
 from .scanner import DEFAULT_WATCHLIST, WatchlistCache, tickers
 from .session_levels import SessionLevelsService
+from .schemas import AnalysisIntent
 from .schemas import norm_symbol as schemas_norm
+from .ta_agent import analyze as analyze_chart
 from .schemas import (INTERVALS, AnalyzeRequest, AnalyzeResponse, CreateAlertsRequest, KimiResponse, MarketMetrics,
                       ScanResult, ZoneTriggerSpec)
 from .signal_alerts import SIGNALS, CreateSignalAlertsRequest, SignalAlertPatch, SignalAlertService
@@ -627,6 +629,26 @@ async def dca_plan(req: DcaRequest, request: Request) -> dict:
         raise HTTPException(502, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+@app.get("/api/replay/levels")
+async def replay_levels(request: Request, symbol: str = Query(...), interval: str = Query("4h"),
+                        time_: int = Query(..., alias="time", description="Last candle's open time, UNIX s")) -> dict:
+    """Replay mode: the support/resistance and supply/demand zones the detectors would have drawn with only the
+    candles up to `time`, so you can step forward and see how price treated them."""
+    sym, iv = _norm_symbol(symbol), _check_interval(interval)
+    step = INTERVAL_SECONDS[iv]
+    try:
+        df, source = await request.app.state.market.get_range(sym, iv, time_ - 400 * step, time_ + step - 1)
+    except MarketDataError as exc:
+        raise HTTPException(422 if "Unsupported" in str(exc) else 502, str(exc)) from exc
+    df = df[df["time"] <= time_].reset_index(drop=True)
+    if len(df) < 60:
+        raise HTTPException(422, "Not enough candles before this point")
+    intent = AnalysisIntent(features=["support_resistance", "supply_demand"], window_timeframes=[], max_zones=3)
+    res = await asyncio.to_thread(analyze_chart, df, intent, iv)
+    return {"symbol": sym, "interval": iv, "time": int(df["time"].iloc[-1]), "source": source,
+            "overlays": [o.model_dump() for o in res.overlays]}
 
 
 @app.post("/api/sell-check")

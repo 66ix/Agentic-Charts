@@ -40,3 +40,15 @@ def test_endpoint():
         r = client.post("/api/dca", json={"symbol": "btc", "budget": 500, "days": 90})
         assert r.status_code == 200, r.text
         assert r.json()["symbol"] == "BTCUSDT" and len(r.json()["strategies"]) == 4
+
+
+def test_replay_levels_only_use_candles_up_to_the_point():
+    import time as _t
+
+    with TestClient(app) as client:
+        t = (int(_t.time()) // 14400 - 100) * 14400
+        r = client.get("/api/replay/levels", params={"symbol": "BTCUSDT", "interval": "4h", "time": t})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["time"] <= t and body["overlays"]
+        assert all((o.get("time_start") or 0) <= t for o in body["overlays"])
