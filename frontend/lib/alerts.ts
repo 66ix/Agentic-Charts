@@ -190,6 +190,8 @@ export interface SignalAlert {
   trigger?: ZoneTrigger | null;
   /** Zone triggers: the suggested stop of the last fire. */
   last_stop?: number | null;
+  /** "holdings": added and removed by the holdings watch as coins are bought and sold. */
+  owner?: string | null;
 }
 
 export interface SignalAlertPatch {

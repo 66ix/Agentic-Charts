@@ -10,10 +10,13 @@ import {
   fetchAccountFills,
   fetchBinanceKey,
   fetchAccountPositions,
+  fetchHoldingsWatch,
   fetchImportStatus,
   removeBinanceKey,
+  runHoldingsWatch,
   runImport,
   saveBinanceKey,
+  saveHoldingsWatch,
   saveImportSettings,
   testBinanceKey,
   type AccountFill,
@@ -22,6 +25,8 @@ import {
   type BinanceKeyStatus,
   type FillKind,
   type FuturesPosition,
+  type HoldingsWatchSettings,
+  type HoldingsWatchStatus,
   type ImportSettings,
   type ImportStatus,
   type SpotHolding,
@@ -667,6 +672,101 @@ export function BinanceKeySettings() {
   );
 }
 
+// -------------------------------------------------------------- holdings watch --
+
+/** Sell-or-trim alerts on the coins held on Binance, added and removed as they are bought and sold. */
+function HoldingsWatchSetup({ enabled: keyOk }: { enabled: boolean }) {
+  const [st, setSt] = useState<HoldingsWatchStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    const ctrl = new AbortController();
+    fetchHoldingsWatch(ctrl.signal)
+      .then(setSt)
+      .catch((err) => {
+        if ((err as Error).name !== "AbortError") setError((err as Error).message);
+      });
+    return () => ctrl.abort();
+  }, []);
+  if (!st) return error ? <Notice tone="error">{error}</Notice> : null;
+  const s = st.settings;
+  const save = async (patch: Partial<HoldingsWatchSettings>) => {
+    setBusy(true);
+    try {
+      setSt(await saveHoldingsWatch({ ...s, ...patch }));
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const last = st.last;
+  return (
+    <Section
+      title="Watch my holdings"
+      right={
+        s.enabled && (
+          <button
+            type="button"
+            className="btn-ghost h-6 px-1.5 text-[11px]"
+            disabled={busy}
+            onClick={async () => {
+              setBusy(true);
+              try {
+                setSt(await runHoldingsWatch());
+              } catch (err) {
+                setError((err as Error).message);
+              } finally {
+                setBusy(false);
+              }
+            }}
+          >
+            {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Check now"}
+          </button>
+        )
+      }
+    >
+      <label className="flex items-center gap-2 text-[11px] text-ink">
+        <input type="checkbox" checked={s.enabled} disabled={busy || (!keyOk && !s.enabled)} onChange={(e) => void save({ enabled: e.target.checked })} />
+        Alert me when a coin I hold loses support or is rejected at resistance
+      </label>
+      <div className="flex flex-wrap items-center gap-2 text-[11px] text-mute">
+        <span>Checked on every</span>
+        <select
+          aria-label="Timeframe"
+          className="h-6 rounded border border-line bg-transparent px-1 text-[11px] text-ink outline-none"
+          value={s.interval}
+          disabled={busy}
+          onChange={(e) => void save({ interval: e.target.value as HoldingsWatchSettings["interval"] })}
+        >
+          <option value="1h">1h</option>
+          <option value="4h">4h</option>
+          <option value="1d">1D</option>
+        </select>
+        <span>close</span>
+        <label className="flex items-center gap-1">
+          <input type="checkbox" checked={s.include_bots} disabled={busy} onChange={(e) => void save({ include_bots: e.target.checked })} />
+          also my tracked grid bots&apos; coins
+        </label>
+      </div>
+      {!keyOk && <Notice>Add a read-only Binance key above to use it.</Notice>}
+      {error && <Notice tone="error">{error}</Notice>}
+      {last?.error && <Notice tone="warn">{last.error}</Notice>}
+      {s.enabled && last && !last.error && (
+        <p className="text-[11px] text-mute">
+          {last.coins.length
+            ? `Watching ${last.coins.map((c) => displaySymbol(c.symbol) + (c.source === "grid bot" ? " (bot)" : "")).join(", ")}.`
+            : "No coins worth watching right now."}
+          {last.added.length > 0 && ` Added ${last.added.map(displaySymbol).join(", ")}.`}
+          {last.removed.length > 0 && ` Stopped watching ${last.removed.map(displaySymbol).join(", ")} (sold).`} Checked {when(last.at)}.
+        </p>
+      )}
+      <Notice>{st.bot_note}</Notice>
+    </Section>
+  );
+}
+
 // ------------------------------------------------------------------ panel --
 
 /**
@@ -729,6 +829,7 @@ export default function AccountPanel() {
               <>
                 <KeySetup status={status.key} onChanged={(key) => setStatus({ ...status, key })} />
                 <ImportSetup key={status.settings.symbols.join(",")} status={status} onStatus={setStatus} />
+                <HoldingsWatchSetup enabled={enabled} />
               </>
             )}
           </div>

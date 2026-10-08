@@ -46,6 +46,7 @@ from .top_down import walk
 from .binance_account import BinanceAccount, BinanceApiError, BinanceKeyError
 from .binance_import import BinanceImportService, ClassifyRequest, ImportSettings
 from .journal import JournalPatch, JournalService, NewJournalEntry, entry_json
+from .holdings_watch import HoldingsWatch, WatchSettings
 from .paper import NewPaperOrder, PaperService
 from .events import EventsService
 from .futures_data import FUTURES_PERIODS, FuturesDataService
@@ -99,6 +100,9 @@ async def lifespan(app: FastAPI):
     # Signal alerts and the scheduled brief (signal_alerts.py, brief.py); both notify through app.state.alerts.
     # The brief lists today's high-impact economic events from the calendar.
     app.state.signal_alerts = SignalAlertService(app.state.hub, market, app.state.kimi, app.state.alerts)
+    # Sell-or-trim alerts kept in step with the coins held on Binance (holdings_watch.py).
+    app.state.holdings_watch = HoldingsWatch(app.state.binance, app.state.signal_alerts)
+    app.state.holdings_watch.start()
     await app.state.signal_alerts.start()
     app.state.brief = BriefService(market, app.state.kimi, app.state.derivatives, app.state.alerts,
                                    events_provider=app.state.events.upcoming_events)
@@ -126,6 +130,7 @@ async def lifespan(app: FastAPI):
     await app.state.models.close()
     await app.state.trades.close()
     await app.state.heatmap.close()
+    await app.state.holdings_watch.close()
     await app.state.binance.close()
     await app.state.binance.account.close()
     await app.state.signal_alerts.close()
@@ -955,6 +960,23 @@ async def binance_classify(req: ClassifyRequest, request: Request) -> dict:
 @app.get("/api/binance/positions")
 async def binance_positions(request: Request, refresh: bool = Query(False)) -> dict:
     return await _binance_run(request.app.state.binance.positions(refresh))
+
+
+@app.get("/api/holdings-watch")
+async def holdings_watch_status(request: Request) -> dict:
+    return request.app.state.holdings_watch.status()
+
+
+@app.put("/api/holdings-watch")
+async def holdings_watch_update(new: WatchSettings, request: Request) -> dict:
+    """Turns the holdings watch on or off, or changes its timeframe; syncs the alerts at once."""
+    return await request.app.state.holdings_watch.update(new)
+
+
+@app.post("/api/holdings-watch/run")
+async def holdings_watch_run(request: Request) -> dict:
+    await request.app.state.holdings_watch.run()
+    return request.app.state.holdings_watch.status()
 
 
 @app.get("/api/binance/gridbots/{bot_id}/compare")
