@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 from contextlib import asynccontextmanager
 
 import httpx
@@ -46,6 +47,7 @@ from .top_down import walk
 from .binance_account import BinanceAccount, BinanceApiError, BinanceKeyError
 from .binance_import import BinanceImportService, ClassifyRequest, ImportSettings
 from .journal import JournalPatch, JournalService, NewJournalEntry, entry_json
+from .dca import DcaRequest, plan_dca
 from .holdings_watch import HoldingsWatch, WatchSettings
 from .paper import NewPaperOrder, PaperService
 from .events import EventsService
@@ -62,6 +64,7 @@ from .orderbook_heatmap import OrderbookHeatmapService
 from .ratelimit import RateLimitMiddleware
 from .scanner import DEFAULT_WATCHLIST, WatchlistCache, tickers
 from .session_levels import SessionLevelsService
+from .schemas import norm_symbol as schemas_norm
 from .schemas import (INTERVALS, AnalyzeRequest, AnalyzeResponse, CreateAlertsRequest, KimiResponse, MarketMetrics,
                       ScanResult, ZoneTriggerSpec)
 from .signal_alerts import SIGNALS, CreateSignalAlertsRequest, SignalAlertPatch, SignalAlertService
@@ -606,6 +609,20 @@ async def dip_ladder(request: Request, body: dict = Body(...)) -> dict:
     req: LadderRequest = _gridbot_body(LadderRequest, body)
     try:
         return (await plan_ladder(request.app.state.market, req)).model_dump()
+    except MarketDataError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/dca")
+async def dca_plan(req: DcaRequest, request: Request) -> dict:
+    """Lump sum vs weekly / daily DCA vs buying the dips on one coin over the last `days` (dca.py)."""
+    req = req.model_copy(update={"symbol": _norm_symbol(schemas_norm(req.symbol))})
+    try:
+        df, source = await request.app.state.market.get_range(req.symbol, "1d",
+                                                              int(time.time()) - (req.days + 40) * 86400)
+        return plan_dca(df, req, source).model_dump()
     except MarketDataError as exc:
         raise HTTPException(502, str(exc)) from exc
     except ValueError as exc:

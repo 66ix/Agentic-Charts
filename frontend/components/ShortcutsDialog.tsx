@@ -48,6 +48,7 @@ export const SHORTCUTS: Array<{ group: string; keys: Array<[string, string]> }> 
       ["J", "Trade journal"],
       ["Y", "Paper trading"],
       ["X", "Backtest a setup"],
+      ["C", "DCA planner"],
       ["B", "Grid bots"],
       ["E", "Calendar and news"],
       ["O", "Market data"],

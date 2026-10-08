@@ -1,12 +1,13 @@
 "use client";
 
-import { CalendarClock, Coins, Crosshair, FlaskConical, Gauge, Grid3x3, NotebookPen, Radar, Wallet, type LucideIcon } from "lucide-react";
+import { CalendarClock, Coins, CalendarRange, Crosshair, FlaskConical, Gauge, Grid3x3, NotebookPen, Radar, Wallet, type LucideIcon } from "lucide-react";
 import type { ComponentType } from "react";
 
 import type { DockPanelProps } from "@/lib/dock";
 
 import AccountPanel from "./AccountPanel";
 import BacktestPanel from "./BacktestPanel";
+import DcaPanel from "./DcaPanel";
 import EventsPanel from "./EventsPanel";
 import GridBotPanel from "./GridBotPanel";
 import JournalPanel from "./JournalPanel";
@@ -31,6 +32,7 @@ export const EXTRA_PANELS: DockPanelDef[] = [
   { id: "journal", label: "Journal", icon: NotebookPen, hotkey: "j", Component: JournalPanel },
   { id: "paper", label: "Paper trading", icon: Coins, hotkey: "y", Component: PaperPanel },
   { id: "backtest", label: "Backtest", icon: FlaskConical, hotkey: "x", Component: BacktestPanel },
+  { id: "dca", label: "DCA planner", icon: CalendarRange, hotkey: "c", Component: DcaPanel },
   { id: "market", label: "Market data", icon: Gauge, hotkey: "o", Component: MarketDataPanel },
   { id: "events", label: "Calendar", icon: CalendarClock, hotkey: "e", Component: EventsPanel },
   { id: "gridbots", label: "Grid bots", icon: Grid3x3, hotkey: "b", Component: GridBotPanel },
