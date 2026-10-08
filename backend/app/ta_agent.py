@@ -109,6 +109,83 @@ def parabolic_sar(df: pd.DataFrame, step: float = 0.02, max_step: float = 0.2) -
     return pd.Series(sar, index=df.index)
 
 
+def _last(series: pd.Series) -> float | None:
+    v = float(series.iloc[-1]) if len(series) else float("nan")
+    return None if np.isnan(v) else v
+
+
+def _price(v: float | None) -> float | None:
+    return None if v is None else float(f"{v:.6g}")
+
+
+def _cross_bars_ago(diff: pd.Series, lookback: int = 50) -> tuple[str, int] | None:
+    """The latest sign change of `diff` (a - b) in the last `lookback` bars: ("bullish" | "bearish", bars ago)."""
+    sign = np.sign(diff.dropna().to_numpy()[-(lookback + 1):])
+    for i in range(len(sign) - 1, 0, -1):
+        if sign[i] != sign[i - 1] and sign[i] != 0:
+            return ("bullish" if sign[i] > 0 else "bearish"), len(sign) - 1 - i
+    return None
+
+
+def indicator_snapshot(df: pd.DataFrame, rsi_s: pd.Series, atr_v: float) -> dict:
+    """The latest value of every chart indicator, whether or not it is switched on, with the chart's default
+    lengths (frontend/lib/indicators.ts): EMA 20/50, MACD 12/26/9, Bollinger 20/2, Stoch RSI 14/14/3/3, VWAP
+    (daily session below 1d, anchored at the first bar above), Parabolic SAR and ATR 14."""
+    close = df["close"]
+    last = float(close.iloc[-1])
+    out: dict = {}
+
+    e20, e50 = ema(close, 20), ema(close, 50)
+    out["ema20"], out["ema50"] = _price(_last(e20)), _price(_last(e50))
+    out["price_vs_ema"] = ("above both" if last > max(out["ema20"], out["ema50"]) else
+                           "below both" if last < min(out["ema20"], out["ema50"]) else "between")
+    if (x := _cross_bars_ago(e20 - e50)):
+        out["ema_cross"] = {"type": "golden" if x[0] == "bullish" else "death", "bars_ago": x[1]}
+
+    if len(df) >= 35:
+        line = ema(close, 12) - ema(close, 26)
+        signal = ema(line, 9)
+        hist = line - signal
+        out["macd"] = {"macd": _price(_last(line)), "signal": _price(_last(signal)), "hist": _price(_last(hist)),
+                       "hist_rising": bool(hist.iloc[-1] > hist.iloc[-2])}
+        if (x := _cross_bars_ago(hist)):
+            out["macd"]["last_cross"] = {"direction": x[0], "bars_ago": x[1]}
+
+    mid = close.rolling(20).mean()
+    sd = close.rolling(20).std(ddof=0)
+    if (m := _last(mid)) is not None:
+        up, lo = m + 2 * float(sd.iloc[-1]), m - 2 * float(sd.iloc[-1])
+        out["bollinger"] = {"upper": _price(up), "mid": _price(m), "lower": _price(lo),
+                            "pct_b": round((last - lo) / (up - lo), 2) if up > lo else None,
+                            "width_pct": round((up - lo) / m * 100, 2) if m else None}
+
+    lo14, hi14 = rsi_s.rolling(14).min(), rsi_s.rolling(14).max()
+    raw = ((rsi_s - lo14) / (hi14 - lo14).replace(0, np.nan) * 100).fillna(0).where(rsi_s.notna() & lo14.notna())
+    k = raw.rolling(3).mean()
+    d = k.rolling(3).mean()
+    if (kv := _last(k)) is not None and (dv := _last(d)) is not None:
+        out["stoch_rsi"] = {"k": round(kv, 1), "d": round(dv, 1),
+                            "zone": "overbought" if kv >= 80 else "oversold" if kv <= 20 else "neutral"}
+
+    times = df["time"].to_numpy()
+    intraday = len(times) > 1 and float(np.median(np.diff(times))) < 86400
+    tp = (df["high"] + df["low"] + close) / 3
+    pv, vol = tp * df["volume"], df["volume"]
+    if intraday:
+        day = pd.Series(times // 86400, index=df.index)
+        pv, vol = pv.groupby(day).cumsum(), vol.groupby(day).cumsum()
+    else:
+        pv, vol = pv.cumsum(), vol.cumsum()
+    vw = float(pv.iloc[-1] / vol.iloc[-1]) if float(vol.iloc[-1]) > 0 else float(tp.iloc[-1])
+    out["vwap"] = {"value": _price(vw), "price": "above" if last > vw else "below",
+                   "anchor": "UTC day" if intraday else "first bar"}
+
+    if (sar := _last(parabolic_sar(df))) is not None:
+        out["psar"] = {"value": _price(sar), "trend": "up" if sar < last else "down"}
+    out["atr"] = _price(atr_v)
+    return out
+
+
 # ------------------------------------------------------------------ swings
 
 
@@ -497,6 +574,8 @@ def analyze(
     if div:
         momentum["divergence"] = f"{div['kind']} {div['type']} ({_fmt(div['price1'])} → {_fmt(div['price2'])})"
     facts["momentum"] = momentum
+    # Every chart indicator's latest value, whether or not the user has it on the chart.
+    facts["indicators"] = indicator_snapshot(df, rsi_s, atr_v)
     breaks = structure_breaks(df, highs, lows)
     bias = None
     if breaks:

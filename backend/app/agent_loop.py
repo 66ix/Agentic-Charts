@@ -23,14 +23,15 @@ from .schemas import ALL_FEATURES, INTERVALS, SCAN_FILTERS, AnalysisIntent, Chat
 log = logging.getLogger(__name__)
 
 FINAL_TOOL = "draw_on_chart"
-MAX_RESULT_CHARS = 2500
+MAX_RESULT_CHARS = 3000
 
 TOOLS: list[dict[str, Any]] = [
     {
         "name": "look_at_chart",
         "description": "Run the detectors on any coin and timeframe and read the results: zones with their distance "
                        "from price in ATR, higher-timeframe confluence, structure breaks, RSI and divergences, "
-                       "sweeps, patterns. Nothing is drawn. Use it to check another timeframe or coin before "
+                       "sweeps, patterns, and the latest EMA, MACD, Bollinger, Stoch RSI, VWAP, Parabolic SAR and "
+                       "ATR values. Nothing is drawn. Use it to check another timeframe or coin before "
                        "deciding what to show.",
         "parameters": {
             "type": "object", "additionalProperties": False, "required": ["symbol", "timeframe", "features"],
@@ -71,7 +72,8 @@ TOOLS: list[dict[str, Any]] = [
         "name": "market_context",
         "description": "24h change, futures funding (now and 24h average), open interest and its 24h change, long/short "
                        "ratio, 24h spot CVD, the nearest order-book walls, estimated liquidation clusters, and "
-                       "high-impact economic events in the next 24h, for one coin.",
+                       "high-impact economic events in the next 24h, for one coin; plus the whole market (total "
+                       "market cap, 24h volume, liquidations, open interest, Fear & Greed, BTC dominance).",
         "parameters": {
             "type": "object", "additionalProperties": False, "required": ["symbol"],
             "properties": {"symbol": {"type": "string", "description": "USDT pair, e.g. BTCUSDT"}},

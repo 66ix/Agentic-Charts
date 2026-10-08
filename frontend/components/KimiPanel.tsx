@@ -74,7 +74,7 @@ export default function KimiPanel({ data, loading, error }: { data: KimiResult |
         {loading && data && <span>· updating</span>}
       </button>
       {open && data && (
-        <div className="mt-1 max-h-[60vh] w-[22rem] max-w-full space-y-2 overflow-y-auto rounded border border-line bg-panel/95 p-2 shadow-lg">
+        <div className="mt-1 max-h-[60vh] w-[26rem] max-w-full space-y-2 overflow-y-auto rounded border border-line bg-panel/95 p-2 shadow-lg">
           <Rows title="Path verify" rows={data.verify} />
           <Rows title="Signal stats · win% (W/N), edge vs random" rows={data.stats} />
           {recent.length > 0 && (

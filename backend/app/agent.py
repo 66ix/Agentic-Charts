@@ -32,6 +32,7 @@ from .gridbot import GridBotService
 from .kimi_service import KimiService, summarize
 from .llm import ChartContext, LLMClient
 from .market_data import INTERVAL_SECONDS, MarketData, candles_to_df
+from .market_metrics import MarketMetricsService, overview_facts
 from .market_scanner import MarketScanner, MarketScanResult
 from .scanner import DEFAULT_WATCHLIST, scan, tickers
 from .sell_check import describe_sells, sell_facts, sell_scan, timeframe_for
@@ -158,14 +159,18 @@ def _action_lines(intent: AnalysisIntent, custom: list, removed: int, alerts: li
 
 
 def _compact(facts: dict) -> dict:
-    """Facts trimmed for a tool result: no overlays, no bar timestamps."""
-    return {k: v for k, v in facts.items() if k not in ("last_bar_time",)}
+    """Facts trimmed for a tool result: no overlays, no bar timestamps, and the indicator readings last so a long
+    result is clipped there rather than in the zones."""
+    out = {k: v for k, v in facts.items() if k not in ("last_bar_time", "indicators")}
+    if "indicators" in facts:
+        out["indicators"] = facts["indicators"]
+    return out
 
 
 def make_toolbox(market: MarketData, derivatives: DerivativesService | None, watchlist: list[str],
                  kimi: KimiService | None = None, futures: FuturesDataService | None = None,
                  events: EventsService | None = None, scanner: MarketScanner | None = None,
-                 spot_only: bool = False) -> Toolbox:
+                 spot_only: bool = False, metrics: MarketMetricsService | None = None) -> Toolbox:
     async def look(symbol: str, tf: str, features: list[str]) -> dict:
         candles, source = await market.get_klines(symbol, tf, 400)
         frames = await _confluence_frames(market, symbol, tf, features)
@@ -178,16 +183,18 @@ def make_toolbox(market: MarketData, derivatives: DerivativesService | None, wat
         return [r.model_dump(exclude={"interval", "data_source"}) for r in rows[:10]]
 
     async def context(symbol: str) -> dict:
-        tick, deriv, fut, upcoming = await asyncio.gather(
+        tick, deriv, fut, upcoming, overview = await asyncio.gather(
             tickers(market, [symbol]), derivatives.symbol_snapshot(symbol) if derivatives else _none(),
             _guarded(futures.futures_context(symbol), "futures context") if futures else _none(),
-            _upcoming(events, 24))
+            _upcoming(events, 24), _market_overview(metrics))
         out: dict = {"symbol": symbol}
         if tick:
             out.update(price=tick[0]["price"], change_24h_pct=tick[0]["change_pct"])
         out["futures"] = fut or deriv or "unavailable"
         if upcoming is not None:
             out["upcoming_events"] = upcoming
+        if overview:
+            out["whole_market"] = overview
         return out
 
     async def read_kimi(symbol: str, tf: str) -> dict:
@@ -227,6 +234,36 @@ async def _guarded(coro, what: str, seconds: float = 8.0):
     except Exception as exc:
         log.info("Skipped %s: %s", what, exc)
         return None
+
+
+async def _market_overview(metrics: MarketMetricsService | None) -> dict | None:
+    """The market header bar: total market cap, 24h volume, liquidations, open interest, Fear & Greed and BTC
+    dominance (cached by the service, so this is usually free)."""
+    if metrics is None:
+        return None
+    res = await _guarded(metrics.get(), "market overview", 5.0)
+    return overview_facts(res) if res else None
+
+
+async def _chart_cvd(futures: FuturesDataService | None, symbol: str, tf: str) -> dict | None:
+    """Spot CVD on the chart's own timeframe (the chart's CVD pane): the latest bar's and last 20 bars' taker
+    delta, and so which way the running sum has moved over those 20 bars."""
+    if futures is None:
+        return None
+    res = await _guarded(futures.cvd(symbol, tf, 100), "chart CVD", 5.0)
+    rows = (res or {}).get("rows") or []
+    if len(rows) < 2:
+        return None
+    last20 = rows[-20:]
+    buy, sell = sum(r["buy"] for r in last20), sum(r["sell"] for r in last20)
+    out = {"timeframe": tf, "delta_last_bar": float(f"{rows[-1]['delta']:.4g}"),
+           "delta_last_20_bars": float(f"{buy - sell:.4g}"),
+           "buy_pct_last_20_bars": round(buy / (buy + sell) * 100, 1) if buy + sell else None,
+           "cvd_last_20_bars": "rising" if buy > sell else "falling" if buy < sell else "flat",
+           "units": "coins (taker buy minus sell volume)"}
+    if res.get("source") != "binance":
+        out["source"] = res.get("source")
+    return out
 
 
 FUTURES_WORDS = re.compile(r"\b(funding|open interest|oi|long[ /-]?short|l/s|liquidat\w*|order ?book|walls?|cvd|"
@@ -454,6 +491,7 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
                        scanner: MarketScanner | None = None,
                        levels: SessionLevelsService | None = None,
                        gridbots: GridBotService | None = None,
+                       metrics: MarketMetricsService | None = None,
                        on_result: Callable[[AnalyzeResponse], Awaitable[None]] | None = None,
                        on_delta: Callable[[str], Awaitable[None]] | None = None) -> AnalyzeResponse:
     """The agent's answer to one request. With `on_result` and `on_delta` (the streaming endpoint) the drawings,
@@ -465,7 +503,7 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
     research: list[dict] = []
     loop = None
     if req.prompt.strip() and llm.available() and settings.agent_mode == "tools":
-        box = make_toolbox(market, derivatives, req.watchlist, kimi, futures, events, scanner, req.spot_only)
+        box = make_toolbox(market, derivatives, req.watchlist, kimi, futures, events, scanner, req.spot_only, metrics)
         loop = await plan_with_tools(llm, req.prompt, req.history, req.overlays, req.previous_intent, chart, box,
                                      settings.agent_max_steps)
     if loop:
@@ -559,7 +597,9 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         _sells(market, sell_symbols, sell_tf) if want_sell else _none(),
         _walk(market, symbol) if want_walk else _none(),
         _ladder(market, symbol, tf) if want_ladder else _none(),
-        general.context(events, req.prompt) if want_general else _none())
+        general.context(events, req.prompt) if want_general else _none(),
+        # The market header bar and the chart's CVD pane, read whether or not the user has them on screen.
+        _market_overview(metrics), _chart_cvd(futures, symbol, tf) if not custom_chart else _none())
     (candles, source), higher, frames, rows, deriv, kimi_facts, fut, upcoming, headlines, mscan, lvl, grid, extra = await asyncio.gather(
         candles_for_chart(), windows(),
         _confluence_frames(market, symbol, tf, [] if custom_chart else features), scan_rows(),
@@ -570,7 +610,9 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         _headlines(events, symbol) if want_news else _empty(), market_scan(),
         _guarded(levels.get(symbol, tf), "session levels") if want_levels else _none(),
         _grid_plan(gridbots, symbol) if want_grid else _none(), extras)
-    sells, walked, ladder, general_ctx = extra
+    sells, walked, ladder, general_ctx, overview, chart_cvd = extra
+    if general_ctx is not None and overview:
+        general_ctx["market_overview"] = overview
 
     df = candles_to_df(candles)
     # Detection is CPU-bound (SciPy); keep the event loop free for streams.
@@ -623,6 +665,10 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
     overlays, removed = merge_overlays(existing, new, run_intent)
     alerts = build_alerts(intent, overlays, new)
 
+    if chart_cvd:
+        facts["indicators"]["cvd"] = chart_cvd
+    if overview:
+        facts["market_overview"] = overview
     if deriv:
         facts["derivatives"] = deriv
     if kimi_facts:

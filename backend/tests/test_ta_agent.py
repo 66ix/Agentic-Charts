@@ -5,7 +5,9 @@ import pytest
 from app.llm import rule_intent
 from app.market_data import candles_to_df, resample, synthetic_klines
 from app.schemas import AnalysisIntent, BoxOverlay, Candle, HorizontalLineOverlay
-from app.ta_agent import analyze, atr, cluster_levels, find_swings, parabolic_sar, supply_demand_zones
+from app.indicators import rsi
+from app.ta_agent import (analyze, atr, cluster_levels, find_swings, indicator_snapshot, parabolic_sar,
+                          supply_demand_zones)
 
 
 def _df(n=400, symbol="INJUSDT", interval="4h"):
@@ -130,3 +132,21 @@ def test_zone_record_counts_held_and_broken_tests_from_the_zones_side():
     z = Zone(100.0, 101.0, "support", 3, 1_700_000_000, 0, 0.5)
     r = zone_record(df, z, 1.0)
     assert r == {"held": 2, "broke": 1, "tests": 3}
+
+
+def test_indicator_snapshot_matches_the_chart_formulas():
+    df = _df()
+    close = df["close"]
+    snap = indicator_snapshot(df, rsi(close), float(atr(df).iloc[-1]))
+    mid, sd = close.tail(20).mean(), close.tail(20).std(ddof=0)
+    assert snap["bollinger"]["mid"] == pytest.approx(mid, rel=1e-5)
+    assert snap["bollinger"]["upper"] == pytest.approx(mid + 2 * sd, rel=1e-5)
+    line = close.ewm(span=12, adjust=False).mean() - close.ewm(span=26, adjust=False).mean()
+    assert snap["macd"]["macd"] == pytest.approx(line.iloc[-1], rel=1e-4)
+    assert 0 <= snap["stoch_rsi"]["k"] <= 100 and 0 <= snap["stoch_rsi"]["d"] <= 100
+    # 4h is intraday: the VWAP restarts each UTC day, so it only covers today's bars.
+    today = df[df["time"] // 86400 == df["time"].iloc[-1] // 86400]
+    tp = (today["high"] + today["low"] + today["close"]) / 3
+    assert snap["vwap"]["value"] == pytest.approx((tp * today["volume"]).sum() / today["volume"].sum(), rel=1e-5)
+    assert snap["psar"]["trend"] in ("up", "down")
+    assert "indicators" in analyze(df, AnalysisIntent(features=["support_resistance"]), "4h").facts

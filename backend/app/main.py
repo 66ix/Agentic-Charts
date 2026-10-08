@@ -251,7 +251,7 @@ async def agent_analyze(req: AnalyzeRequest, request: Request) -> AnalyzeRespons
         return await run_analysis(req, st.market, st.llm, st.derivatives, st.kimi,
                                   getattr(st, "futures", None), getattr(st, "events", None),
                                   getattr(st, "market_scanner", None), levels=getattr(st, "session_levels", None),
-                                  gridbots=getattr(st, "gridbots", None))
+                                  gridbots=getattr(st, "gridbots", None), metrics=getattr(st, "metrics", None))
     except MarketDataError as exc:
         raise HTTPException(502, str(exc)) from exc
     except ValueError as exc:
@@ -278,7 +278,8 @@ async def agent_analyze_stream(req: AnalyzeRequest, request: Request) -> Streami
             res = await run_analysis(req, st.market, st.llm, st.derivatives, st.kimi,
                                      getattr(st, "futures", None), getattr(st, "events", None),
                                      getattr(st, "market_scanner", None), levels=getattr(st, "session_levels", None),
-                                     gridbots=getattr(st, "gridbots", None), on_result=on_result, on_delta=on_delta)
+                                     gridbots=getattr(st, "gridbots", None), metrics=getattr(st, "metrics", None),
+                                     on_result=on_result, on_delta=on_delta)
             await queue.put({"type": "done", "response": res.model_dump(mode="json")})
         except MarketDataError as exc:
             await queue.put({"type": "error", "status": 502, "detail": str(exc)})

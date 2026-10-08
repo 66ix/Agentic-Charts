@@ -158,3 +158,24 @@ class MarketMetricsService:
         else:
             out.append(self._mock("btc_dominance", "BTC Dominance", lambda v: f"{v:.2f}%", jitter=0.001))
         return MarketMetrics(metrics=out, updated_at=datetime.now(timezone.utc))
+
+
+def overview_facts(metrics: MarketMetrics) -> dict:
+    """The header bar as the agent reads it: each live metric's value, display text and 24h change. A mocked
+    metric is listed by name under `unavailable` so the answer says it can't check it instead of quoting a
+    placeholder."""
+    out: dict = {}
+    missing: list[str] = []
+    for m in metrics.metrics:
+        if m.source != "live":
+            missing.append(m.label)
+            continue
+        row: dict = {"value": round(m.value, 2), "display": m.display}
+        if m.change_pct is not None:
+            row["change_pct"] = m.change_pct
+        if m.note:
+            row["note"] = m.note
+        out[m.key] = row
+    if missing:
+        out["unavailable"] = missing
+    return out
