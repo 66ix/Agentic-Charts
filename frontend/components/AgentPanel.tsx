@@ -527,7 +527,7 @@ export default function AgentPanel(p: Props) {
           {p.spotOnly ? "Spot only" : "Spot + futures"}
         </button>
         {p.overlayCount > 0 && (
-          <button type="button" onClick={p.onClearOverlays} className="btn-ghost h-6 shrink-0 gap-1 px-1.5 text-[11px]" title="Remove the agent's drawings from this chart (Ctrl+Z brings them back)">
+          <button type="button" onClick={p.onClearOverlays} className="btn-ghost h-6 shrink-0 gap-1 px-1.5 text-[11px]" title="Remove all the agent's drawings from this chart (Ctrl+Z brings them back). To remove one level, use its bin in the Layers tab (L).">
             <Eraser className="h-3.5 w-3.5" /> Clear {p.overlayCount}
           </button>
         )}

@@ -919,6 +919,11 @@ export default function ChartWorkspace() {
             setSelectedId(id);
           }}
           onDeleteDrawing={(id) => changeDrawings(drawings.filter((d) => d.id !== id))}
+          aiLevels={overlays}
+          onDeleteAiLevel={(i) => {
+            const o = overlays[i];
+            changeOverlays(overlaysKey, overlays.filter((_, j) => j !== i), `remove ${o?.label || "AI level"}`);
+          }}
         />
       ),
     },
