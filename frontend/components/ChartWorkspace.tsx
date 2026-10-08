@@ -263,6 +263,8 @@ export default function ChartWorkspace() {
   const [magnet, setMagnet] = useState(false);
   const [locked, setLocked] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  /** An AI level clicked on the chart, to remove on its own. */
+  const [pickedLevel, setPickedLevel] = useState<Overlay | null>(null);
 
   const drawingsRef = useRef(drawings);
   drawingsRef.current = drawings;
@@ -714,6 +716,11 @@ export default function ChartWorkspace() {
       deleteSelected();
       return;
     }
+    if ((e.key === "Delete" || e.key === "Backspace") && pickedLevel) {
+      e.preventDefault();
+      removePickedLevel();
+      return;
+    }
     if (e.key === "/") {
       e.preventDefault();
       focusAgent();
@@ -823,6 +830,14 @@ export default function ChartWorkspace() {
     },
     [addSignal],
   );
+  const removePickedLevel = useCallback(() => {
+    if (!pickedLevel) return;
+    const cur = readStored<Overlay[]>(overlaysKey, []);
+    const same = (o: Overlay) => JSON.stringify(o) === JSON.stringify(pickedLevel);
+    changeOverlays(overlaysKey, cur.filter((o) => !same(o)), `remove ${pickedLevel.label || "AI level"}`);
+    setPickedLevel(null);
+  }, [pickedLevel, overlaysKey, changeOverlays]);
+  useEffect(() => setPickedLevel(null), [overlaysKey]);
   const triggerZones = useMemo(() => chartZones(overlays, drawings, selectedId), [overlays, drawings, selectedId]);
 
   const dockProps: DockPanelProps = { symbol, interval, price, watchlist, onPickSymbol: pickSymbol, onChartOverlays };
@@ -1023,6 +1038,7 @@ export default function ChartWorkspace() {
                           selectedId,
                           onDrawingsChange: onChartDrawings,
                           onSelect: setSelectedId,
+                          onPickOverlay: (o) => setPickedLevel(o && overlays.includes(o) ? o : null),
                           onToolDone: () => setTool("crosshair"),
                           onFeed: setFeed,
                           onDataReady,
@@ -1035,6 +1051,18 @@ export default function ChartWorkspace() {
               );
             })}
           </div>
+          {pickedLevel && !selectedDrawing && (
+            <div className="absolute left-1/2 top-2 z-20 flex -translate-x-1/2 items-center gap-2 rounded-md border border-line bg-panel px-2 py-1 text-[11px] shadow-lg">
+              <span className="h-2.5 w-2.5 rounded-sm" style={{ background: pickedLevel.color }} />
+              <span className="max-w-[16rem] truncate text-ink">{pickedLevel.label || "AI level"}</span>
+              <button type="button" className="btn-ghost h-6 px-1.5 text-[11px] hover:text-down" onClick={removePickedLevel} title="Remove this level (Del); Ctrl+Z brings it back">
+                Remove
+              </button>
+              <button type="button" className="btn-ghost h-6 w-6 p-0" aria-label="Close" onClick={() => setPickedLevel(null)}>
+                ×
+              </button>
+            </div>
+          )}
           {selectedDrawing && !locked && (
             <DrawingStyleBar
               drawing={selectedDrawing}

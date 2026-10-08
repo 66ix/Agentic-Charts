@@ -23,6 +23,7 @@ export interface ActiveProps {
   selectedId: string | null;
   onDrawingsChange(next: Drawing[]): void;
   onSelect(id: string | null): void;
+  onPickOverlay?(o: Overlay | null): void;
   onToolDone(): void;
   onFeed(info: FeedInfo): void;
   onDataReady(candles: Candle[]): void;
@@ -101,6 +102,7 @@ const ChartCell = forwardRef<AgenticChartHandle, Props>(function ChartCell(p, re
           selectedId={active?.selectedId ?? null}
           onDrawingsChange={active?.onDrawingsChange ?? noop}
           onSelect={active?.onSelect ?? noop}
+          onPickOverlay={active?.onPickOverlay}
           onToolDone={active?.onToolDone ?? noop}
           onFeed={(f) => {
             setFeed(f);

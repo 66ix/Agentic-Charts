@@ -119,6 +119,8 @@ interface Props {
   selectedId: string | null;
   onDrawingsChange(next: Drawing[]): void;
   onSelect(id: string | null): void;
+  /** Crosshair click on a drawn level or zone that is not one of the user's drawings (null: on nothing). */
+  onPickOverlay?(o: Overlay | null): void;
   onToolDone(): void;
   onFeed(info: FeedInfo): void;
   onDataReady?(candles: Candle[]): void;
@@ -1026,6 +1028,26 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
   }, [compareKey, props.interval, loading]);
 
   // ---------------------------------------------------- AI overlays
+  /** The level under y (lines within 5 px), else the thinnest zone containing it. */
+  const overlayAt = useCallback((y: number): Overlay | null => {
+    const series = candleRef.current;
+    if (!series) return null;
+    let box: { o: Overlay; h: number } | null = null;
+    for (const prim of overlayPrims.current) {
+      if (prim instanceof LabeledRayPrimitive) {
+        const py = series.priceToCoordinate(prim.line.price);
+        if (py !== null && Math.abs(py - y) <= 5) return prim.line;
+      } else if (prim instanceof BoxZonePrimitive) {
+        const t = series.priceToCoordinate(prim.box.price_high);
+        const b = series.priceToCoordinate(prim.box.price_low);
+        if (t === null || b === null) continue;
+        const h = Math.abs(b - t);
+        if (y >= Math.min(t, b) - 3 && y <= Math.max(t, b) + 3 && (!box || h < box.h)) box = { o: prim.box, h };
+      }
+    }
+    return box?.o ?? null;
+  }, []);
+
   useEffect(() => {
     const series = candleRef.current;
     if (!series) return;
@@ -1191,7 +1213,9 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
       const p = propsRef.current;
       if (p.tool === "crosshair") {
         const width = chart.timeScale().width();
-        p.onSelect(p.locked ? null : (layerRef.current?.pick(x, y, width) ?? null));
+        const picked = p.locked ? null : (layerRef.current?.pick(x, y, width) ?? null);
+        p.onSelect(picked);
+        if (p.onPickOverlay) p.onPickOverlay(picked || p.locked ? null : overlayAt(y));
         return;
       }
       if (p.locked) return;
@@ -1243,7 +1267,7 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
       tapRef.current = null;
       chart.unsubscribeCrosshairMove(onMove);
     };
-  }, [toPoint]);
+  }, [toPoint, overlayAt]);
 
   // Drag-to-move the selected drawing, or an alert line / zone (crosshair tool, unlocked).
   useEffect(() => {
