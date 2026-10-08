@@ -267,7 +267,8 @@ async def _chart_cvd(futures: FuturesDataService | None, symbol: str, tf: str) -
 
 
 FUTURES_WORDS = re.compile(r"\b(funding|open interest|oi|long[ /-]?short|l/s|liquidat\w*|order ?book|walls?|cvd|"
-                           r"order ?flow|delta|positioning|crowded|sentiment|squeeze)\b", re.I)
+                           r"order ?flow|delta|positioning|crowded|sentiment|squeeze|buyers?|sellers?|buying pressure|"
+                           r"selling pressure|money flow|more money)\b", re.I)
 EVENT_WORDS = re.compile(r"\b(news|events?|calendar|cpi|fomc|fed|nfp|payrolls|macro|data release|"
                          r"anything coming|coming up)\b", re.I)
 NEWS_WORDS = re.compile(r"\b(news|headlines?|why is .* (up|down|pumping|dumping)|what happened)\b", re.I)

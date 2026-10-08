@@ -112,3 +112,9 @@ def test_the_agent_reads_every_indicator_and_the_header_bar_without_them_on_the_
     assert ind["cvd"]["cvd_last_20_bars"] == "rising" and ind["cvd"]["buy_pct_last_20_bars"] == 60.0
     assert seen["market_overview"]["fear_greed"]["display"] == "31/100 · Fear"
     assert seen["market_overview"]["unavailable"] == ["BTC Dominance"]  # a mocked value is never quoted
+
+
+def test_buyers_or_sellers_brings_the_order_flow_read():
+    FakeFutures.calls = 0
+    res = _run("which side has more money, buyers or sellers?", futures=FakeFutures())
+    assert FakeFutures.calls == 1 and res.summary
