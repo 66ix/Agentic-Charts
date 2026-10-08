@@ -4,6 +4,7 @@ import clsx from "clsx";
 import { forwardRef, useMemo, useState } from "react";
 
 import { usePersistentState } from "@/hooks/usePersistentState";
+import { useHigherTfOverlays } from "@/hooks/useHigherTfOverlays";
 import { customLabel } from "@/lib/customSymbols";
 import { formatPct, formatPrice } from "@/lib/format";
 import { composeOverlays, drawingsFor, pinsKey, type LayerVisibility, type PanelOverlays, type PinnedAnswer } from "@/lib/layers";
@@ -57,6 +58,7 @@ const ChartCell = forwardRef<AgenticChartHandle, Props>(function ChartCell(p, re
   const [saved] = usePersistentState<Overlay[]>(`ac:overlays:${cell.symbol}:${cell.interval}`, []);
   const [pins] = usePersistentState<Record<string, PinnedAnswer>>(pinsKey(cell.symbol, cell.interval), {});
   const [drawings] = usePersistentState<Drawing[]>(`ac:drawings:${cell.symbol}`, []);
+  const htf = useHigherTfOverlays(cell.symbol, cell.interval);
   const [feed, setFeed] = useState<FeedInfo | null>(null);
   const change = feed?.open24 && Number.isFinite(feed.price) ? ((feed.price - feed.open24) / feed.open24) * 100 : null;
   const tf = TIMEFRAMES.find((t) => t.value === cell.interval)?.label ?? cell.interval;
@@ -64,9 +66,9 @@ const ChartCell = forwardRef<AgenticChartHandle, Props>(function ChartCell(p, re
   const { alertOverlays, panels, visibility } = p;
   const passive = useMemo(() => {
     if (active) return null;
-    const { visible } = composeOverlays({ symbol: cell.symbol, overlays: saved, pins, panels, alerts: alertOverlays(cell.symbol), visibility });
+    const { visible } = composeOverlays({ symbol: cell.symbol, overlays: saved, pins, panels, alerts: alertOverlays(cell.symbol), visibility, htf });
     return { overlays: visible, drawings: visibility.drawings === false ? [] : drawingsFor(drawings, cell.interval) };
-  }, [active, saved, pins, panels, alertOverlays, visibility, drawings, cell.symbol, cell.interval]);
+  }, [active, saved, pins, panels, alertOverlays, visibility, drawings, cell.symbol, cell.interval, htf]);
 
   return (
     <div

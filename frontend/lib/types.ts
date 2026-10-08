@@ -122,7 +122,19 @@ export interface AnalysisIntent {
   /** "Alert me when 1m shows a CHoCH inside the 4h demand". */
   zone_trigger?: ZoneTriggerIntent | null;
   grid_plan?: boolean;
+  /** What a market scan ranks: trade setups, spot buys or grid coins. */
+  scan_kind?: ScanKind;
+  /** Walk 1D → 4H → 1H → 15m drawing only the valid levels. */
+  top_down?: boolean;
+  /** Where to sell coins held: the zones above price. */
+  take_profit?: boolean;
+  /** A spot buy-the-dip ladder with its 90-day test. */
+  dip_ladder?: boolean;
+  /** Not about a chart (the date, FOMC results, coin upgrades): answered in plain language. */
+  general_question?: boolean;
 }
+
+export type ScanKind = "setups" | "spot_buys" | "grid_coins";
 
 export interface Navigate {
   symbol: string;
@@ -208,9 +220,35 @@ export interface MarketSetup {
   agreement: { frames: Partial<Record<Interval, "up" | "down" | "range">>; aligned: number; total: number };
   track_record: TrackRecord | null;
   score: number;
+  /** Rank among spot buys (longs at higher-timeframe demand); null when the setup isn't one. */
+  spot_score?: number | null;
   plan: TradePlan;
   /** The plan as chart overlays. */
   overlays: Overlay[];
+  data_source: string;
+}
+
+/** A coin ranging well enough for a Spot Grid bot. Mirrors GridCoin in schemas.py. */
+export interface GridCoin {
+  symbol: string;
+  interval: Interval;
+  last_price: number;
+  low: number;
+  high: number;
+  width_pct: number;
+  /** Times the close crossed the middle of the range. */
+  crossings: number;
+  /** Net move / total move; low = choppy. */
+  efficiency: number;
+  in_range_pct: number;
+  /** 0 = bottom of the range, 100 = top. */
+  position_pct: number;
+  atr_pct: number;
+  days: number;
+  score: number;
+  change_pct: number | null;
+  quote_volume: number | null;
+  note: string;
   data_source: string;
 }
 
@@ -227,7 +265,99 @@ export interface MarketScanResult {
   data_source: string;
   longs: MarketSetup[];
   shorts: MarketSetup[];
+  /** Longs at higher-timeframe demand, for buying coins outright (absent on scans from older versions). */
+  spot_buys?: MarketSetup[];
+  grid_coins?: GridCoin[];
   notes: string[];
+}
+
+// Top-down S/R walk (backend/app/top_down.py).
+export interface WalkZone {
+  kind: string;
+  low: number;
+  high: number;
+  label: string;
+  why: string;
+  distance_pct: number;
+  score: number;
+  confirmed_by: string[];
+}
+
+export interface WalkStep {
+  interval: Interval;
+  /** "D1", "H4" */
+  label: string;
+  status: "drawn" | "skipped" | "failed";
+  zones: WalkZone[];
+  overlays: Overlay[];
+  reason: string;
+  summary: string;
+  data_source: string;
+}
+
+export interface TopDownResult {
+  symbol: string;
+  last_price: number;
+  steps: WalkStep[];
+  generated_at: number;
+  data_source: string;
+  notes: string[];
+}
+
+// Spot buy-the-dip ladder (backend/app/dip_ladder.py).
+export interface LadderRung {
+  price: number;
+  low: number;
+  high: number;
+  basis: string;
+  weight_pct: number;
+  amount: number;
+  qty: number;
+  distance_pct: number;
+}
+
+export interface LadderResult {
+  plan: {
+    symbol: string;
+    timeframe: Interval;
+    last_price: number;
+    atr: number;
+    budget: number;
+    rungs: LadderRung[];
+    take_profit: number;
+    tp_basis: string;
+    tp_gain_pct: number;
+    avg_price: number;
+    invalidation: number;
+    notes: string[];
+    data_source: string;
+  };
+  backtest: {
+    days: number;
+    timeframe: Interval;
+    cycles: number;
+    wins: number;
+    fills: number;
+    total_return_pct: number;
+    buy_hold_pct: number;
+    max_drawdown_pct: number;
+    time_invested_pct: number;
+    avg_hold_days: number | null;
+    open_position: boolean;
+    final_value: number;
+    /** [UNIX seconds, value] */
+    curve: [number, number][];
+    notes: string[];
+  } | null;
+  overlays: Overlay[];
+  generated_at: number;
+}
+
+/** A web page or headline an answer used. */
+export interface AnswerSource {
+  title: string;
+  url: string;
+  source?: string;
 }
 
 /** One coin's row in a watchlist scan. Mirrors ScanResult in schemas.py. */
@@ -362,6 +492,14 @@ export interface AnalyzeResponse {
   steps: string[];
   /** Zone trigger alerts the client should arm (POST /api/zone-triggers). */
   trigger_alerts?: ZoneTriggerSpec[];
+  /** "Best grid bot coins". */
+  grid_coins?: GridCoin[];
+  /** A top-down walk for the client to play step by step. */
+  top_down?: TopDownResult | null;
+  /** A dip-buy ladder and its backtest. */
+  ladder?: LadderResult | null;
+  /** Web pages or headlines a plain-language answer used. */
+  sources?: AnswerSource[];
   generated_at: string;
 }
 

@@ -68,6 +68,8 @@ def test_rule_parser_understands_the_new_shortcuts():
         "what day is today?": {"general_question": True, "features": []},
         "What were the results of the latest FOMC meeting?": {"general_question": True},
         "what coins are expecting a big upgrade or just had an upgrade?": {"general_question": True},
+        "which coins are expecting a big upgrade or just had one?": {"general_question": True, "scan_watchlist": False},
+        "Which of my coins are near demand?": {"general_question": False, "scan_watchlist": True},
         "key levels": {"general_question": False},
         "what is funding like?": {"general_question": False},
         "any news on INJ?": {"general_question": False},

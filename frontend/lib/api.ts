@@ -9,11 +9,13 @@ import type {
   ChatTurn,
   Interval,
   KimiResult,
+  LadderResult,
   MarketMetrics,
   Overlay,
   PriceAlert,
   ScanResult,
   Ticker,
+  TopDownResult,
 } from "./types";
 
 export class ApiError extends Error {
@@ -84,6 +86,8 @@ export function analyze(
     overlays?: Overlay[];
     previous_intent?: AnalysisIntent | null;
     watchlist?: string[];
+    /** Spot only: no short plans or short setups. */
+    spot_only?: boolean;
   },
   signal?: AbortSignal,
 ) {
@@ -96,6 +100,18 @@ export function analyze(
 }
 
 /** Kimi Cooked on the chart's closed candles. The first run on a chart takes a second or two. */
+/** Top-down S/R walk on its own (the agent's "Top-down S/R walk" does the same and plays it on the chart). */
+export function fetchTopDown(symbol: string, signal?: AbortSignal) {
+  return apiRequest<TopDownResult>("/api/top-down", { method: "POST", body: JSON.stringify({ symbol }), signal, timeoutMs: 60_000 });
+}
+
+export function fetchDipLadder(
+  body: { symbol: string; budget?: number; rungs?: number; timeframe?: "1h" | "4h" | "1d"; days?: number },
+  signal?: AbortSignal,
+) {
+  return apiRequest<LadderResult>("/api/dip-ladder", { method: "POST", body: JSON.stringify(body), signal, timeoutMs: 90_000 });
+}
+
 export function fetchKimi(symbol: string, interval: Interval, signal?: AbortSignal) {
   const q = new URLSearchParams({ symbol, interval });
   return apiRequest<KimiResult>(`/api/indicators/kimi?${q}`, { signal, timeoutMs: 60_000 });

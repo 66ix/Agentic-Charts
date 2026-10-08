@@ -9,7 +9,9 @@ import {
   Eraser,
   ArrowLeft,
   Footprints,
+  ExternalLink,
   History,
+  Layers,
   Loader2,
   NotebookPen,
   Pin,
@@ -27,9 +29,22 @@ import { usePersistentState } from "@/hooks/usePersistentState";
 import { searchSessions, type ChatSession } from "@/lib/chatHistory";
 import { displaySymbol, formatPct, formatPrice } from "@/lib/format";
 import { DEFAULT_SIZING, orderText, qtyText, sizePlan, type SizingSettings } from "@/lib/sizing";
-import { TIMEFRAMES, type Interval, type MarketSetup, type Overlay, type ScanResult, type TradePlan, type TriggerInterval } from "@/lib/types";
+import { ladderTestLine } from "@/lib/spot";
+import {
+  TIMEFRAMES,
+  type AnswerSource,
+  type GridCoin,
+  type Interval,
+  type LadderResult,
+  type MarketSetup,
+  type Overlay,
+  type ScanResult,
+  type TopDownResult,
+  type TradePlan,
+  type TriggerInterval,
+} from "@/lib/types";
 
-import { SetupList } from "./ScannerPanel";
+import { GridCoinList, SetupList } from "./ScannerPanel";
 import TrackRecordLine from "./TrackRecordLine";
 
 export interface AgentMessage {
@@ -44,6 +59,14 @@ export interface AgentMessage {
   /** Market-wide scanner setups ("best 5m setups right now"). */
   setups?: MarketSetup[];
   steps?: string[];
+  /** Coins ranging well enough for a Spot Grid bot. */
+  gridCoins?: GridCoin[];
+  /** A top-down S/R walk: what was drawn or skipped on each timeframe. */
+  walk?: TopDownResult;
+  /** A spot buy-the-dip ladder with its backtest. */
+  ladder?: LadderResult;
+  /** Web pages a general answer was based on. */
+  sources?: AnswerSource[];
   /** The chart the answer was drawn on, and the question it answered (for pins and the journal). */
   symbol?: string;
   interval?: Interval;
@@ -63,6 +86,16 @@ const SUGGESTIONS = [
   "What does Kimi say?",
   "Find order blocks, FVGs and liquidity sweeps",
   "Open BTC daily and show key levels",
+];
+
+/** One-tap shortcuts, always shown above the prompt. */
+const SHORTCUTS = [
+  "Top-down S/R walk",
+  "Best spot buys",
+  "Suggest a grid bot for this coin",
+  "Best grid bot coins",
+  "Where do I take profit?",
+  "Plan a dip-buy ladder",
 ];
 
 const FOLLOW_UPS = ["Also show swings", "Same on daily", "Does the daily agree?", "Alert me on these levels", "Add RSI"];
@@ -231,6 +264,81 @@ function ScanTable({ rows, onPick }: { rows: ScanResult[]; onPick(symbol: string
   );
 }
 
+function WalkCard({ walk }: { walk: TopDownResult }) {
+  return (
+    <div className="mt-1.5 overflow-hidden rounded-md border border-line text-[11px]">
+      {walk.steps.map((s) => (
+        <div key={s.interval} className="flex items-start gap-2 border-b border-line px-2 py-1 last:border-b-0">
+          <span className={clsx("w-8 shrink-0 font-mono font-semibold", s.status === "drawn" ? "text-accent" : "text-mute")}>{s.label}</span>
+          <span className="min-w-0 flex-1 text-mute">
+            {s.status === "drawn" ? (
+              <>
+                <span className="text-ink">{s.zones.length} level{s.zones.length === 1 ? "" : "s"}</span>
+                {s.summary ? ` · ${s.summary}` : ""}
+              </>
+            ) : (
+              <>
+                {s.status === "skipped" ? "Skipped" : "Failed"}: {s.reason}
+              </>
+            )}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function LadderCard({ ladder }: { ladder: LadderResult }) {
+  const pl = ladder.plan;
+  const test = ladderTestLine(ladder);
+  return (
+    <div className="mt-1.5 rounded-md border border-line bg-base/60 p-2 text-[11px]">
+      <div className="mb-1 flex items-center gap-1.5">
+        <Layers className="h-3.5 w-3.5 text-up" />
+        <span className="font-semibold text-up">Dip-buy ladder</span>
+        <span className="truncate text-mute">
+          {displaySymbol(pl.symbol)} {pl.timeframe} · ${pl.budget.toLocaleString()}
+        </span>
+      </div>
+      <div className="grid grid-cols-[auto_1fr_auto_auto] gap-x-3 gap-y-0.5 font-mono">
+        {pl.rungs.map((r, i) => (
+          <Fragment key={i}>
+            <span className="text-mute">Buy {i + 1}</span>
+            <span className="text-accent" title={r.basis}>{formatPrice(r.price)}</span>
+            <span className="text-mute">−{r.distance_pct.toFixed(1)}%</span>
+            <span className="text-ink">${r.amount.toFixed(0)}</span>
+          </Fragment>
+        ))}
+        <span className="text-mute">Sell</span>
+        <span className="text-up" title={pl.tp_basis}>{formatPrice(pl.take_profit)}</span>
+        <span className="text-up">+{pl.tp_gain_pct.toFixed(1)}%</span>
+        <span />
+        <span className="text-mute">Invalid</span>
+        <span className="text-down">{formatPrice(pl.invalidation)}</span>
+        <span />
+        <span />
+      </div>
+      {test && <p className="mt-1.5 border-t border-line pt-1.5 text-mute">{test}</p>}
+      {pl.notes.map((n) => (
+        <p key={n} className="mt-1 text-mute">{n}</p>
+      ))}
+    </div>
+  );
+}
+
+function Sources({ rows }: { rows: AnswerSource[] }) {
+  return (
+    <div className="mt-1.5 space-y-0.5 text-[11px]">
+      {rows.slice(0, 6).map((s) => (
+        <a key={s.url} href={s.url} target="_blank" rel="noreferrer" className="flex items-center gap-1 truncate text-mute hover:text-accent">
+          <ExternalLink className="h-3 w-3 shrink-0" />
+          <span className="truncate">{s.title || s.source || s.url}</span>
+        </a>
+      ))}
+    </div>
+  );
+}
+
 function swatch(o: Overlay) {
   if (o.type === "box") return o.border_color ?? o.color;
   return o.color;
@@ -252,6 +360,13 @@ interface Props {
   onPickSymbol(symbol: string): void;
   /** A setup from a market scan: open its chart with the plan drawn. */
   onOpenSetup?(setup: MarketSetup): void;
+  /** A grid coin: open its chart with its range drawn. */
+  onOpenGridCoin?(coin: GridCoin): void;
+  /** Spot only: no short plans, scans show longs, spot buys and grid coins. */
+  spotOnly: boolean;
+  onSpotOnly(v: boolean): void;
+  /** What a top-down walk is drawing right now ("D1: 2 levels"). */
+  walkNote?: string | null;
   onTogglePin(message: AgentMessage): void;
   /** Adds an answer's plan to the trade journal → saved. */
   onLogTrade?(message: AgentMessage): Promise<boolean>;
@@ -285,6 +400,15 @@ export default function AgentPanel(p: Props) {
       <div className="flex shrink-0 items-center gap-1 border-b border-line px-3 py-1.5 text-[11px] text-mute">
         <span className="truncate">Draws levels, plans trades, switches charts, scans your watchlist</span>
         <div className="flex-1" />
+        <button
+          type="button"
+          onClick={() => p.onSpotOnly(!p.spotOnly)}
+          className={clsx("btn-ghost h-6 shrink-0 gap-1 border px-1.5 text-[11px]", p.spotOnly ? "border-up/50 text-up" : "border-line")}
+          title={p.spotOnly ? "Spot only: no shorts, futures or leverage. Click to allow short plans." : "Short plans allowed. Click for spot only."}
+          aria-pressed={p.spotOnly}
+        >
+          {p.spotOnly ? "Spot only" : "Spot + futures"}
+        </button>
         {p.overlayCount > 0 && (
           <button type="button" onClick={p.onClearOverlays} className="btn-ghost h-6 shrink-0 gap-1 px-1.5 text-[11px]" title="Remove the agent's drawings from this chart (Ctrl+Z brings them back)">
             <Eraser className="h-3.5 w-3.5" /> Clear {p.overlayCount}
@@ -374,6 +498,14 @@ export default function AgentPanel(p: Props) {
                         <SetupList rows={m.setups} onPick={(s) => (p.onOpenSetup ? p.onOpenSetup(s) : p.onPickSymbol(s.symbol))} />
                       </div>
                     )}
+                    {m.walk && <WalkCard walk={m.walk} />}
+                    {m.ladder && <LadderCard ladder={m.ladder} />}
+                    {m.gridCoins && (
+                      <div className="mt-1.5">
+                        <GridCoinList rows={m.gridCoins} onPick={(c) => (p.onOpenGridCoin ? p.onOpenGridCoin(c) : p.onPickSymbol(c.symbol))} />
+                      </div>
+                    )}
+                    {m.sources && <Sources rows={m.sources} />}
                     {m.overlays && m.overlays.length > 0 && (
                       <div className="mt-1.5 flex flex-wrap gap-1">
                         {m.overlays
@@ -414,11 +546,24 @@ export default function AgentPanel(p: Props) {
             })}
             {p.busy && (
               <div className="flex items-center gap-2 text-mute">
-                <Loader2 className="h-4 w-4 animate-spin" /> Analysing market structure…
+                <Loader2 className="h-4 w-4 animate-spin" /> {p.walkNote ?? "Analysing market structure…"}
               </div>
             )}
           </div>
 
+          <div className="flex shrink-0 gap-1.5 overflow-x-auto px-3 pt-2">
+            {SHORTCUTS.map((s) => (
+              <button
+                key={s}
+                type="button"
+                disabled={p.busy}
+                onClick={() => submit(s)}
+                className="shrink-0 rounded-full border border-accent/40 bg-accent/10 px-2.5 py-1 text-[11px] text-ink transition-colors hover:border-accent disabled:opacity-50"
+              >
+                {s}
+              </button>
+            ))}
+          </div>
           {!p.busy && (
             <div className="flex shrink-0 flex-wrap gap-1.5 px-3 pt-2">
               {(p.messages.length === 0 ? SUGGESTIONS : FOLLOW_UPS).map((s) => (

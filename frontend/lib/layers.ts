@@ -1,10 +1,11 @@
-import type { Overlay } from "./types";
+import { TIMEFRAMES, type Overlay } from "./types";
 
 /**
  * Everything on the chart belongs to one layer, and each layer has an eye toggle in the Layers tab, so a busy
  * chart (AI levels + a trade plan + Kimi Cooked + a grid bot) can be thinned out without deleting anything.
  */
 export type LayerId =
+  | "htf"
   | "zones"
   | "levels"
   | "structure"
@@ -44,6 +45,7 @@ export const LAYERS: LayerInfo[] = [
   { id: "structure", label: "Swings, trendlines, sweeps, patterns", group: "Chart agent" },
   { id: "smc", label: "Order blocks and FVGs", group: "Chart agent" },
   { id: "volume", label: "Volume profile levels", group: "Chart agent" },
+  { id: "htf", label: "Higher-timeframe levels", group: "Chart agent" },
   { id: "plan", label: "Trade plan", group: "Chart agent" },
   { id: "pinned", label: "Pinned answers", group: "Chart agent" },
   { id: "kimiSR", label: "S/R zones and odds", group: "Kimi Cooked" },
@@ -115,6 +117,45 @@ export interface PinnedAnswer {
 export type PanelOverlays = Record<string, { symbol: string; overlays: Overlay[] }>;
 
 export const pinsKey = (symbol: string, interval: string) => `ac:pins:${symbol}:${interval}`;
+export const overlaysKey = (symbol: string, interval: string) => `ac:overlays:${symbol}:${interval}`;
+
+/** Agent overlays that carry over to lower timeframes: zones and window highs/lows (not swings, plans or markers). */
+const HTF_KINDS = /^(support|resistance|supply|demand|window_high|window_low)$/;
+
+/**
+ * The agent's zones and window levels saved on the timeframes above `interval` for this coin, to show on this one:
+ * what the agent drew on the daily stays visible on the 4H and below. Each gets its timeframe in front of its label
+ * (unless the label already starts with it) and starts at the chart's left edge, since its first touch can be older
+ * than the lower timeframe's candles. `read` returns the overlays saved under a key.
+ */
+export function higherTfOverlays(symbol: string, interval: string, read: (key: string) => Overlay[]): Overlay[] {
+  const order: string[] = TIMEFRAMES.map((t) => t.value);
+  const at = order.indexOf(interval);
+  if (at < 0) return [];
+  const out: Overlay[] = [];
+  for (const tf of order.slice(at + 1)) {
+    const tag = HTF_TAGS[tf] ?? tf.toUpperCase();
+    read(overlaysKey(symbol, tf)).forEach((o, i) => {
+      if (!HTF_KINDS.test(o.kind ?? "") || (o.type !== "box" && o.type !== "horizontal_line")) return;
+      const label = o.label.startsWith(tag) ? o.label : `${tag} ${o.label}`;
+      out.push({ ...o, id: `htf-${tf}-${o.id ?? i}`, label, time_start: null });
+    });
+  }
+  return out;
+}
+
+const HTF_TAGS: Record<string, string> = {
+  "1m": "M1",
+  "5m": "M5",
+  "15m": "M15",
+  "30m": "M30",
+  "1h": "H1",
+  "3h": "H3",
+  "4h": "H4",
+  "1d": "D1",
+  "1w": "W1",
+  "1M": "MN",
+};
 
 /**
  * Everything drawn on one chart from the agent, pinned answers, dock tabs and alerts, minus hidden layers, plus
@@ -128,6 +169,8 @@ export function composeOverlays(opts: {
   panels: PanelOverlays;
   alerts: Overlay[];
   visibility: LayerVisibility;
+  /** Zones and levels the agent drew on higher timeframes (higherTfOverlays). */
+  htf?: Overlay[];
 }): { visible: Overlay[]; counts: Partial<Record<LayerId, number>> } {
   const visible: Overlay[] = [];
   const counts: Partial<Record<LayerId, number>> = {};
@@ -149,6 +192,8 @@ export function composeOverlays(opts: {
     if (set.symbol === opts.symbol) for (const o of set.overlays) add(o, panelLayer(key));
   }
   for (const o of opts.alerts) add(o, "alerts");
+  // Last, so a level this timeframe also has is drawn once, as this timeframe's own.
+  for (const o of opts.htf ?? []) add(o, "htf", overlayLayer(o));
   return { visible, counts };
 }
 

@@ -391,6 +391,7 @@ _MACRO = (r"\b(?:fomc|the fed|federal reserve|powell|cpi|ppi|nfp|payrolls?|infla
           r"rate (?:cut|hike|decision)|gdp|jobs report|unemployment)\b")
 _PROJECT_NEWS = (r"\b(?:upgrades?|hard ?forks?|mainnet|testnet|token unlocks?|unlocks?|airdrops?|halving|etfs?|"
                  r"listings?|delistings?|regulation|sec|news|headlines)\b")
+_PROJECT_EVENTS = r"\b(?:upgrades?|hard ?forks?|mainnet|testnet|token unlocks?|unlocks?|airdrops?|halving)\b"
 _QUESTION = r"^\s*(?:what|who|why|how|when|which|is|are|does|do|did|can|could|will|explain|tell me|any)\b"
 _EXPLAIN = r"^\s*(?:what (?:is|are|does)|explain|how (?:does|do)|define|what's the difference)\b"
 _CHART_WORDS = (r"\b(?:chart|trend|price|level|zone|support|resistance|supply|demand|setup|entry|stop|target|rsi|macd|"
@@ -599,7 +600,9 @@ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases
                       else "short" if re.search(r"\b(?:short|sell|bear)", scan) else "auto")
         scan = re.sub(_PLAN, " ", scan)
 
-    scan_watchlist = bool(re.search(_SCAN, scan)) and not scan_market
+    # "Which coins have an upgrade coming?" asks about project news, not where the watchlist sits on its chart.
+    project_q = bool(re.search(_QUESTION, p) and re.search(_PROJECT_EVENTS, p)) and not re.search(_CHART_WORDS, p)
+    scan_watchlist = bool(re.search(_SCAN, scan)) and not scan_market and not project_q
     scan_filter = _scan_filter(scan) if scan_watchlist else _scan_filter(p_ind) if scan_market else "any"
     if scan_watchlist:
         scan = re.sub(_SCAN, " ", scan)
