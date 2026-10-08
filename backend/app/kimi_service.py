@@ -32,8 +32,8 @@ MAX_LABELS = 15        # the script's "Max Divergence Labels on Chart" default; 
 FIB_EXTEND = 25        # "Right Extension (bars)"
 HISTORY_DAYS = 1000    # daily candles fed to the higher-timeframe requests of intraday charts
 NOTES = [
-    "Not in the Python port yet: the HTF divergence confluence factor. Confluence scores run a little lower than "
-    "on TradingView, so Conf top/rest can differ; the signals themselves are unaffected.",
+    "The HTF divergence confluence factor is built from the candles loaded here (and daily history for daily and "
+    "weekly anchors), so near the start of the chart Conf top/rest can differ a little from TradingView.",
     "Stats cover the candles loaded here. TradingView's depend on how many candles your chart loaded.",
 ]
 TYPE_NAMES = {0: "DIV", 1: "U/Dn", 2: "Early", 3: "Pat BO", **{5 + k: nm for k, nm in enumerate(HARM_NAMES)}}
@@ -241,7 +241,9 @@ def compute(symbol: str, interval: str, candles: list[Candle], source: str,
     hist = None
     if history:
         hist = {"t": np.array([x.time for x in history], dtype="int64") * 1000,
-                "c": np.array([x.close for x in history], dtype=float)}
+                "c": np.array([x.close for x in history], dtype=float),
+                "h": np.array([x.high for x in history], dtype=float),
+                "l": np.array([x.low for x in history], dtype=float)}
     res = KimiCooked(step / 60.0, kimi_inputs()).run(t, o, h, l, c, v, history=hist)
     times = t // 1000
     fc = res.last_forecast()

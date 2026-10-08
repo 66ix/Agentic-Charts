@@ -110,16 +110,13 @@ lowest-timeframe gate and the z < −2 auto-off), PATH VERIFY scoring, the skewe
 level odds, the out-of-sample shadows, the thinned decayed OLS with intercept, and the joint Wald
 gate.
 
-**Not ported:**
-* chart patterns and harmonics (no "Pat BO" / "Harmonics" rows, no pattern/harmonic magnets,
-  confluence factors w2/w3 always off)
-* the HTF divergence factor w8
-* session filters (off by default in the script)
-* drawings and alerts
+**Not ported:** drawings and alerts. (The original port also left out chart patterns, harmonics,
+session filters and the HTF divergence factor w8; agentic-charts has since added all four, see the
+note at the top of `kimi_v574.py`.)
 
-Because w2, w3 and w8 are always off, confluence scores are a little lower than on the chart. So
-the Conf top/rest split, and Long/Short (which on the chart also include pattern and harmonic
-trades), can differ. DIV, U/Dn, Early and Random are unaffected.
+The HTF divergence factor runs `f_htfDivState` on the higher timeframe's own candles, built from the
+`history` you pass (with `h` and `l`; closes stand in when they are missing) or from the chart's
+candles, and reads it from the last completed higher-timeframe bar, as the script's strict anchor does.
 
 ## Things worth knowing when you read the output
 

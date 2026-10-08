@@ -124,3 +124,21 @@ def test_kimi_endpoint_and_agent_offline():
         res = r.json()
         assert res["indicators"] == {"kimi": True}
         assert "Kimi Cooked v5.7.4 on SOLUSDT 4h" in res["summary"] and "Turned on Kimi Cooked" in res["summary"]
+
+
+def test_htf_divergence_factor_w8(sample):
+    """f_htfDivState on the 4h bars built from the 1h sample: it fires on its own, and with the factor on, signals
+    whose last completed 4h bar had a recent divergence carry bit 8 in their factor mask."""
+    from app.kimi.kimi_v574 import _htf_bars, _htf_div_state
+
+    t = np.array([c.time for c in sample], dtype="int64") * 1000
+    o, h, l, c, v = (np.array([getattr(x, k) for x in sample]) for k in ("open", "high", "low", "close", "volume"))
+    ref, hh, ll, hc = _htf_bars(t, t, h, l, c, 240)
+    assert len(hc) == 1651 and (ref[1:] >= ref[:-1]).all() and hh.max() == h.max() and ll.min() == l.min()
+    d, age = _htf_div_state(hh, ll, hc, 240.0, Inputs())
+    assert (age == 0).sum() > 5 and set(np.unique(d)) <= {-1, 0, 1} and {1, -1} <= set(d[age == 0])
+    with_w8 = KimiCooked(60, Inputs(htfChoice="240")).run(t, o, h, l, c, v)
+    without = KimiCooked(60, Inputs(htfChoice="240", confUseHtfDiv=False)).run(t, o, h, l, c, v)
+    flagged = [s for s in with_w8.signals if s.mask & (1 << 8)]
+    assert flagged and not any(s.mask & (1 << 8) for s in without.signals)
+    assert [s.bar for s in with_w8.signals] == [s.bar for s in without.signals]  # the factor only moves scores

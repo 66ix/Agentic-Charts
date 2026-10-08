@@ -33,7 +33,6 @@ PORTED (same formulas and constants as the script):
 NOT PORTED (their effects are absent here):
   * chart patterns and harmonics: no "Pat BO" / "Harmonics" rows, no pattern/harmonic magnets,
     confluence factors w2 / w3 are always off, their signals do not enter Long/Short/Conf rows
-  * HTF divergence factor (w8, computed inside request.security on the higher timeframe)
   * session filters / session multipliers (defaults are off in the script)
   * drawings, labels, alerts
 Because w2/w3/w8 are always off, confluence scores (and so the Conf top/rest split) can
@@ -43,8 +42,9 @@ apart from the start of history (bar 0 = the first candle you pass in, as on the
 agentic-charts: chart patterns + harmonics (patterns_v574.py: detection, registry, break-outs / failures,
 lifecycle, w2 / w3, the "Pat BO" and "Harmonics" rows, their Long / Short / Conf entries and forecast magnets)
 and the session filter + multipliers (sessions_v574.py) are now ported and hooked into the loop below at the
-script's own points (lines marked agentic-charts). The HTF divergence factor w8 is still off. With
-Inputs(showChartPatterns=False, showHarmonics=False) the engine gives the original port's numbers.
+script's own points (lines marked agentic-charts), and so is the HTF divergence factor w8 (f_htfDivState run on the
+higher timeframe's own candles, read from its last completed bar; pass highs and lows in `history` as h / l). With
+Inputs(showChartPatterns=False, showHarmonics=False, confUseHtfDiv=False) the engine gives the original port's numbers.
 """
 from __future__ import annotations
 
@@ -123,6 +123,8 @@ class Inputs:
     confVolMult: float = 1.2
     confVolLen: int = 20
     adaptWeights: bool = True
+    confUseHtfDiv: bool = True    # HTF Divergence Factor (w8)
+    confHtfDivAge: int = 30       # HTF Div Max Age (HTF bars)
     # S/R retest
     srRetestOn: bool = True
     srRetestZone: float = 0.25
@@ -342,6 +344,110 @@ def _linreg_slope_series(y: np.ndarray, L: int) -> np.ndarray:
     return out
 
 
+def _htf_bars(chart_t: np.ndarray, src_t: np.ndarray, src_h: np.ndarray, src_l: np.ndarray, src_c: np.ndarray,
+              htf_min: int):
+    """`_htf_map` with the HTF bars' high and low too: (ref per chart bar, h, l, c per HTF bar)."""
+    sb = _bucket_ids(src_t, htf_min)
+    starts = np.concatenate([[0], np.nonzero(np.diff(sb))[0] + 1])
+    last_idx = np.append(starts[1:] - 1, len(sb) - 1)
+    hh = np.maximum.reduceat(src_h, starts)
+    ll = np.minimum.reduceat(src_l, starts)
+    ref = np.searchsorted(sb[last_idx], _bucket_ids(chart_t, htf_min), side="left") - 1
+    return ref, hh, ll, src_c[last_idx]
+
+
+def _htf_div_state(h: np.ndarray, l: np.ndarray, c: np.ndarray, tf: float, p: "Inputs"):
+    """agentic-charts: f_htfDivState, run on the higher timeframe's own bars as request.security does: the
+    adaptive pivot length, RSI period and divergence threshold come from that timeframe's candles. Per HTF bar:
+    (dDir, bars since the divergence fired, 9999 when none yet). dDir is 1 / -1 for the last bullish / bearish
+    divergence, regular or hidden (regular wins on the same bar)."""
+    n = len(c)
+    pc = np.concatenate([[np.nan], c[:-1]])
+    tr = np.where(np.isnan(pc), h - l, np.maximum(h - l, np.maximum(np.abs(h - pc), np.abs(l - pc))))
+    chg = c - pc
+    h_atr = _rma(tr, p.atrPeriod)
+    # volRegime from the adaptive ATR, as on the chart
+    rv_now = _stdev(100.0 * chg / np.where(np.isnan(pc), c, pc), 20)
+    rv_avg = _sma(rv_now, 50)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        rv_reg = rv_now / np.maximum(np.where(np.isnan(rv_avg), rv_now, rv_avg), 1e-10)
+    rv_reg = np.where(np.isnan(rv_reg), 1.0, rv_reg)
+    atr_pct = _percentrank(h_atr, 252)
+    rv_blend = rv_reg * (0.75 + 0.005 * np.where(np.isnan(atr_pct), 50.0, atr_pct))
+    atr = np.empty(n)
+    if n:
+        atr[0] = tr[0]
+    for i in range(1, n):
+        ap = max(p.autoAtrMin, min(p.autoAtrMax, _rnd(p.atrPeriod / max(0.5, min(2.0, math.sqrt(max(rv_blend[i], 0.1))))))) if p.autoAtr else p.atrPeriod
+        atr[i] = atr[i - 1] + (tr[i] - atr[i - 1]) / max(ap, 1)
+    atr_sma20 = _sma(atr, 20)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        vol_reg = atr / np.maximum(np.where(np.isnan(atr_sma20), atr, atr_sma20), 1e-10)
+    vol_reg = np.where(np.isnan(vol_reg), 1.0, vol_reg)
+    rl = p.regimeLen
+    er_num = np.abs(c - np.concatenate([np.full(rl, np.nan), c[:-rl]])) if n > rl else np.full(n, np.nan)
+    er_den = _sma(np.abs(chg), rl) * rl
+    with np.errstate(divide="ignore", invalid="ignore"):
+        er = np.where(er_den > 0, er_num / np.where(er_den > 0, er_den, 1.0), 0.0)
+    er = np.where(np.isnan(er), 0.0, er)
+    vol_adj = np.clip(np.sqrt(np.maximum(vol_reg, 0.1)), 0.85, 1.25) if p.autoStructure else np.ones(n)
+    div_thr = (p.divThresh * (1.0 if tf >= 15.0 else 1.0 + 0.5 * math.sqrt((15.0 - tf) / 14.0)) * np.clip(vol_reg, 0.8, 1.5)) if p.autoParams else np.full(n, p.divThresh)
+    a_rsi = 2.0 / (p.rsiSmooth + 1.0)
+    avg_gap = last_gap = None
+    avg_g = avg_l = None
+    rsi_ema = np.nan
+    smooth = np.full(n, np.nan)
+    S = {1: dict(p1=None, p2=None, r1=None, r2=None, b1=None, b2=None), -1: dict(p1=None, p2=None, r1=None, r2=None, b1=None, b2=None)}
+    d_dir, d_bar = 0, None
+    out_dir = np.zeros(n, dtype=int)
+    out_age = np.full(n, 9999, dtype=int)
+    for i in range(n):
+        struct_ok = p.autoStructure and avg_gap is not None
+        gtr = (p.pivotLen * 2.5) / max(avg_gap, 1.0) if struct_ok else 1.0
+        er_adj = (1.3 if er[i] < p.chopThresh else 0.9 if er[i] > p.trendThresh else 1.0) if p.useRegime else 1.0
+        plen = max(2, min(15, _rnd(p.pivotLen * max(0.67, min(1.5, gtr)) * er_adj * vol_adj[i]))) if p.autoStructure else p.pivotLen
+        rsi_p = max(5, min(21, plen * 2)) if p.autoStructure else p.rsiPeriod
+        min_div = plen * 2 if p.minDivBars <= 0 else p.minDivBars
+        ch_ = chg[i]
+        gain = ch_ if (not np.isnan(ch_) and ch_ > 0) else 0.0
+        loss = -ch_ if (not np.isnan(ch_) and ch_ < 0) else 0.0
+        al = 1.0 / max(rsi_p, 1)
+        avg_g = gain if avg_g is None else avg_g + al * (gain - avg_g)
+        avg_l = loss if avg_l is None else avg_l + al * (loss - avg_l)
+        raw = 100.0 if avg_l == 0 else 100.0 - 100.0 / (1.0 + avg_g / avg_l)
+        rsi_ema = raw if np.isnan(rsi_ema) else a_rsi * raw + (1 - a_rsi) * rsi_ema
+        smooth[i] = rsi_ema
+        lo = hi = None
+        if i >= 2 * plen:
+            if (l[i - 2 * plen:i + 1] >= l[i - plen]).all():
+                lo = l[i - plen]
+            if (h[i - 2 * plen:i + 1] <= h[i - plen]).all():
+                hi = h[i - plen]
+        a = 0.0 if np.isnan(h_atr[i]) else h_atr[i]
+        for dd, pvt in ((1, lo), (-1, hi)):
+            if pvt is None:
+                continue
+            st = S[dd]
+            st["p2"], st["r2"], st["b2"] = st["p1"], st["r1"], st["b1"]
+            st["p1"], st["r1"], st["b1"] = pvt, smooth[i - plen], i - plen
+            sep = (st["b2"] is None or st["b1"] - st["b2"] >= min_div) and (p.minDivGapATR <= 0 or st["p2"] is None or abs(st["p1"] - st["p2"]) >= a * p.minDivGapATR)
+            if sep and st["p2"] is not None and st["r2"] is not None and not np.isnan(st["r2"]) and not np.isnan(st["r1"]):
+                # bullish: lower low with higher RSI (regular) or higher low with lower RSI (hidden); bearish mirrored
+                lower = (st["p1"] - st["p2"]) * dd < 0
+                higher = (st["p1"] - st["p2"]) * dd > 0
+                if (lower and (st["r1"] - st["r2"]) * dd > div_thr[i]) or (higher and (st["r1"] - st["r2"]) * dd < -div_thr[i]):
+                    d_dir, d_bar = dd, i
+        if lo is not None or hi is not None:
+            pb = i - plen
+            if last_gap is not None and pb > last_gap:
+                g = pb - last_gap
+                avg_gap = g if avg_gap is None else avg_gap * 0.75 + g * 0.25
+            last_gap = pb
+        out_dir[i] = d_dir
+        out_age[i] = 9999 if d_bar is None else i - d_bar
+    return out_dir, out_age
+
+
 # ════════════════════════════════════════════════════════════════════════════════════════
 # Engine
 # ════════════════════════════════════════════════════════════════════════════════════════
@@ -483,14 +589,17 @@ class KimiCooked:
         # daily trend state for the skewed band (last COMPLETED daily bar: close - SMA(fcTrLen))
         if history is not None:
             src_t = np.asarray(history["t"], dtype="int64"); src_c = np.asarray(history["c"], float)
+            # agentic-charts: highs and lows too, for the HTF divergence (closes stand in when not given)
+            src_h = np.asarray(history.get("h", src_c), float); src_l = np.asarray(history.get("l", src_c), float)
             keep = src_t < t_ms[-1] + 1
-            src_t, src_c = src_t[keep], src_c[keep]
+            src_t, src_c, src_h, src_l = src_t[keep], src_c[keep], src_h[keep], src_l[keep]
             # make sure the chart's own candles are included at the end (history may stop earlier)
             if len(src_t) == 0 or src_t[-1] < t_ms[-1]:
                 m = t_ms > (src_t[-1] if len(src_t) else -1)
                 src_t = np.concatenate([src_t, t_ms[m]]); src_c = np.concatenate([src_c, c[m]])
+                src_h = np.concatenate([src_h, h[m]]); src_l = np.concatenate([src_l, l[m]])
         else:
-            src_t, src_c = t_ms, c
+            src_t, src_c, src_h, src_l = t_ms, c, h, l
         if len(src_t) > 1:
             g = np.diff(src_t); g = g[g > 0]
             src_tf = float(np.median(g)) / 60000.0 if len(g) else tf
@@ -513,6 +622,7 @@ class KimiCooked:
                 tr_state = (np.nan_to_num(vals) > 0).astype(int)
         # HTF slope series for every ladder rung above the chart
         htf_slope: Dict[int, np.ndarray] = {}
+        htf_div: Dict[int, tuple] = {}
         for rung in _HTF_LADDER:
             if rung > tf:
                 ref, hc = _htf_map(t_ms, *pick(rung), rung)
@@ -521,6 +631,15 @@ class KimiCooked:
                 ok = ref >= 0
                 vals[ok] = sl[ref[ok]]
                 htf_slope[rung] = vals
+                # agentic-charts: f_htfDivState on that timeframe, read from its last completed bar (w8)
+                if p.confUseHtfDiv:
+                    st, sh, sl_, sc = (src_t, src_h, src_l, src_c) if src_tf <= rung else (t_ms, h, l, c)
+                    ref, hh, ll, hc = _htf_bars(t_ms, st, sh, sl_, sc, rung)
+                    hd, ha = _htf_div_state(hh, ll, hc, float(rung), p)
+                    dv = np.zeros(N, dtype=int); ag = np.full(N, 9999, dtype=int)
+                    ok = ref >= 0
+                    dv[ok] = hd[ref[ok]]; ag[ok] = ha[ref[ok]]
+                    htf_div[rung] = (dv, ag)
         fixed_htf = None if p.htfChoice == "Auto" else {"D": 1440, "W": 10080, "M": 43200}.get(p.htfChoice, None) or int(p.htfChoice)
 
         # ── state ──
@@ -636,6 +755,8 @@ class KimiCooked:
             htf_bull = (not np.isnan(s1)) and s1 > 0 and ((not h2avail) or ((not np.isnan(s2)) and s2 > 0))
             htf_bear = (not np.isnan(s1)) and s1 < 0 and ((not h2avail) or ((not np.isnan(s2)) and s2 < 0))
             htf_dir = 0.0 if np.isnan(s1) else float(np.sign(s1))
+            hdv = htf_div.get(htf)
+            htf_div_on = {dd: hdv is not None and hdv[0][i] == dd and hdv[1][i] <= p.confHtfDivAge for dd in (1, -1)}
             raw_drift = (lr_slope if lr_slope is not None else 0.0) * 0.30 + (0.0 if np.isnan(avg_bar_chg[i]) else avg_bar_chg[i]) * 0.35 + htf_dir * atr[i] * 0.06
             step_drift = max(-atr[i] * 0.35, min(atr[i] * 0.35, raw_drift))
             # ===== next-candle exhaustion call record (v5.7.0 / v5.7.3) =====
@@ -789,14 +910,14 @@ class KimiCooked:
                         early_now[dd] = bool(sess_ok[i]) and (not pause[i]) and (not trending[i])   # agentic-charts: sessOk
                         if early_now[dd] and pend[dd] is None:
                             pend[dd] = 2
-            # ===== confluence (agentic-charts: w2 chart pattern / w3 harmonic recency ported; w8 HTF div still off) =====
+            # ===== confluence (agentic-charts: w2 chart pattern / w3 harmonic recency and w8 HTF divergence ported) =====
             rsi_x = {1: (not np.isnan(dyn_os)) and smooth[i] < dyn_os, -1: (not np.isnan(dyn_ob)) and smooth[i] > dyn_ob}
             pat_rec = {dd: last_pat_bar[dd] is not None and i - last_pat_bar[dd] <= p.confWindow for dd in (1, -1)}
             harm_rec = {dd: last_harm_bar[dd] is not None and i - last_harm_bar[dd] <= p.confWindow for dd in (1, -1)}
             fac = {}
             for dd in (1, -1):
                 fac[dd] = [near[dd], retest[dd], pat_rec[dd], harm_rec[dd], htf_bull if dd > 0 else htf_bear, rsi_x[dd],
-                           step_drift > 0 if dd > 0 else step_drift < 0, bool(vol_high[i]), False, multi_osc[dd]]
+                           step_drift > 0 if dd > 0 else step_drift < 0, bool(vol_high[i]), htf_div_on[dd], multi_osc[dd]]
             conf_w = {dd: int(sum(fw[k] for k in range(10) if fac[dd][k])) for dd in (1, -1)}
             mask = {dd: sum((1 << k) for k in range(10) if fac[dd][k]) for dd in (1, -1)}
             # ===== f_resolveSignalStats (newest first) =====
