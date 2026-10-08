@@ -80,6 +80,8 @@ export interface AgentMessage {
   sellWatch?: SellWatch;
   /** Web pages a general answer was based on. */
   sources?: AnswerSource[];
+  /** The numbers the answer was written from, for "Numbers used". */
+  facts?: Record<string, unknown>;
   /** The chart the answer was drawn on, and the question it answered (for pins and the journal). */
   symbol?: string;
   interval?: Interval;
@@ -112,7 +114,92 @@ const SHORTCUTS = [
   "What should I sell or trim?",
 ];
 
-const FOLLOW_UPS = ["Also show swings", "Same on daily", "Does the daily agree?", "Alert me on these levels", "Add RSI"];
+const FOLLOW_UPS = ["Same on daily", "Does the daily agree?", "Give me a trade plan", "Alert me on these levels", "Any divergences?"];
+
+/** Follow-up buttons that fit the last answer: a plan gets plan questions, a scan offers to plan its top coin. */
+export function followUps(m: AgentMessage | undefined, spotOnly: boolean): string[] {
+  if (!m || m.role !== "agent") return FOLLOW_UPS;
+  if (m.plan) {
+    return ["Alert me at the entry", "Where do I take profit?", "Does the daily agree?", "What would invalidate this?", "Alert me on a 5m confirmation in the zone"];
+  }
+  const top = m.setups?.[0];
+  if (top) {
+    const coin = displaySymbol(top.symbol);
+    return [`Give me a ${top.direction} plan on ${coin}`, `Open ${coin} ${top.interval}`, "Same scan on 1h", "Same scan on daily"];
+  }
+  if (m.gridCoins?.[0]) {
+    const coin = displaySymbol(m.gridCoins[0].symbol);
+    return [`Suggest a grid bot for ${coin}`, "Best grid bot coins on daily", "Best spot buys"];
+  }
+  if (m.scan?.[0]) {
+    const coin = displaySymbol(m.scan[0].symbol);
+    return [`Give me a ${spotOnly ? "long" : "trade"} plan on ${coin}`, `Open ${coin}`, "Which are oversold?", "Same scan on daily"];
+  }
+  if (m.sells) return ["Where do I take profit?", "Plan a dip-buy ladder", "Best spot buys"];
+  if (m.ladder) return ["Alert me on these levels", "Same ladder on daily", "Where do I take profit?"];
+  if (m.walk) return ["Give me a trade plan", "Alert me on these levels", "Does the weekly agree?"];
+  if (m.sources) return ["What does this mean for BTC?", "Any high-impact events today?", "Latest crypto headlines"];
+  if (/\bkimi\b/i.test(m.prompt ?? "")) return ["Kimi on the daily", "Kimi on 1h", "Give me a trade plan", "Does the daily agree?"];
+  const zone = ((m.facts?.indicators ?? {}) as { stoch_rsi?: { zone?: string } }).stoch_rsi?.zone;
+  const extra = zone === "overbought" || zone === "oversold" ? `Is it ${zone} on the daily too?` : "Buyers or sellers in control?";
+  return ["Give me a trade plan", "Does the daily agree?", extra, "Alert me on these levels", "Fear & Greed and BTC dominance?"];
+}
+
+/** What the chat box suggests: it follows the chart and the last answer instead of one fixed line. */
+export function placeholderFor(m: AgentMessage | undefined, symbol: string | undefined, interval: string | undefined, n: number, spotOnly: boolean): string {
+  const coin = symbol ? `${displaySymbol(symbol)}${interval ? ` ${interval}` : ""}` : "this chart";
+  if (!m) {
+    const first = ["Which of my coins are near demand?", "Is RSI overbought here?", "Best 4h setups across the market", "What does Kimi say?", "Buyers or sellers in control?"];
+    return `Ask about ${coin}, e.g. "${first[n % first.length].toLowerCase()}", or paste a chart screenshot`;
+  }
+  const next = followUps(m, spotOnly);
+  return `Follow up on ${coin}, e.g. "${next[n % next.length].toLowerCase()}"`;
+}
+
+/** "Numbers used": the facts an answer was written from, flattened to label/value lines. */
+function factLines(obj: unknown, prefix = ""): [string, string][] {
+  const fmt = (v: unknown): string =>
+    v === null || v === undefined ? "–" : typeof v === "object" ? JSON.stringify(v) : String(v);
+  const name = (k: string) => k.replace(/_/g, " ");
+  if (Array.isArray(obj)) {
+    if (obj.every((x) => typeof x !== "object" || x === null)) return [[prefix, obj.map(fmt).join(", ") || "none"]];
+    return obj.slice(0, 8).map((x, i): [string, string] => [`${prefix} ${i + 1}`.trim(), Object.entries(x as object).map(([k, v]) => `${name(k)} ${fmt(v)}`).join(" · ")]);
+  }
+  if (obj && typeof obj === "object") return Object.entries(obj).flatMap(([k, v]) => factLines(v, prefix ? `${prefix} › ${name(k)}` : name(k)));
+  return [[prefix, fmt(obj)]];
+}
+
+function NumbersUsed({ facts }: { facts: Record<string, unknown> }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="mt-1">
+      <button type="button" onClick={() => setOpen(!open)} className="text-[10px] text-mute hover:text-ink">
+        {open ? "Hide numbers used" : "Numbers used"}
+      </button>
+      {open && (
+        <div className="mt-1 max-h-64 overflow-y-auto rounded border border-line bg-base/60 p-1.5 font-mono text-[10px] leading-4">
+          {factLines(Object.fromEntries(Object.entries(facts).filter(([, v]) => typeof v !== "object" || v === null))).map(([k, val]) => (
+            <div key={k} className="flex gap-2">
+              <span className="shrink-0 text-mute">{k}</span>
+              <span className="text-ink">{val}</span>
+            </div>
+          ))}
+          {Object.entries(facts).filter(([, v]) => typeof v === "object" && v !== null).map(([section, v]) => (
+            <div key={section} className="mt-1">
+              <div className="font-semibold uppercase tracking-wide text-mute">{section.replace(/_/g, " ")}</div>
+              {factLines(v).map(([k, val], i) => (
+                <div key={i} className="flex gap-2">
+                  {k && <span className="shrink-0 text-mute">{k}</span>}
+                  <span className="break-all text-ink">{val}</span>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 /** Prices in an answer in bold: numbers with decimals or thousands separators within ±60% of the last price. */
 function emphasize(text: string, last: number | undefined): ReactNode {
@@ -496,6 +583,9 @@ interface Props {
   /** Arms the sell signal alerts on the coins a sell check covered → saved. */
   onSellWatch?(watch: SellWatch): Promise<boolean>;
   handleRef?: Ref<AgentPanelHandle>;
+  /** The chart the agent is looking at, for the chat box's hint. */
+  symbol?: string;
+  interval?: Interval;
 }
 
 /** The chart agent as a dock tab: the conversation fills the height, the prompt sits at the bottom. */
@@ -505,6 +595,8 @@ export default function AgentPanel(p: Props) {
   const listRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  const lastAgent = [...p.messages].reverse().find((m) => m.role === "agent");
 
   useImperativeHandle(p.handleRef, () => ({ focus: () => inputRef.current?.focus() }));
 
@@ -633,6 +725,7 @@ export default function AgentPanel(p: Props) {
                     {m.sells && <SellList rows={m.sells} onPick={p.onPickSymbol} />}
                     {m.sellWatch && p.onSellWatch && <SellWatchButton watch={m.sellWatch} onWatch={p.onSellWatch} />}
                     {m.sources && <Sources rows={m.sources} />}
+                    {m.facts && <NumbersUsed facts={m.facts} />}
                     {m.overlays && m.overlays.length > 0 && (
                       <div className="mt-1.5 flex flex-wrap gap-1">
                         {m.overlays
@@ -693,7 +786,7 @@ export default function AgentPanel(p: Props) {
           </div>
           {!p.busy && (
             <div className="flex shrink-0 flex-wrap gap-1.5 px-3 pt-2">
-              {(p.messages.length === 0 ? SUGGESTIONS : FOLLOW_UPS).map((s) => (
+              {(p.messages.length === 0 ? SUGGESTIONS : followUps(lastAgent, p.spotOnly)).map((s) => (
                 <button
                   key={s}
                   type="button"
@@ -764,7 +857,7 @@ export default function AgentPanel(p: Props) {
                   submit(value);
                 }
               }}
-              placeholder={p.messages.length ? 'Follow up, e.g. "same on ETH", "line at 25.4" or "alert me at the entry"' : 'Ask the agent, e.g. "Which of my coins are near demand?", or paste a chart screenshot'}
+              placeholder={placeholderFor(lastAgent, p.symbol, p.interval, p.messages.length, p.spotOnly)}
               className="min-h-9 flex-1 resize-none rounded-lg border border-line bg-base px-3 py-2 text-sm text-ink outline-none placeholder:text-mute focus:border-accent/60"
               aria-label="Agent prompt"
             />

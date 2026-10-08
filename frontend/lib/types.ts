@@ -531,6 +531,8 @@ export interface AnalyzeResponse {
   sells?: SellSignal[];
   /** The coins and timeframe a sell check covered, to watch with signal alerts. */
   sell_watch?: SellWatch | null;
+  /** The numbers the answer was written from (indicators, zones, market overview...), as the model saw them. */
+  facts?: Record<string, unknown>;
   generated_at: string;
 }
 

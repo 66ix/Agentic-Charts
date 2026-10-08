@@ -613,6 +613,8 @@ class AnalyzeResponse(BaseModel):
     sells: list[SellSignal] = Field(default_factory=list, description="Sell or trim signals (sell_check.py)")
     sell_watch: Optional[SellWatch] = Field(None, description="The coins and timeframe a sell check covered, so the "
                                                               "client can offer to watch them with signal alerts")
+    facts: dict = Field(default_factory=dict, description="The numbers the answer was written from, rounded as the "
+                                                          "model saw them, for the 'numbers used' view")
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

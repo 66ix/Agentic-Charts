@@ -55,7 +55,7 @@ import type {
 } from "@/lib/types";
 import { CURRENT_WORKSPACE_KEY, saveWorkspace, WORKSPACES_KEY, type SavedWorkspace } from "@/lib/workspaces";
 
-import AgentPanel, { type AgentMessage, type AgentPanelHandle } from "./AgentPanel";
+import AgentPanel, { placeholderFor, type AgentMessage, type AgentPanelHandle } from "./AgentPanel";
 import { type AgenticChartHandle, type CompareLine, type FeedInfo, type KimiVisibility } from "./AgenticChart";
 import AlertsPanel from "./AlertsPanel";
 import AlertToasts, { signalToast, type Toast } from "./AlertToasts";
@@ -541,6 +541,7 @@ export default function ChartWorkspace() {
             walk: res.top_down ?? undefined,
             ladder: res.ladder ?? undefined,
             sources: res.sources?.length ? res.sources : undefined,
+            facts: streaming || !res.facts || !Object.keys(res.facts).length ? undefined : res.facts,
             sells: res.sells?.length ? res.sells : undefined,
             sellWatch: res.sell_watch?.symbols.length ? res.sell_watch : undefined,
             steps: res.steps?.length ? res.steps : undefined,
@@ -975,6 +976,8 @@ export default function ChartWorkspace() {
           messages={messages}
           overlayCount={overlays.length}
           pinned={pinnedSet}
+          symbol={symbol}
+          interval={interval}
           onSubmit={(p) => void runAnalysis(p)}
           onImage={(f) => void readShot(f)}
           onClearOverlays={() => changeOverlays(overlaysKey, [], "clear AI levels")}
@@ -1226,6 +1229,7 @@ export default function ChartWorkspace() {
               onExpanded={setQuickbar}
               busy={busy}
               answer={quickAnswer}
+              placeholder={placeholderFor([...messages].reverse().find((m) => m.role === "agent"), symbol, interval, messages.length, spotOnly)}
               onSubmit={(p) => void runAnalysis(p)}
               onOpen={focusAgent}
               onDismissAnswer={() => setQuickAnswer(null)}
@@ -1334,6 +1338,7 @@ function QuickPrompt(p: {
   onExpanded(v: boolean): void;
   busy: boolean;
   answer: AgentMessage | null;
+  placeholder: string;
   onSubmit(prompt: string): void;
   onOpen(): void;
   onDismissAnswer(): void;
@@ -1384,7 +1389,7 @@ function QuickPrompt(p: {
             if (e.key === "Enter") submit();
             if (e.key === "Escape") (e.target as HTMLInputElement).blur();
           }}
-          placeholder="Ask the chart agent, e.g. “key levels on the daily”"
+          placeholder={p.placeholder}
           className="h-9 min-w-0 flex-1 bg-transparent text-[13px] text-ink outline-none placeholder:text-mute"
         />
         {p.busy ? (

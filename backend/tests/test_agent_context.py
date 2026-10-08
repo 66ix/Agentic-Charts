@@ -139,3 +139,8 @@ def _toggles(prompt, indicators_on):
 def test_asking_about_an_indicator_reads_it_without_putting_it_on_the_chart():
     assert _toggles("what's the MACD doing?", ["macd"]) == {}
     assert _toggles("add MACD", ["macd"]) == {"macd": True}
+
+
+def test_the_answer_carries_the_numbers_it_used():
+    res = _run("what's the RSI?")
+    assert "indicators" in res.facts and "last_price" in res.facts and "research" not in res.facts

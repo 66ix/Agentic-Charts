@@ -30,7 +30,7 @@ def _fmt(p: float, ref: float | None = None, strip: bool = False) -> str:
 PRICE_KEYS = frozenset({
     "price", "last_price", "low", "high", "atr", "entry", "stop", "level", "neckline", "poc", "val", "vah",
     "price1", "price2", "price_low", "price_high", "mid", "target", "open", "close", "mark_price", "ema_fast",
-    "ema_slow", "range",
+    "ema_slow", "range", "upper", "lower",
 })
 
 

@@ -36,6 +36,7 @@ from .market_metrics import MarketMetricsService, overview_facts
 from .market_scanner import MarketScanner, MarketScanResult
 from .scanner import DEFAULT_WATCHLIST, scan, tickers
 from .sell_check import describe_sells, sell_facts, sell_scan, timeframe_for
+from .pricefmt import round_facts
 from .session_levels import SessionLevelsService, level_facts
 from .schemas import (
     FEATURE_KINDS,
@@ -268,6 +269,8 @@ async def _chart_cvd(futures: FuturesDataService | None, symbol: str, tf: str) -
     return out
 
 
+# Left out of the "numbers used" view: tool transcripts and what the answer did rather than read.
+USED_SKIP = frozenset({"research", "actions", "navigation", "spot_note", "trading_style"})
 SHOW_VERBS = re.compile(r"\b(?:show|add|turn on|switch on|enable|display|plot|put|overlay|bring up|pull up|"
                         r"draw|toggle|apply|equip|load)\b", re.I)
 FUTURES_WORDS = re.compile(r"\b(funding|open interest|oi|long[ /-]?short|l/s|liquidat\w*|order ?book|walls?|cvd|"
@@ -777,6 +780,7 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         sources=[],
         sells=sells or [],
         sell_watch=SellWatch(symbols=sell_symbols[:40], interval=sell_tf) if sells is not None else None,
+        facts=round_facts({k: v for k, v in narrate_facts.items() if k not in USED_SKIP}),
     )
     if on_result is not None:
         await on_result(res)
