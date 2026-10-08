@@ -88,6 +88,16 @@ export function analyze(
     watchlist?: string[];
     /** Spot only: no short plans or short setups. */
     spot_only?: boolean;
+    /** The chart's indicator lengths, so the agent's readings match what the user sees. */
+    indicator_settings?: {
+      ema_fast: number;
+      ema_slow: number;
+      rsi: number;
+      macd: { fast: number; slow: number; signal: number };
+      bb: { length: number; mult: number };
+      atr: number;
+      stoch_rsi: { rsiLength: number; stochLength: number; k: number; d: number };
+    };
   },
   signal?: AbortSignal,
 ) {

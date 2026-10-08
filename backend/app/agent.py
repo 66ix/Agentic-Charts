@@ -44,6 +44,7 @@ from .schemas import (
     AnalysisIntent,
     AnalyzeRequest,
     AnalyzeResponse,
+    IndicatorLengths,
     BoxOverlay,
     HorizontalLineOverlay,
     MarketSetup,
@@ -170,12 +171,13 @@ def _compact(facts: dict) -> dict:
 def make_toolbox(market: MarketData, derivatives: DerivativesService | None, watchlist: list[str],
                  kimi: KimiService | None = None, futures: FuturesDataService | None = None,
                  events: EventsService | None = None, scanner: MarketScanner | None = None,
-                 spot_only: bool = False, metrics: MarketMetricsService | None = None) -> Toolbox:
+                 spot_only: bool = False, metrics: MarketMetricsService | None = None,
+                 lengths: IndicatorLengths | None = None) -> Toolbox:
     async def look(symbol: str, tf: str, features: list[str]) -> dict:
         candles, source = await market.get_klines(symbol, tf, 400)
         frames = await _confluence_frames(market, symbol, tf, features)
         res = await asyncio.to_thread(analyze, candles_to_df(candles), AnalysisIntent(features=features), tf, None,
-                                      frames)
+                                      frames, lengths)
         return {"symbol": symbol, "data_source": source, **_compact(res.facts)}
 
     async def scan_tool(tf: str, filt: str) -> list[dict]:
@@ -266,6 +268,8 @@ async def _chart_cvd(futures: FuturesDataService | None, symbol: str, tf: str) -
     return out
 
 
+SHOW_VERBS = re.compile(r"\b(?:show|add|turn on|switch on|enable|display|plot|put|overlay|bring up|pull up|"
+                        r"draw|toggle|apply|equip|load)\b", re.I)
 FUTURES_WORDS = re.compile(r"\b(funding|open interest|oi|long[ /-]?short|l/s|liquidat\w*|order ?book|walls?|cvd|"
                            r"order ?flow|delta|positioning|crowded|sentiment|squeeze|buyers?|sellers?|buying pressure|"
                            r"selling pressure|money flow|more money)\b", re.I)
@@ -504,7 +508,8 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
     research: list[dict] = []
     loop = None
     if req.prompt.strip() and llm.available() and settings.agent_mode == "tools":
-        box = make_toolbox(market, derivatives, req.watchlist, kimi, futures, events, scanner, req.spot_only, metrics)
+        box = make_toolbox(market, derivatives, req.watchlist, kimi, futures, events, scanner, req.spot_only, metrics,
+                           req.indicator_settings)
         loop = await plan_with_tools(llm, req.prompt, req.history, req.overlays, req.previous_intent, chart, box,
                                      settings.agent_max_steps)
     if loop:
@@ -512,6 +517,9 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
     else:
         intent, intent_engine = await llm.parse_intent(req.prompt, req.history, req.overlays, req.previous_intent,
                                                        chart)
+    # Asking about an indicator reads it; only "add", "show" or "turn on" puts it on the chart (Kimi has its own rule).
+    if intent.indicators_on and not SHOW_VERBS.search(req.prompt):
+        intent = intent.model_copy(update={"indicators_on": [k for k in intent.indicators_on if k == "kimi"]})
     # Spot only: a short plan becomes a note, "what's the trade?" a long.
     spot_note = None
     if req.spot_only and intent.trade_plan == "short":
@@ -617,7 +625,7 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
 
     df = candles_to_df(candles)
     # Detection is CPU-bound (SciPy); keep the event loop free for streams.
-    result = await asyncio.to_thread(analyze, df, run_intent, tf, higher, frames)
+    result = await asyncio.to_thread(analyze, df, run_intent, tf, higher, frames, req.indicator_settings)
     facts = dict(result.facts)
 
     for ov in result.overlays:

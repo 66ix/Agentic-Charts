@@ -5,7 +5,6 @@ import pytest
 from app.llm import rule_intent
 from app.market_data import candles_to_df, resample, synthetic_klines
 from app.schemas import AnalysisIntent, BoxOverlay, Candle, HorizontalLineOverlay
-from app.indicators import rsi
 from app.ta_agent import (analyze, atr, cluster_levels, find_swings, indicator_snapshot, parabolic_sar,
                           supply_demand_zones)
 
@@ -137,7 +136,7 @@ def test_zone_record_counts_held_and_broken_tests_from_the_zones_side():
 def test_indicator_snapshot_matches_the_chart_formulas():
     df = _df()
     close = df["close"]
-    snap = indicator_snapshot(df, rsi(close), float(atr(df).iloc[-1]))
+    snap = indicator_snapshot(df)
     mid, sd = close.tail(20).mean(), close.tail(20).std(ddof=0)
     assert snap["bollinger"]["mid"] == pytest.approx(mid, rel=1e-5)
     assert snap["bollinger"]["upper"] == pytest.approx(mid + 2 * sd, rel=1e-5)
@@ -150,3 +149,13 @@ def test_indicator_snapshot_matches_the_chart_formulas():
     assert snap["vwap"]["value"] == pytest.approx((tp * today["volume"]).sum() / today["volume"].sum(), rel=1e-5)
     assert snap["psar"]["trend"] in ("up", "down")
     assert "indicators" in analyze(df, AnalysisIntent(features=["support_resistance"]), "4h").facts
+
+
+def test_indicator_snapshot_uses_the_charts_lengths():
+    from app.schemas import IndicatorLengths
+    df = _df()
+    snap = indicator_snapshot(df, IndicatorLengths(ema_fast=9, ema_slow=21, bb={"length": 10, "mult": 3}))
+    assert snap["ema_fast"] == pytest.approx(df["close"].ewm(span=9, adjust=False).mean().iloc[-1], rel=1e-5)
+    mid, sd = df["close"].tail(10).mean(), df["close"].tail(10).std(ddof=0)
+    assert snap["bollinger"]["upper"] == pytest.approx(mid + 3 * sd, rel=1e-5)
+    assert snap["lengths"]["ema_fast"] == 9

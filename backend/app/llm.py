@@ -162,8 +162,10 @@ INTENT_SCHEMA: dict[str, Any] = {
                            "settings for SOL?'): the app suggests the range, number of grids and grid type.",
         },
         "indicators_on": {"type": "array", "items": {"type": "string", "enum": list(INDICATORS)},
-                          "description": "Chart indicators to show ('add RSI' → rsi; 'show my Kimi' or 'turn on "
-                                         "Kimi Cooked' → kimi, the user's own indicator)."},
+                          "description": "Chart indicators to show, only when asked to show them ('add RSI' → rsi; "
+                                         "'show my Kimi' or 'turn on Kimi Cooked' → kimi, the user's own "
+                                         "indicator). A question about a value ('what's the MACD?', 'is RSI "
+                                         "overbought?') shows nothing: every indicator is read anyway."},
         "indicators_off": {"type": "array", "items": {"type": "string", "enum": list(INDICATORS)},
                            "description": "Chart indicators to hide."},
         "zone_trigger": {
@@ -244,6 +246,9 @@ INTENT_SYSTEM = (
     "order_blocks, 'imbalance' or 'FVG' means fvg, 'stop hunt' or 'liquidity grab' means liquidity_sweeps, "
     "'triangle', 'wedge', 'range' or 'double top' means patterns. If the request only draws given prices, removes "
     "overlays, sets alerts, switches the chart, toggles indicators or scans the watchlist, features may be empty. "
+    "Every indicator's value is read for the answer whether or not it is on the chart, so a question about one "
+    "('what's the MACD doing?', 'is RSI overbought?') leaves indicators_on empty; only 'add', 'show' or 'turn on' "
+    "puts it on the chart. "
     "'Kimi' or 'Kimi Cooked' is the user's own indicator: 'show Kimi' → indicators_on kimi; a question about what "
     "Kimi says needs no detectors (its facts are read separately) and keeps the chart as it is (keep_existing true). "
     "'Best setups right now' or 'scan the market' is scan_market (the whole market, not the watchlist) with no "

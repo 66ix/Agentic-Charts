@@ -108,7 +108,7 @@ def test_the_agent_reads_every_indicator_and_the_header_bar_without_them_on_the_
             await llm.close()
     asyncio.run(go())
     ind = seen["indicators"]
-    assert {"ema20", "ema50", "macd", "bollinger", "stoch_rsi", "vwap", "psar", "atr", "cvd"} <= set(ind)
+    assert {"ema_fast", "ema_slow", "rsi", "macd", "bollinger", "stoch_rsi", "vwap", "psar", "atr", "cvd"} <= set(ind)
     assert ind["cvd"]["cvd_last_20_bars"] == "rising" and ind["cvd"]["buy_pct_last_20_bars"] == 60.0
     assert seen["market_overview"]["fear_greed"]["display"] == "31/100 · Fear"
     assert seen["market_overview"]["unavailable"] == ["BTC Dominance"]  # a mocked value is never quoted
@@ -118,3 +118,24 @@ def test_buyers_or_sellers_brings_the_order_flow_read():
     FakeFutures.calls = 0
     res = _run("which side has more money, buyers or sellers?", futures=FakeFutures())
     assert FakeFutures.calls == 1 and res.summary
+
+
+def _toggles(prompt, indicators_on):
+    async def parse(*a, **k):
+        from app.schemas import AnalysisIntent
+        return AnalysisIntent(indicators_on=indicators_on, keep_existing=True), "test"
+
+    async def go():
+        md, llm = MarketData(), LLMClient()
+        llm.parse_intent = parse
+        try:
+            return await run_analysis(AnalyzeRequest(symbol="INJUSDT", interval="4h", prompt=prompt), md, llm)
+        finally:
+            await md.close()
+            await llm.close()
+    return asyncio.run(go()).indicators
+
+
+def test_asking_about_an_indicator_reads_it_without_putting_it_on_the_chart():
+    assert _toggles("what's the MACD doing?", ["macd"]) == {}
+    assert _toggles("add MACD", ["macd"]) == {"macd": True}

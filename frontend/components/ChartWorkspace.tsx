@@ -449,8 +449,8 @@ export default function ChartWorkspace() {
   const deleteChat = useCallback((id: string) => setChats((list) => list.filter((c) => c.id !== id)), [setChats]);
 
   // Latest conversation state for the request, without re-creating runAnalysis on every message.
-  const convoRef = useRef({ messages, overlays, lastIntent, watchlist, spotOnly });
-  convoRef.current = { messages, overlays, lastIntent, watchlist, spotOnly };
+  const convoRef = useRef({ messages, overlays, lastIntent, watchlist, spotOnly, indicatorSettings });
+  convoRef.current = { messages, overlays, lastIntent, watchlist, spotOnly, indicatorSettings };
 
   // Cancel in-flight analysis when the market changes (unless a top-down walk is the one changing it).
   useEffect(() => {
@@ -511,6 +511,16 @@ export default function ChartWorkspace() {
           previous_intent: opts.silent ? null : convo.lastIntent,
           watchlist: convo.watchlist,
           spot_only: convo.spotOnly,
+          // The agent reads every indicator with the lengths the chart uses.
+          indicator_settings: {
+            ema_fast: convo.indicatorSettings.ema1.length,
+            ema_slow: convo.indicatorSettings.ema2.length,
+            rsi: convo.indicatorSettings.rsi.length,
+            macd: convo.indicatorSettings.macd,
+            bb: { length: convo.indicatorSettings.bb.length, mult: convo.indicatorSettings.bb.mult },
+            atr: convo.indicatorSettings.atr.length,
+            stoch_rsi: convo.indicatorSettings.stochRsi,
+          },
         };
         const id = uid();
         const lead = opts.silent ? "Auto-detected levels. " : "";

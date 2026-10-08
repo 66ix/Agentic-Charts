@@ -41,6 +41,7 @@ from .patterns import detect_double, detect_range, detect_triangle, fair_value_g
 from .schemas import (
     AnalysisIntent,
     AnalysisStats,
+    IndicatorLengths,
     BoxOverlay,
     HorizontalLineOverlay,
     MarkerOverlay,
@@ -127,42 +128,50 @@ def _cross_bars_ago(diff: pd.Series, lookback: int = 50) -> tuple[str, int] | No
     return None
 
 
-def indicator_snapshot(df: pd.DataFrame, rsi_s: pd.Series, atr_v: float) -> dict:
-    """The latest value of every chart indicator, whether or not it is switched on, with the chart's default
-    lengths (frontend/lib/indicators.ts): EMA 20/50, MACD 12/26/9, Bollinger 20/2, Stoch RSI 14/14/3/3, VWAP
-    (daily session below 1d, anchored at the first bar above), Parabolic SAR and ATR 14."""
+def indicator_snapshot(df: pd.DataFrame, lengths: IndicatorLengths | None = None) -> dict:
+    """The latest value of every chart indicator, whether or not it is switched on, with the chart's own lengths
+    (frontend/lib/indicators.ts; the defaults are EMA 20/50, RSI 14, MACD 12/26/9, Bollinger 20/2, ATR 14 and
+    Stoch RSI 14/14/3/3): VWAP is the daily session below 1d and anchored at the first bar above, like the chart."""
+    ln = lengths or IndicatorLengths()
     close = df["close"]
     last = float(close.iloc[-1])
-    out: dict = {}
+    out: dict = {"lengths": ln.model_dump()}
 
-    e20, e50 = ema(close, 20), ema(close, 50)
-    out["ema20"], out["ema50"] = _price(_last(e20)), _price(_last(e50))
-    out["price_vs_ema"] = ("above both" if last > max(out["ema20"], out["ema50"]) else
-                           "below both" if last < min(out["ema20"], out["ema50"]) else "between")
-    if (x := _cross_bars_ago(e20 - e50)):
+    ef, es = ema(close, ln.ema_fast), ema(close, ln.ema_slow)
+    out["ema_fast"], out["ema_slow"] = _price(_last(ef)), _price(_last(es))
+    out["price_vs_ema"] = ("above both" if last > max(out["ema_fast"], out["ema_slow"]) else
+                           "below both" if last < min(out["ema_fast"], out["ema_slow"]) else "between")
+    if (x := _cross_bars_ago(ef - es)):
         out["ema_cross"] = {"type": "golden" if x[0] == "bullish" else "death", "bars_ago": x[1]}
 
-    if len(df) >= 35:
-        line = ema(close, 12) - ema(close, 26)
-        signal = ema(line, 9)
+    rsi_s = rsi(close, ln.rsi)
+    if (rv := _last(rsi_s)) is not None:
+        out["rsi"] = round(rv, 1)
+
+    m = ln.macd
+    if len(df) >= max(m.fast, m.slow) + m.signal:
+        line = ema(close, m.fast) - ema(close, m.slow)
+        signal = ema(line, m.signal)
         hist = line - signal
         out["macd"] = {"macd": _price(_last(line)), "signal": _price(_last(signal)), "hist": _price(_last(hist)),
                        "hist_rising": bool(hist.iloc[-1] > hist.iloc[-2])}
         if (x := _cross_bars_ago(hist)):
             out["macd"]["last_cross"] = {"direction": x[0], "bars_ago": x[1]}
 
-    mid = close.rolling(20).mean()
-    sd = close.rolling(20).std(ddof=0)
-    if (m := _last(mid)) is not None:
-        up, lo = m + 2 * float(sd.iloc[-1]), m - 2 * float(sd.iloc[-1])
-        out["bollinger"] = {"upper": _price(up), "mid": _price(m), "lower": _price(lo),
+    mid = close.rolling(ln.bb.length).mean()
+    sd = close.rolling(ln.bb.length).std(ddof=0)
+    if (mv := _last(mid)) is not None:
+        up, lo = mv + ln.bb.mult * float(sd.iloc[-1]), mv - ln.bb.mult * float(sd.iloc[-1])
+        out["bollinger"] = {"upper": _price(up), "mid": _price(mv), "lower": _price(lo),
                             "pct_b": round((last - lo) / (up - lo), 2) if up > lo else None,
-                            "width_pct": round((up - lo) / m * 100, 2) if m else None}
+                            "width_pct": round((up - lo) / mv * 100, 2) if mv else None}
 
-    lo14, hi14 = rsi_s.rolling(14).min(), rsi_s.rolling(14).max()
-    raw = ((rsi_s - lo14) / (hi14 - lo14).replace(0, np.nan) * 100).fillna(0).where(rsi_s.notna() & lo14.notna())
-    k = raw.rolling(3).mean()
-    d = k.rolling(3).mean()
+    st = ln.stoch_rsi
+    srsi = rsi_s if st.rsiLength == ln.rsi else rsi(close, st.rsiLength)
+    lo_r, hi_r = srsi.rolling(st.stochLength).min(), srsi.rolling(st.stochLength).max()
+    raw = ((srsi - lo_r) / (hi_r - lo_r).replace(0, np.nan) * 100).fillna(0).where(lo_r.notna())
+    k = raw.rolling(st.k).mean()
+    d = k.rolling(st.d).mean()
     if (kv := _last(k)) is not None and (dv := _last(d)) is not None:
         out["stoch_rsi"] = {"k": round(kv, 1), "d": round(dv, 1),
                             "zone": "overbought" if kv >= 80 else "oversold" if kv <= 20 else "neutral"}
@@ -182,7 +191,8 @@ def indicator_snapshot(df: pd.DataFrame, rsi_s: pd.Series, atr_v: float) -> dict
 
     if (sar := _last(parabolic_sar(df))) is not None:
         out["psar"] = {"value": _price(sar), "trend": "up" if sar < last else "down"}
-    out["atr"] = _price(atr_v)
+    if (av := _last(atr(df, ln.atr))) is not None:
+        out["atr"] = _price(av)
     return out
 
 
@@ -533,6 +543,7 @@ def analyze(
     tf: str,
     higher_tf: dict[str, pd.DataFrame] | None = None,
     confluence: dict[str, pd.DataFrame] | None = None,
+    lengths: IndicatorLengths | None = None,
 ) -> AnalysisResult:
     """Run the requested detectors and return overlays + stats + facts for narration.
 
@@ -575,7 +586,7 @@ def analyze(
         momentum["divergence"] = f"{div['kind']} {div['type']} ({_fmt(div['price1'])} → {_fmt(div['price2'])})"
     facts["momentum"] = momentum
     # Every chart indicator's latest value, whether or not the user has it on the chart.
-    facts["indicators"] = indicator_snapshot(df, rsi_s, atr_v)
+    facts["indicators"] = indicator_snapshot(df, lengths)
     breaks = structure_breaks(df, highs, lows)
     bias = None
     if breaks:

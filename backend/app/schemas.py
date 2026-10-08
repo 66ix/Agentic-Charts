@@ -500,6 +500,36 @@ def is_custom_symbol(symbol: str) -> bool:
     return "/" in symbol or symbol.startswith("INDEX:")
 
 
+class MacdLengths(BaseModel):
+    fast: int = Field(12, ge=2, le=200)
+    slow: int = Field(26, ge=2, le=400)
+    signal: int = Field(9, ge=2, le=200)
+
+
+class BandLengths(BaseModel):
+    length: int = Field(20, ge=2, le=400)
+    mult: float = Field(2.0, gt=0, le=10)
+
+
+class StochRsiLengths(BaseModel):
+    rsiLength: int = Field(14, ge=2, le=200)
+    stochLength: int = Field(14, ge=2, le=200)
+    k: int = Field(3, ge=1, le=50)
+    d: int = Field(3, ge=1, le=50)
+
+
+class IndicatorLengths(BaseModel):
+    """The chart's indicator settings (IndicatorSettings in frontend/lib/types.ts), so the agent's readings match."""
+
+    ema_fast: int = Field(20, ge=2, le=400)
+    ema_slow: int = Field(50, ge=2, le=400)
+    rsi: int = Field(14, ge=2, le=200)
+    macd: MacdLengths = Field(default_factory=MacdLengths)
+    bb: BandLengths = Field(default_factory=BandLengths)
+    atr: int = Field(14, ge=2, le=200)
+    stoch_rsi: StochRsiLengths = Field(default_factory=StochRsiLengths)
+
+
 class AnalyzeRequest(BaseModel):
     symbol: str = Field("INJUSDT", min_length=2, max_length=40)
     interval: Interval = "4h"
@@ -513,6 +543,7 @@ class AnalyzeRequest(BaseModel):
     previous_intent: Optional[AnalysisIntent] = None
     watchlist: list[str] = Field(default_factory=list, max_length=40, description="The user's watchlist symbols")
     spot_only: bool = Field(True, description="The user trades spot only: no short plans, no short setups")
+    indicator_settings: IndicatorLengths = Field(default_factory=IndicatorLengths)
 
     @field_validator("symbol")
     @classmethod
