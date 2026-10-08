@@ -1058,12 +1058,29 @@ class LLMClient:
             opts["num_ctx"] = self.s.ollama_num_ctx
         return opts
 
-    async def _structured(self, system: str, user: str, schema: dict, name: str) -> dict:
+    async def read_image(self, system: str, user: str, image: tuple[str, str], schema: dict,
+                         name: str) -> tuple[dict, str] | None:
+        """A structured answer about an image (`image` = (media type, base64)): (the fields, "provider:model"), or
+        None when no model is set up or it failed. The model has to be able to see images."""
+        if not self._available():
+            return None
+        try:
+            return await self._structured(system, user, schema, name, image), f"{self.provider}:{self.model}"
+        except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+            log.warning("LLM image read failed (%s: %s)", type(exc).__name__, exc)
+            self._trip(exc)
+            return None
+
+    async def _structured(self, system: str, user: str, schema: dict, name: str,
+                          image: tuple[str, str] | None = None) -> dict:
         if self.provider == "ollama":
+            msg: dict[str, Any] = {"role": "user", "content": user}
+            if image:
+                msg["images"] = [image[1]]
             r = await self._client.post(f"{self.s.ollama_url}/api/chat", json={
                 "model": self.model, "stream": False, "format": schema,
                 "options": self._ollama_options(0),
-                "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+                "messages": [{"role": "system", "content": system}, msg],
             })
             r.raise_for_status()
             return json.loads(r.json()["message"]["content"])
@@ -1074,7 +1091,9 @@ class LLMClient:
                 "model": self.model, "temperature": 0,
                 "response_format": {"type": "json_schema",
                                     "json_schema": {"name": name, "schema": schema, "strict": True}},
-                "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+                "messages": [{"role": "system", "content": system}, {"role": "user", "content": user if not image else [
+                    {"type": "text", "text": user},
+                    {"type": "image_url", "image_url": {"url": f"data:{image[0]};base64,{image[1]}"}}]}],
             })
             r.raise_for_status()
             return json.loads(r.json()["choices"][0]["message"]["content"])
@@ -1084,9 +1103,12 @@ class LLMClient:
                                         json={
                 "model": self.model, "max_tokens": ANTHROPIC_MAX_TOKENS,
                 "system": system + f"\n\nAnswer by calling the {name} tool.",
-                "tools": [{"name": name, "description": "Return the analysis plan.", "input_schema": schema}],
-                "tool_choice": {"type": "auto"},
-                "messages": [{"role": "user", "content": user}],
+                "tools": [{"name": name, "description": "Return what was read." if image else "Return the analysis plan.",
+                           "input_schema": schema}],
+                "tool_choice": {"type": "tool", "name": name} if image else {"type": "auto"},
+                "messages": [{"role": "user", "content": user if not image else [
+                    {"type": "image", "source": {"type": "base64", "media_type": image[0], "data": image[1]}},
+                    {"type": "text", "text": user}]}],
             })
             r.raise_for_status()
             for block in r.json()["content"]:

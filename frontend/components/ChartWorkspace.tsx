@@ -11,6 +11,7 @@ import { readStored, usePersistentState, writeStored } from "@/hooks/usePersiste
 import { useUndo } from "@/hooks/useUndo";
 import { alertFromDrawing, alertOverlays, chartZones, SELL_SIGNALS } from "@/lib/alerts";
 import { analyzeStream } from "@/lib/api";
+import { imageToDataUrl, readScreenshot } from "@/lib/screenshot";
 import { DEFAULT_INTERVAL, DEFAULT_SYMBOL } from "@/lib/config";
 import { isCustom } from "@/lib/customSymbols";
 import { CHAT_ID_KEY, CHATS_KEY, toSession, upsertSession, worthKeeping, type ChatSession } from "@/lib/chatHistory";
@@ -592,6 +593,47 @@ export default function ChartWorkspace() {
     [symbol, interval, activeChart, setMessages, changeOverlays, setLastIntent, addAlerts, addTrigger, setCell, setIndicators, playWalk],
   );
 
+  /**
+   * A chart screenshot: the AI reads its coin, timeframe and drawings, the chart moves there, and the drawings go
+   * on it (dashed) next to the levels the app finds itself, with a message saying which of them agree.
+   */
+  const readShot = useCallback(
+    async (file: File) => {
+      analysisCtrl.current?.abort();
+      const ctrl = new AbortController();
+      analysisCtrl.current = ctrl;
+      setMessages((m) => [...m, { id: uid(), role: "user", text: `Read this chart screenshot (${file.name || "pasted image"})` }]);
+      setBusy(true);
+      try {
+        const res = await readScreenshot(await imageToDataUrl(file), symbol, interval, ctrl.signal);
+        if (ctrl.signal.aborted) return;
+        const target = { symbol: res.symbol ?? symbol, interval: res.symbol ? res.interval : interval };
+        const drawn = [...res.overlays, ...res.detected];
+        changeOverlays(`ac:overlays:${target.symbol}:${target.interval}`, drawn, "screenshot levels");
+        if (target.symbol !== symbol || target.interval !== interval) setCell(target);
+        const msg: AgentMessage = {
+          id: uid(),
+          role: "agent",
+          text: res.summary,
+          overlays: drawn,
+          meta: `Screenshot read by ${res.engine}`,
+          symbol: target.symbol,
+          interval: target.interval,
+        };
+        setMessages((m) => [...m, msg]);
+        setQuickAnswer(msg);
+      } catch (err) {
+        if ((err as Error).name === "AbortError") return;
+        const msg: AgentMessage = { id: uid(), role: "error", text: (err as Error).message };
+        setMessages((m) => [...m, msg]);
+        setQuickAnswer(msg);
+      } finally {
+        if (analysisCtrl.current === ctrl) setBusy(false);
+      }
+    },
+    [symbol, interval, setMessages, changeOverlays, setCell],
+  );
+
   // Auto-detect levels on load, unless this chart already has saved AI overlays.
   const onDataReady = useCallback(() => {
     if (layout.autoLevels && overlaysLoaded && convoRef.current.overlays.length === 0) void runAnalysis("", { silent: true });
@@ -921,6 +963,7 @@ export default function ChartWorkspace() {
           overlayCount={overlays.length}
           pinned={pinnedSet}
           onSubmit={(p) => void runAnalysis(p)}
+          onImage={(f) => void readShot(f)}
           onClearOverlays={() => changeOverlays(overlaysKey, [], "clear AI levels")}
           onNewChat={newChat}
           chats={chats}

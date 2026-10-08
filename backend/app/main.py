@@ -25,6 +25,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import time
 from contextlib import asynccontextmanager
 
@@ -57,7 +58,7 @@ from .futures_data import FUTURES_PERIODS, FuturesDataService
 from .kimi_service import KimiService
 from .llm import LLMClient
 from .postmortem import PostMortemService, ReviewSettings
-from .market_data import INTERVAL_SECONDS, MarketData, MarketDataError
+from .market_data import INTERVAL_SECONDS, MarketData, MarketDataError, candles_to_df
 from .market_index import MarketIndexService
 from .market_metrics import MarketMetricsService
 from .model_choice import ModelChoice, ModelChooser
@@ -68,6 +69,10 @@ from .scanner import DEFAULT_WATCHLIST, WatchlistCache, tickers
 from .session_levels import SessionLevelsService
 from .schemas import AnalysisIntent
 from .schemas import norm_symbol as schemas_norm
+from .screenshot import SCHEMA as SHOT_SCHEMA
+from .screenshot import SYSTEM as SHOT_SYSTEM
+from .screenshot import ScreenshotRead, ScreenshotRequest, clean, compare, describe, split_image, to_overlays
+from .symbols import find_symbol
 from .ta_agent import analyze as analyze_chart
 from .schemas import (INTERVALS, AnalyzeRequest, AnalyzeResponse, CreateAlertsRequest, KimiResponse, MarketMetrics,
                       ScanResult, ZoneTriggerSpec)
@@ -695,6 +700,65 @@ async def replay_levels(request: Request, symbol: str = Query(...), interval: st
     res = await asyncio.to_thread(analyze_chart, df, intent, iv)
     return {"symbol": sym, "interval": iv, "time": int(df["time"].iloc[-1]), "source": source,
             "overlays": [o.model_dump() for o in res.overlays]}
+
+
+@app.post("/api/screenshot")
+async def read_screenshot(req: ScreenshotRequest, request: Request) -> dict:
+    """A pasted chart screenshot → the coin and timeframe it shows, its drawn levels, boxes, trendlines and
+    patterns as overlays, and how they compare with the levels the app's detectors find on the real candles."""
+    st = request.app.state
+    try:
+        image = split_image(req.image)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    llm: LLMClient = st.llm
+    if not llm.available():
+        raise HTTPException(503, "Reading a screenshot needs an AI model that can see images: set LLM_PROVIDER to "
+                                 "anthropic or openai, or use ollama with a vision model such as llama3.2-vision.")
+    hint = (f"The chart open in the app is {req.symbol} {req.interval or ''}; use it only when the image shows no "
+            "coin or timeframe." if req.symbol else "")
+    got = await llm.read_image(SHOT_SYSTEM, hint or "Read this chart.", image, SHOT_SCHEMA, "chart_screenshot")
+    if got is None:
+        raise HTTPException(502, "The AI model could not read the image. It may not support images.")
+    fields, engine = got
+    try:
+        raw = ScreenshotRead.model_validate(fields)
+    except ValueError as exc:  # pydantic's ValidationError
+        raise HTTPException(502, "The AI model's answer about the image was malformed") from exc
+    fallback = None
+    if req.symbol:
+        try:
+            fallback = _norm_symbol(schemas_norm(req.symbol))
+        except HTTPException:
+            fallback = None
+    read_sym = find_symbol(raw.symbol) if raw.symbol else None
+    if raw.symbol and not read_sym:
+        cleaned = re.sub(r"[^A-Za-z0-9]", "", raw.symbol).upper()
+        read_sym = cleaned if 5 <= len(cleaned) <= 20 and cleaned.endswith(("USDT", "USDC", "FDUSD")) else None
+    interval = raw.interval if raw.interval in INTERVALS else (req.interval if req.interval in INTERVALS else "4h")
+    symbol, df, source, detected = None, None, None, []
+    for sym in dict.fromkeys(x for x in (read_sym, fallback) if x):
+        try:
+            candles, source = await st.market.get_klines(sym, interval, 300)
+        except MarketDataError:
+            continue
+        if len(candles) >= 60:
+            symbol, df = sym, candles_to_df(candles)
+            break
+    if df is not None:
+        intent = AnalysisIntent(features=["support_resistance", "supply_demand"], window_timeframes=[], max_zones=4)
+        detected = (await asyncio.to_thread(analyze_chart, df, intent, interval)).overlays
+        read, dropped = clean(raw, (float(df["low"].min()), float(df["high"].max())))
+    else:
+        read, dropped = clean(raw)
+    matched = compare(read, detected) if df is not None else None
+    summary = describe(read, symbol or read_sym or raw.symbol, interval, matched, dropped)
+    if read_sym and symbol and symbol != read_sym:
+        summary += f" Could not load {read_sym}, so this is compared with {symbol}."
+    return {"symbol": symbol, "interval": interval, "read": read.model_dump(),
+            "overlays": [o.model_dump() for o in to_overlays(read)],
+            "detected": [o.model_dump() for o in detected], "summary": summary, "engine": engine,
+            "data_source": source}
 
 
 @app.post("/api/sell-check")
