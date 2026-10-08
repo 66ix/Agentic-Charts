@@ -67,6 +67,9 @@ class Settings:
     openai_model: str = field(default_factory=lambda: _env("OPENAI_MODEL", "gpt-4o-mini"))
     anthropic_api_key: str = field(default_factory=lambda: _env("ANTHROPIC_API_KEY", ""))
     anthropic_model: str = field(default_factory=lambda: _env("ANTHROPIC_MODEL", "claude-sonnet-5-5"))
+    # General questions ("what did the FOMC decide?") may search the web where the provider offers it: Anthropic's
+    # web search tool or OpenAI's Responses API. off = answer from the calendar and headlines only.
+    web_search: bool = field(default_factory=lambda: _env("WEB_SEARCH", "on").lower() not in ("off", "0", "false", "no"))
     # "tools": the model may look at other timeframes/coins before planning (agent_loop.py);
     # "plan": one structured call, faster and better suited to small local models.
     # The model picked in Settings → AI model, and its eval runs (model_choice.py); memory = not kept.

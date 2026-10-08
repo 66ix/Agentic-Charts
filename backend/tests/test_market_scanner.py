@@ -253,7 +253,8 @@ def test_api_status_and_run():
 
 def test_agent_answers_best_setups_from_the_scanner():
     scanner = MarketScanner(MarketData(), StubTrack(), settings=_settings())
-    req = AnalyzeRequest(symbol="INJUSDT", interval="4h", prompt="scan the market for shorts on the daily")
+    req = AnalyzeRequest(symbol="INJUSDT", interval="4h", prompt="scan the market for shorts on the daily",
+                         spot_only=False)
     llm = LLMClient()
 
     async def go():

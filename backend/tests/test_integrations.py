@@ -115,7 +115,7 @@ def test_llm_structured_intent_ollama_openai_anthropic():
 
     def anthropic(req):
         body = json.loads(req.content)
-        assert body["tool_choice"]["type"] == "tool"
+        assert body["tool_choice"]["type"] == "auto" and [t["name"] for t in body["tools"]] == ["analysis_plan"]
         return httpx.Response(200, json={"content": [{"type": "tool_use", "name": "analysis_plan", "input": plan}]})
 
     for provider, handler in (("ollama", ollama), ("openai", openai), ("anthropic", anthropic)):

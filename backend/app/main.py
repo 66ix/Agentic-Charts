@@ -39,6 +39,9 @@ from .config import get_settings
 from .derivatives import DerivativesService
 from .gridbot import GridBotCreate, GridBotPatch, GridBotService, GridSimulateRequest, error_text
 from .grid_planner import GridBacktestRequest, GridPlanRequest, backtest_grid, plan_grid
+from .dip_ladder import LadderRequest, plan_ladder
+from .top_down import ladder as walk_ladder
+from .top_down import walk
 from .binance_account import BinanceAccount, BinanceApiError, BinanceKeyError
 from .binance_import import BinanceImportService, ClassifyRequest, ImportSettings
 from .journal import JournalPatch, JournalService, NewJournalEntry, entry_json
@@ -572,6 +575,32 @@ async def gridbot_plan(request: Request, body: dict = Body(...)) -> dict:
 async def gridbot_backtest(request: Request, body: dict = Body(...)) -> dict:
     req: GridBacktestRequest = _gridbot_body(GridBacktestRequest, body)
     return (await _gridbot_run(backtest_grid(request.app.state.gridbots, req))).model_dump()
+
+
+# Spot tools:
+#   POST   /api/top-down                  {symbol, start?, end?} → TopDownResult (top_down.py)
+#   POST   /api/dip-ladder                {symbol, budget?, rungs?, timeframe?, days?, fee_rate?} → LadderResult
+
+
+@app.post("/api/top-down")
+async def top_down_walk(request: Request, body: dict = Body(...)) -> dict:
+    symbol = _norm_symbol(str(body.get("symbol") or ""))
+    tfs = walk_ladder(str(body.get("start") or "1d"), str(body.get("end") or "15m"))
+    try:
+        return (await walk(request.app.state.market, symbol, tfs[0], tfs[-1])).model_dump()
+    except MarketDataError as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+
+@app.post("/api/dip-ladder")
+async def dip_ladder(request: Request, body: dict = Body(...)) -> dict:
+    req: LadderRequest = _gridbot_body(LadderRequest, body)
+    try:
+        return (await plan_ladder(request.app.state.market, req)).model_dump()
+    except MarketDataError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @app.get("/api/gridbots")

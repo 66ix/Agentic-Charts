@@ -18,9 +18,11 @@ import re
 import time
 import uuid
 
+from . import general
 from .agent_loop import Toolbox, plan_with_tools
 from .config import get_settings
 from .derivatives import DerivativesService
+from .dip_ladder import LadderRequest, LadderResult, describe_ladder, ladder_facts, plan_ladder
 from .events import EventsService
 from .futures_data import FuturesDataService
 from .grid_planner import GridPlanRequest, describe_plan, plan_grid
@@ -46,7 +48,8 @@ from .schemas import (
     ZoneTriggerSpec,
     is_custom_symbol,
 )
-from .ta_agent import ORANGE, TEAL, _fmt, analyze, describe, higher_timeframes, rgba
+from .ta_agent import GREEN, ORANGE, TEAL, _fmt, analyze, describe, higher_timeframes, htf_zones, rgba
+from .top_down import TopDownResult, describe_walk, walk, walk_facts
 from .trade_plan import build_plan, plan_overlays
 from .zone_triggers import describe_trigger, detect_now, spec_from_intent
 
@@ -158,7 +161,8 @@ def _compact(facts: dict) -> dict:
 
 def make_toolbox(market: MarketData, derivatives: DerivativesService | None, watchlist: list[str],
                  kimi: KimiService | None = None, futures: FuturesDataService | None = None,
-                 events: EventsService | None = None, scanner: MarketScanner | None = None) -> Toolbox:
+                 events: EventsService | None = None, scanner: MarketScanner | None = None,
+                 spot_only: bool = False) -> Toolbox:
     async def look(symbol: str, tf: str, features: list[str]) -> dict:
         candles, source = await market.get_klines(symbol, tf, 400)
         frames = await _confluence_frames(market, symbol, tf, features)
@@ -197,6 +201,8 @@ def make_toolbox(market: MarketData, derivatives: DerivativesService | None, wat
             return {"error": "the market scan is still running; its results will be ready in a minute"}
         except Exception as exc:  # network: the planner carries on without it
             return {"error": f"the market scan failed: {exc}"}
+        if spot_only:  # shorts are of no use to a spot trader: longs, and the spot buys among them
+            return {**market_scan_facts(res, "long", 6), "spot_buys": spot_facts(res, 5)}
         return market_scan_facts(res, None if direction == "any" else direction, 8)
 
     return Toolbox(look=look, scan=scan_tool, context=context, kimi=read_kimi if kimi else None,
@@ -308,6 +314,99 @@ def market_scan_facts(res: MarketScanResult, direction: str | None, n: int = 6) 
     }
 
 
+def spot_facts(res: MarketScanResult, n: int = 6) -> list[dict]:
+    """The best spot buys of a market scan for the narrator: buy zone, targets and invalidation."""
+    out = []
+    for r in res.best_spot(n):
+        p = r.plan
+        out.append({"symbol": r.symbol, "buy_zone": [p.zone_low, p.zone_high] if p.zone_low else [r.entry, r.entry],
+                    "buy_at": r.entry, "targets": [t.price for t in p.targets][:3], "invalidation": r.stop,
+                    "basis": r.basis, "higher_timeframes": p.zone_htf, "distance_pct": r.distance_pct,
+                    "timeframes_agreeing": f"{r.agreement.aligned:g}/{r.agreement.total}",
+                    "track_record": r.track_record.summary if r.track_record else None})
+    return out
+
+
+def grid_facts(res: MarketScanResult, n: int = 6) -> list[dict]:
+    return [{"symbol": g.symbol, "range": [g.low, g.high], "width_pct": g.width_pct, "crossings": g.crossings,
+             "days": g.days, "price_position_pct": g.position_pct, "note": g.note} for g in res.grid_coins[:n]]
+
+
+TP_COLOR = GREEN
+MAX_TAKE_PROFITS = 4
+
+
+def take_profits(levels: list, last: float, frames: dict, tfl: str) -> list[dict]:
+    """Where to sell coins held: resistance, supply and window highs above price on this timeframe and the next one
+    up, nearest first, one per price area."""
+    rows = [{"low": lv.low, "high": lv.high, "label": lv.label} for lv in levels
+            if lv.kind in ("resistance", "supply", "window_high") and lv.low > last * 1.002]
+    for tf, df in list(frames.items())[:1]:
+        for z in htf_zones(df):
+            if z.kind in ("resistance", "supply") and z.price_low > last * 1.002:
+                rows.append({"low": z.price_low, "high": z.price_high, "label": f"{tf.upper()} {z.kind}"})
+    rows.sort(key=lambda r: r["low"])
+    out: list[dict] = []
+    for r in rows:
+        if out and r["low"] <= out[-1]["high"]:  # overlaps the previous one: same area
+            out[-1]["label"] += f" + {r['label']}"
+            continue
+        out.append({**r, "gain_pct": round((r["low"] / last - 1) * 100, 2)})
+        if len(out) == MAX_TAKE_PROFITS:
+            break
+    return out
+
+
+def take_profit_overlays(rows: list[dict]) -> list:
+    return [HorizontalLineOverlay(id=_new_id(), kind="plan_target", price=r["low"], color=TP_COLOR,
+                                  line_style="dashed", line_width=2,
+                                  label=f"TP{i + 1} +{r['gain_pct']:g}% ({r['label']})") for i, r in enumerate(rows)]
+
+
+def describe_take_profits(rows: list[dict], symbol: str) -> str:
+    if not rows:
+        return f"No resistance or supply above price on {symbol} right now: price is in open space."
+    parts = [f"TP{i + 1} {_fmt(r['low'])} (+{r['gain_pct']:g}%, {r['label']})" for i, r in enumerate(rows)]
+    return f"Where to take profit on {symbol}: " + "; ".join(parts) + ". Scaling out across them locks in gains early."
+
+
+def describe_spot(res: MarketScanResult) -> str:
+    rows = res.best_spot(3)
+    if not rows:
+        return f"No spot buys at higher-timeframe demand on the {res.interval} scan right now."
+    parts = [f"{r.symbol} at {_fmt(r.entry)} (targets {', '.join(_fmt(t.price) for t in r.plan.targets[:2])}, wrong "
+             f"below {_fmt(r.stop)})" for r in rows]
+    return f"Best spot buys on the {res.interval} scan: " + "; ".join(parts) + "."
+
+
+def describe_grid_coins(res: MarketScanResult) -> str:
+    rows = res.grid_coins[:3]
+    if not rows:
+        return f"No coin has been ranging cleanly enough for a grid bot on the {res.interval} scan."
+    return f"Best grid bot coins on {res.interval}: " + "; ".join(f"{g.symbol}: {g.note}" for g in rows)
+
+
+SPOT_SHORT_NOTE = ("Spot mode is on, so there is no short plan. For spot that means waiting for a lower buy zone, or "
+                   "taking profit on coins already held.")
+
+
+async def _walk(market: MarketData, symbol: str) -> TopDownResult | None:
+    try:
+        return await walk(market, symbol)
+    except Exception as exc:  # the answer goes out without it and says so
+        log.warning("Top-down walk on %s failed: %s", symbol, exc)
+        return None
+
+
+async def _ladder(market: MarketData, symbol: str, tf: str) -> LadderResult | None:
+    try:
+        return await plan_ladder(market, LadderRequest(symbol=symbol, timeframe=tf if tf in ("1h", "4h", "1d") else
+                                                       "4h"))
+    except Exception as exc:
+        log.warning("Dip ladder on %s failed: %s", symbol, exc)
+        return None
+
+
 async def _kimi_facts(kimi: KimiService | None, symbol: str, tf: str) -> dict | None:
     if kimi is None:
         return None
@@ -338,12 +437,12 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
                        gridbots: GridBotService | None = None) -> AnalyzeResponse:
     settings = get_settings()
     scanner = scanner or MarketScanner(market)
-    chart = ChartContext(req.symbol, req.interval, req.watchlist)
+    chart = ChartContext(req.symbol, req.interval, req.watchlist, req.spot_only)
     steps: list[str] = []
     research: list[dict] = []
     loop = None
     if req.prompt.strip() and llm.available() and settings.agent_mode == "tools":
-        box = make_toolbox(market, derivatives, req.watchlist, kimi, futures, events, scanner)
+        box = make_toolbox(market, derivatives, req.watchlist, kimi, futures, events, scanner, req.spot_only)
         loop = await plan_with_tools(llm, req.prompt, req.history, req.overlays, req.previous_intent, chart, box,
                                      settings.agent_max_steps)
     if loop:
@@ -351,6 +450,13 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
     else:
         intent, intent_engine = await llm.parse_intent(req.prompt, req.history, req.overlays, req.previous_intent,
                                                        chart)
+    # Spot only: a short plan becomes a note, "what's the trade?" a long.
+    spot_note = None
+    if req.spot_only and intent.trade_plan == "short":
+        spot_note = SPOT_SHORT_NOTE
+        intent = intent.model_copy(update={"trade_plan": None, "keep_existing": True})
+    elif req.spot_only and intent.trade_plan == "auto":
+        intent = intent.model_copy(update={"trade_plan": "long"})
 
     # Where to look, and whether the chart moves there. Another coin always moves the chart; another
     # timeframe only when the user asked to switch ("H4 supply" on a 1h chart is drawn on the 1h chart).
@@ -369,6 +475,8 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
     features = list(intent.features)
     if intent.trade_plan and not {"support_resistance", "supply_demand"} & set(features):
         features += ["support_resistance", "supply_demand"]
+    if intent.take_profit:
+        features += [f for f in ("support_resistance", "supply_demand") if f not in features]
     run_intent = intent.model_copy(update={"features": features})
 
     async def candles_for_chart():
@@ -390,7 +498,7 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
             return []
         return await scan(market, req.watchlist or DEFAULT_WATCHLIST, tf, intent.scan_filter)
 
-    scan_direction = SCAN_DIRECTIONS.get(intent.scan_filter)
+    scan_direction = "long" if req.spot_only else SCAN_DIRECTIONS.get(intent.scan_filter)
 
     async def market_scan() -> MarketScanResult | str | None:
         if not intent.scan_market:
@@ -414,7 +522,14 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
     # Session / previous day-week-month / opening-range levels, so the answer can say "price is at the London high".
     want_levels = levels is not None and not custom_chart
     want_grid = intent.grid_plan and not custom_chart
-    (candles, source), higher, frames, rows, deriv, kimi_facts, fut, upcoming, headlines, mscan, lvl, grid = await asyncio.gather(
+    want_walk = intent.top_down and not custom_chart
+    want_ladder = intent.dip_ladder and not custom_chart
+    want_general = intent.general_question and bool(req.prompt.strip())
+    extras = asyncio.gather(
+        _walk(market, symbol) if want_walk else _none(),
+        _ladder(market, symbol, tf) if want_ladder else _none(),
+        general.context(events, req.prompt) if want_general else _none())
+    (candles, source), higher, frames, rows, deriv, kimi_facts, fut, upcoming, headlines, mscan, lvl, grid, extra = await asyncio.gather(
         candles_for_chart(), windows(),
         _confluence_frames(market, symbol, tf, [] if custom_chart else features), scan_rows(),
         derivatives.symbol_snapshot(symbol) if want_deriv else _none(),
@@ -423,7 +538,8 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         _upcoming(events, EVENT_HOURS) if want_events else _none(),
         _headlines(events, symbol) if want_news else _empty(), market_scan(),
         _guarded(levels.get(symbol, tf), "session levels") if want_levels else _none(),
-        _grid_plan(gridbots, symbol) if want_grid else _none())
+        _grid_plan(gridbots, symbol) if want_grid else _none(), extras)
+    walked, ladder, general_ctx = extra
 
     df = candles_to_df(candles)
     # Detection is CPU-bound (SciPy); keep the event loop free for streams.
@@ -446,6 +562,22 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
             plan_ovs = plan_overlays(plan, int(df["time"].iloc[-1]))
             for ov in plan_ovs:
                 ov.id = _new_id()
+    tp_rows: list[dict] = []
+    if intent.take_profit:
+        tp_rows = take_profits(result.levels, result.stats.last_price, frames, tf)
+        facts["take_profit"] = tp_rows
+        plan_ovs = plan_ovs + take_profit_overlays(tp_rows)
+    if ladder:
+        facts["ladder"] = ladder_facts(ladder)
+        plan_ovs = plan_ovs + [ov.model_copy(update={"id": _new_id()}) for ov in ladder.overlays]
+    if walked:
+        facts["top_down"] = walk_facts(walked)
+    elif want_walk:
+        facts["top_down"] = {"error": "The top-down walk could not run right now."}
+    if req.spot_only:
+        facts["trading_style"] = "spot only: buys coins outright, no shorts, futures or leverage"
+    if spot_note:
+        facts["spot_note"] = spot_note
     custom = custom_overlays(intent)
     triggers, trigger_lines = await _trigger_alerts(intent, market, symbol, tf, custom_chart, custom)
     new = result.overlays + plan_ovs + custom
@@ -474,7 +606,16 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         facts["scan"] = [r.model_dump(include={"symbol", "last_price", "change_pct", "trend", "rsi", "signals",
                                                "nearest_kind", "distance_pct"}) for r in rows[:6]]
     setups: list[MarketSetup] = []
-    if isinstance(mscan, MarketScanResult):
+    grid_coins = []
+    if isinstance(mscan, MarketScanResult) and intent.scan_kind == "spot_buys":
+        facts["spot_buys"] = spot_facts(mscan)
+        facts["scan_timeframe"] = mscan.interval
+        setups = mscan.best_spot(10)
+    elif isinstance(mscan, MarketScanResult) and intent.scan_kind == "grid_coins":
+        facts["grid_coins"] = grid_facts(mscan)
+        facts["scan_timeframe"] = mscan.interval
+        grid_coins = mscan.grid_coins[:10]
+    elif isinstance(mscan, MarketScanResult):
         facts["market_scan"] = market_scan_facts(mscan, scan_direction)
         setups = mscan.best(10, scan_direction)
     elif intent.scan_market:
@@ -503,7 +644,31 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
     if want_grid:  # the grid plan leads the answer; the chart summary follows
         fallback = (describe_plan(grid) if grid else "Couldn't plan a grid bot for this coin right now.") + " " + \
             fallback
-    summary, narrate_engine = await llm.narrate(req.prompt, narrate_facts, fallback, req.history)
+    lead = []  # answers that lead with their own result, before the chart summary
+    if want_walk:
+        lead.append(describe_walk(walked) if walked else "The top-down walk could not run right now.")
+    if want_ladder:
+        lead.append(describe_ladder(ladder) if ladder else "Couldn't plan a dip-buy ladder for this coin right now.")
+    if intent.take_profit:
+        lead.append(describe_take_profits(tp_rows, symbol))
+    if isinstance(mscan, MarketScanResult) and intent.scan_kind == "spot_buys":
+        lead.append(describe_spot(mscan))
+    if isinstance(mscan, MarketScanResult) and intent.scan_kind == "grid_coins":
+        lead.append(describe_grid_coins(mscan))
+    if spot_note:
+        lead.append(spot_note)
+    if lead:
+        fallback = " ".join(lead) + " " + fallback
+    sources: list[dict[str, str]] = []
+    if want_general and general_ctx is not None:
+        answered = await llm.answer(req.prompt, general_ctx, req.history, req.spot_only)
+        if answered:
+            summary, narrate_engine, sources = answered
+        else:
+            summary, narrate_engine = general.template_answer(req.prompt, general_ctx), "template"
+        sources = sources or general.sources_from(general_ctx)
+    else:
+        summary, narrate_engine = await llm.narrate(req.prompt, narrate_facts, fallback, req.history)
 
     return AnalyzeResponse(
         symbol=symbol,
@@ -524,6 +689,10 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         grid_plan=grid.model_dump() if grid else None,
         steps=steps,
         trigger_alerts=triggers,
+        grid_coins=grid_coins,
+        top_down=walked.model_dump() if walked else None,
+        ladder=ladder.model_dump() if ladder else None,
+        sources=sources,
     )
 
 

@@ -106,7 +106,9 @@ TOOLS: list[dict[str, Any]] = [
 LOOP_SYSTEM = (
     "You are the planning step of a crypto charting agent. {chart} You can call look_at_chart, scan_watchlist, "
     "scan_market, read_kimi and market_context to gather facts (at most {steps} calls in total), then you must call "
-    "draw_on_chart exactly once with the plan for what to show. Only look first when the answer depends on "
+    "draw_on_chart exactly once with the plan for what to show. A question that isn't about a chart (today's date, "
+    "FOMC or CPI results, coin upgrades, what something means) needs no looking: call draw_on_chart straight away "
+    "with general_question true, no features and keep_existing true. Only look first when the answer depends on "
     "something you can't see yet: another timeframe ('does the daily agree?'), another coin ('compare with ETH'), "
     "several coins, funding/open interest, or the user's Kimi Cooked indicator on another coin or timeframe. For a "
     "simple request call draw_on_chart straight away.\n\nHow to fill draw_on_chart: " + INTENT_SYSTEM
@@ -168,7 +170,8 @@ async def plan_with_tools(llm: LLMClient, prompt: str, history: list[ChatTurn], 
                           max_steps: int = 4) -> LoopResult | None:
     context = llm.context_block(history, overlays, previous, chart)
     messages: list[dict] = [{"role": "user", "text": f"{context}\n\nNEW REQUEST: {prompt}" if context else prompt}]
-    system = LOOP_SYSTEM.format(chart=f"The user is looking at {chart.symbol} on {chart.interval}.",
+    spot = " The user trades spot only: no shorts, futures or leverage." if chart.spot_only else ""
+    system = LOOP_SYSTEM.format(chart=f"The user is looking at {chart.symbol} on {chart.interval}.{spot}",
                                 steps=max_steps)
     steps: list[str] = []
     research: list[dict] = []
