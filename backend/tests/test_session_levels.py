@@ -171,7 +171,7 @@ def test_level_facts_say_where_price_is():
     assert f["below"] == [{"level": "London session low (session in progress)", "price": 97.0, "distance_pct": -3.0}]
     assert f["sessions_in_progress"] == ["London"]  # the taken previous-day low is not offered as a level
     text = " ".join(level_lines(f))
-    assert "Price is at the London session high" in text and "previous day high 102" in text
+    assert "Price is at the London session high" in text and "previous day high at 102" in text
 
 
 # ------------------------------------------------------------------------------------------ service

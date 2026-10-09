@@ -27,6 +27,7 @@ time, open, high, low, close, volume (oldest → newest).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Iterable, Literal
 
@@ -539,6 +540,85 @@ def zone_record(df: pd.DataFrame, z: Zone, atr_v: float) -> dict:
     return {"held": held, "broke": broke, "tests": held + broke}
 
 
+# ------------------------------------------------------- a price asked about
+
+PRICE_NEAR_ATR = 0.3   # a zone this close to the asked price counts as "at" it
+VISIT_ATR = 0.15       # a candle whose range comes this close to the price visited it
+REACT_ATR = 0.5        # after a visit, the first close this far away says which way it went
+
+
+def price_check(df: pd.DataFrame, price: float, tf: str, frames: dict[str, pd.DataFrame] | None = None) -> dict:
+    """What sits at a price the user asked about ("what's at 7.15?"): the zone there on this timeframe and the ones
+    above, whether it is support or resistance now, how price reacted on its visits, and where price goes next if it
+    breaks. Pure: no I/O."""
+    df = df.reset_index(drop=True)
+    atr_s = atr(df)
+    atr_v = float(atr_s.iloc[-1])
+    last = float(df["close"].iloc[-1])
+    h, lo_, c = (df[k].to_numpy(dtype=float) for k in ("high", "low", "close"))
+    role = "resistance" if price > last else "support"
+    out: dict = {"price": price, "timeframe": TF_LABEL.get(tf, tf), "role_now": role,
+                 "distance_pct": round((price / last - 1) * 100, 2),
+                 "distance_atr": round(abs(price - last) / atr_v, 2) if atr_v else None}
+
+    highs, lows = find_swings(df, atr_v)
+    zones = cluster_levels(highs + lows, atr_v, last, len(df)) + supply_demand_zones(df, atr_s)
+    pad = PRICE_NEAR_ATR * atr_v
+    here = [z for z in zones if z.price_low - pad <= price <= z.price_high + pad]
+    if here:
+        z = max(here, key=lambda z: (z.price_low <= price <= z.price_high, z.score))
+        row = {"kind": z.kind, "low": z.price_low, "high": z.price_high,
+               "touches" if z.kind in ("support", "resistance") else "tests":
+                   z.touches if z.kind in ("support", "resistance") else z.tests}
+        rec = zone_record(df, z, atr_v)
+        if rec["tests"]:
+            row["held"], row["tests_resolved"] = rec["held"], rec["tests"]
+        out["zone"] = row
+    else:
+        out["zone"] = None
+    out["higher_timeframes"] = [TF_LABEL.get(t, t) for t, f in (frames or {}).items()
+                                if any(z.price_low - pad <= price <= z.price_high + pad for z in htf_zones(f))]
+
+    # Visits: runs of candles whose range reached the price. Each is judged by the first close REACT_ATR away after it.
+    tol, react = VISIT_ATR * atr_v, REACT_ATR * atr_v
+    touched = (lo_ <= price + tol) & (h >= price - tol)
+    rejected = crossed = 0
+    last_visit = None
+    i, n = 1, len(df)
+    while i < n:
+        if not touched[i]:
+            i += 1
+            continue
+        start = i
+        while i < n and touched[i]:
+            i += 1
+        last_visit = start
+        from_above = c[start - 1] > price
+        for j in range(start, n):
+            if abs(c[j] - price) >= react:
+                if (c[j] > price) == from_above:
+                    rejected += 1
+                else:
+                    crossed += 1
+                break
+    out["visits"] = {"bounced": rejected, "crossed": crossed,
+                     "last_bars_ago": n - 1 - last_visit if last_visit is not None else None, "bars_checked": n}
+
+    # If it breaks: the next zone beyond it, or the data's extreme when nothing is there.
+    up = role == "resistance"
+    edge = (out["zone"]["high"] if up else out["zone"]["low"]) if out["zone"] else price
+    beyond = [z for z in zones if (z.price_low > edge if up else z.price_high < edge)]
+    if beyond:
+        nz = min(beyond, key=lambda z: z.price_low if up else -z.price_high)
+        out["if_breaks"] = {"direction": "up" if up else "down", "next_kind": nz.kind, "next_low": nz.price_low,
+                            "next_high": nz.price_high}
+    else:
+        extreme = float(h.max() if up else lo_.min())
+        out["if_breaks"] = {"direction": "up" if up else "down", "next_kind": None,
+                            "open_to": extreme if (extreme > edge if up else extreme < edge) else None}
+    return out
+
+
 def _zone_fact(z: Zone, last: float, atr_v: float, count_key: str, count: int) -> dict:
     inside = z.price_low <= last <= z.price_high
     edge = z.price_low if z.price_low > last else z.price_high
@@ -798,25 +878,6 @@ def analyze(
     return AnalysisResult(overlays, stats, facts, levels, [s.price for s in highs], [s.price for s in lows], bias)
 
 
-def _held(z: dict) -> str:
-    t = z.get("tests_resolved")
-    return f", held {z['held']} of {t} test{'s' if t != 1 else ''}" if t else ""
-
-
-def _touches(n: int) -> str:
-    return f"{n} touch" if n == 1 else f"{n} touches"
-
-
-def _where(z: dict) -> str:
-    if z.get("inside"):
-        return ", price inside"
-    return f", {z['distance_atr']} ATR away" if z.get("distance_atr") is not None else ""
-
-
-def _htf(z: dict) -> str:
-    return f", lines up with {'/'.join(z['htf_confluence'])}" if z.get("htf_confluence") else ""
-
-
 def _kimi_lines(k: dict) -> list[str]:
     if k.get("error"):
         return [k["error"] + "."]
@@ -859,25 +920,6 @@ def _kimi_pattern_lines(k: dict) -> list[str]:
     return out
 
 
-def _futures_lines(f: dict) -> list[str]:
-    bits = []
-    if (fu := f.get("funding")) and fu.get("rate_pct") is not None:
-        bits.append(f"funding {fu['rate_pct']}%")
-    if (oi := f.get("open_interest")) and oi.get("change_24h_pct") is not None:
-        bits.append(f"open interest {oi['change_24h_pct']:+}% in 24h")
-    if (ls := f.get("long_short")) and ls.get("ratio") is not None:
-        bits.append(f"long/short {ls['ratio']}")
-    if (cv := f.get("cvd_24h")) and cv.get("direction"):
-        bits.append(f"24h spot flow: {cv['direction']} ({cv['buy_pct']}% taker buys)")
-    out = ["Futures: " + ", ".join(bits) + "."] if bits else []
-    liq = f.get("est_liquidations") or {}
-    near = [f"{side} {_fmt(c['price_low'])}–{_fmt(c['price_high'])}" for side, c in
-            (("above", liq.get("above")), ("below", liq.get("below"))) if c]
-    if near:
-        out.append("Estimated liquidation clusters " + ", ".join(near) + ".")
-    return out
-
-
 def market_mood(overview: dict | None) -> str | None:
     """'Market mood: Fear & Greed 31/100 · Fear, BTC dominance 57.30% (+0.12% 24h).' from the header bar's live
     values; None when neither is live."""
@@ -905,6 +947,10 @@ def _position_lines(position: dict | None, holdings: dict | None) -> list[str]:
     if position:
         if position.get("spot"):
             lines.append(f"You hold {_spot_text(position['spot'])}.")
+        for e in position.get("earn", []):
+            lines.append(f"You {'also ' if position.get('spot') else ''}have {e['qty']:g} {e['asset']} in Simple Earn "
+                         f"{e['product']}"
+                         + (f" at {e['apr_pct']:g}% APR" if e.get("apr_pct") is not None else "") + ".")
         for p in position.get("futures", []):
             line = f"Your futures {p['side']}: {p['qty']:g} at {_fmt(p['entry_price'])}"
             line += f", {p['leverage']}x" if p.get("leverage") else ""
@@ -916,125 +962,314 @@ def _position_lines(position: dict | None, holdings: dict | None) -> list[str]:
         lines.append(f"Your holdings: ${holdings['spot_value_usd']:,.0f} in {len(spot)} coins"
                      + (f" plus ${holdings['stablecoins_usd']:,.0f} in stablecoins" if holdings.get("stablecoins_usd")
                         else "") + (": " + "; ".join(_spot_text(r) for r in spot[:8]) if spot else "") + ".")
+        if holdings.get("earn"):
+            lines.append(f"In Simple Earn: ${holdings['earn_value_usd']:,.0f} across " + "; ".join(
+                f"{e['qty']:g} {e['asset']} ({e['product']}" + (f", {e['apr_pct']:g}% APR)" if e.get("apr_pct")
+                                                                  is not None else ")") for e in holdings["earn"][:8])
+                         + ".")
         for p in holdings.get("futures", []):
             lines.append(f"Futures {p['symbol']} {p['side']} {p['qty']:g} at {_fmt(p['entry_price'])}"
                          + (f", PnL {p['unrealized_pnl']:+,.2f}" if p.get("unrealized_pnl") is not None else "") + ".")
     return lines
 
 
-def describe(facts: dict, symbol: str) -> str:
-    """Plain-English summary of the analysis, used when no LLM is configured."""
+_SMALL = {1: "once", 2: "twice"}
+SENTENCES = {"short": 2, "normal": 6}  # sentences of analysis per answer length ("detailed" keeps them all)
+
+
+def _times(n: int) -> str:
+    return _SMALL.get(n, f"{n} times")
+
+
+def _base(symbol: str) -> str:
+    for q in ("USDT", "USDC", "FDUSD", "BUSD"):
+        if symbol.endswith(q) and len(symbol) > len(q):
+            return symbol[: -len(q)]
+    return symbol
+
+
+def _away(z: dict, side: str) -> str:
+    """'price is inside it' / 'right next to price' / '0.96 ATR below price'."""
+    if z.get("inside"):
+        return "price is trading inside it"
+    d = z.get("distance_atr")
+    if d is None:
+        return ""
+    if d < 0.3:
+        return "right next to price"
+    return f"{d:g} ATR {side} price"
+
+
+def _record(z: dict, count_key: str) -> str:
+    """How a zone has done, after "it": "has held every one of 3 tests", "is fresh: price hasn't been back"."""
+    t = z.get("tests_resolved")
+    held = z.get("held", 0)
+    if t:
+        if held == t:
+            return f"has held {'its only test' if t == 1 else 'both tests' if t == 2 else f'all {t} tests'}"
+        if held == 0:
+            return f"has broken {'on its only test' if t == 1 else f'on all {t} tests'}"
+        return f"has held {held} of {t} tests"
+    if count_key == "tests":
+        return "is fresh: price hasn't been back to it" if z.get("tests") == 0 else \
+            f"has been tested {_times(z['tests'])}"
+    return f"has been touched {_times(z['touches'])}"
+
+
+def _article(label: str) -> str:
+    """'an H4', 'a D1': M and H are read "em" and "aitch"."""
+    return "an" if label[:1] in "AEFHILMNORSX" else "a"
+
+
+def _confluence(z: dict) -> str:
+    htf = z.get("htf_confluence")
+    return f", and it lines up with {_article(htf[0])} {'/'.join(htf)} zone" if htf else ""
+
+
+def _zone_sentence(kind: str, z: dict, tf: str) -> str:
+    above = kind in ("resistance", "supply")
+    side = "above" if above else "below"
+    rng = f"{_fmt(z['low'])}–{_fmt(z['high'])}"
+    name = {"resistance": "resistance", "support": "support", "supply": "supply zone", "demand": "demand zone"}[kind]
+    where = _away(z, side)
+    record = _record(z, "touches" if kind in ("resistance", "support") else "tests")
+    return f"The nearest {tf} {name} is {rng}" + (f", {where}" if where else "") + f"; it {record}" \
+        + _confluence(z) + "."
+
+
+def _break_sentence(br: dict) -> str:
+    kind = "change of character" if br["type"] == "CHoCH" else "break of structure"
+    who = "sellers" if br["direction"] == "bearish" else "buyers"
+    ago = "on the last candle" if br["bars_ago"] == 0 else f"{br['bars_ago']} candle{'s' if br['bars_ago'] != 1 else ''} ago"
+    lead = "Structure flipped" if br["type"] == "CHoCH" else "Structure broke"
+    return f"{lead} {br['direction']} {ago} (a {kind} through {_fmt(br['level'])}), so {who} have the upper hand."
+
+
+def _momentum_sentence(mom: dict) -> str | None:
+    r = mom.get("rsi")
+    if mom.get("divergence"):
+        name, _, prices = mom["divergence"].partition(" (")
+        return f"RSI is {r} with a {name} divergence" + (f" ({prices}" if prices else "") + "."
+    if r is not None and r >= 70:
+        return f"RSI is {r}, overbought."
+    if r is not None and r <= 30:
+        return f"RSI is {r}, oversold."
+    return None
+
+
+def _futures_sentence(funding: float | None, oi: float | None, extra: list[str] | None = None) -> str | None:
+    bits = []
+    if funding is not None:
+        bits.append(f"funding is {funding}%")
+    if oi is not None:
+        trend = "positions are being closed" if oi <= -5 else "new positions are opening" if oi >= 5 else ""
+        bits.append(f"open interest is {'down' if oi < 0 else 'up'} {abs(oi):g}% in 24h"
+                    + (f" ({trend})" if trend else ""))
+    bits += extra or []
+    if not bits:
+        return None
+    return "On futures, " + (", ".join(bits[:-1]) + " and " + bits[-1] if len(bits) > 1 else bits[0]) + "."
+
+
+def _futures_lines(f: dict) -> list[str]:
+    extra = []
+    if (ls := f.get("long_short")) and ls.get("ratio") is not None:
+        extra.append(f"the long/short ratio is {ls['ratio']}")
+    if (cv := f.get("cvd_24h")) and cv.get("direction"):
+        extra.append(f"24h spot flow is {cv['direction']} ({cv['buy_pct']}% taker buys)")
+    fu, oi = f.get("funding") or {}, f.get("open_interest") or {}
+    out = [s] if (s := _futures_sentence(fu.get("rate_pct"), oi.get("change_24h_pct"), extra)) else []
+    liq = f.get("est_liquidations") or {}
+    near = [f"{side} at {_fmt(c['price_low'])}–{_fmt(c['price_high'])}" for side, c in
+            (("above", liq.get("above")), ("below", liq.get("below"))) if c]
+    if near:
+        out.append("Estimated liquidation clusters sit " + " and ".join(near) + ".")
+    return out
+
+
+def _price_sentences(q: dict, last: float) -> list[str]:
+    """The answer to "what's at 7.15?" in a few plain sentences."""
+    p, tf = _fmt(q["price"]), q["timeframe"]
+    where = "above" if q["price"] > last else "below"
+    out = []
+    z = q.get("zone")
+    away = f"{abs(q['distance_pct']):g}% {where} price"
+    htf = q.get("higher_timeframes")
+    if z:
+        kind, acts = z["kind"], q["role_now"]
+        name = kind if kind in ("support", "resistance") else f"{kind} zone"
+        sr = kind in ("support", "resistance")
+        count = z.get("touches") if sr else z.get("tests")
+        if z.get("tests_resolved"):
+            bits = [f"held {z['held']} of {z['tests_resolved']} tests"]
+        else:
+            bits = [f"touched {_times(count)}" if sr else "still fresh" if count == 0 else f"tested {_times(count)}"]
+        same_side = kind in (acts, {"resistance": "supply", "support": "demand"}[acts])
+        flip = "" if same_side else f" (it formed as {kind}, but price is now on the other side of it)"
+        out.append(f"{p} is {acts} on the {tf}, {away}: it sits in the {tf} {name} {_fmt(z['low'])}–{_fmt(z['high'])}"
+                   f"{flip}, {', '.join(bits)}" + (f", and {_article(htf[0])} {'/'.join(htf)} zone covers it too." if htf else "."))
+    else:
+        out.append(f"There's no {tf} zone at {p} ({away}), so on this timeframe it's only minor {q['role_now']}"
+                   + (f", though {_article(htf[0])} {'/'.join(htf)} zone covers it." if htf else "."))
+    v = q.get("visits") or {}
+    b, c, bars = v.get("bounced", 0), v.get("crossed", 0), v.get("bars_checked", 0)
+    if b + c == 0:
+        out.append(f"Price hasn't traded there in the last {bars} candles.")
+    else:
+        ago = f", most recently {v['last_bars_ago']} candles ago" if v.get("last_bars_ago") else ""
+        if b and c:
+            verdict = ("it has mostly turned price away" if b > c else "price has mostly cut through it" if c > b
+                       else "it has been a coin flip")
+            out.append(f"In the last {bars} candles price reached it {_times(b + c)}: it bounced {_times(b)} and "
+                       f"crossed {_times(c)}{ago}, so {verdict}.")
+        else:
+            out.append(f"In the last {bars} candles price reached it {_times(b + c)} and "
+                       f"{'bounced' if b else 'crossed'} every time{ago}.")
+    br = q.get("if_breaks") or {}
+    move = "a close above it" if br.get("direction") == "up" else "a close below it"
+    if br.get("next_kind"):
+        nk = br["next_kind"] + ("" if br["next_kind"] in ("support", "resistance") else " zone")
+        out.append(f"If it breaks, {move} opens the way to the next {nk} at {_fmt(br['next_low'])}–"
+                   f"{_fmt(br['next_high'])}.")
+    elif br.get("open_to") is not None:
+        out.append(f"If it breaks, there's no zone beyond it until the {'high' if br['direction'] == 'up' else 'low'} "
+                   f"of the loaded candles at {_fmt(br['open_to'])}.")
+    else:
+        out.append(f"If it breaks, price is in open space with nothing on this timeframe "
+                   f"{'above' if br.get('direction') == 'up' else 'below'}.")
+    return out
+
+
+_TOPIC_WORDS = (
+    ("supply_demand", r"\b(supply|demand)\b"),
+    ("windows", r"\b(window|high of|low of|range high|range low|resistance high|support low)\b"),
+    ("support_resistance", r"\b(support|resistance|levels?)\b"),
+    ("structure", r"\b(structure|choch|bos|break|trend)\b"),
+    ("momentum", r"\b(rsi|momentum|divergence|overbought|oversold)\b"),
+    ("futures", r"\b(funding|open interest|oi|futures|long/short)\b"),
+)
+
+
+def describe(facts: dict, symbol: str, detail: str = "normal", prompt: str = "") -> str:
+    """The answer in plain English, used when no LLM is configured or it fails. Whatever the question asked about
+    comes first; `detail` ("short", "normal", "detailed") sets how much of the rest follows."""
     tf = facts["timeframe"]
     last = facts["last_price"]
-    lines = [f"{symbol} on {tf}: last {_fmt(last)}, trend {facts['trend']} "
-             f"(ATR {_fmt(facts['atr'], last)}, {facts['atr'] / last * 100:.2f}% of price)."]
-    lines += facts.get("navigation", [])
-    if facts.get("resistance"):
-        z = facts["resistance"][0]
-        lines.append(f"Nearest {tf} resistance {_fmt(z['low'])}–{_fmt(z['high'])} ({_touches(z['touches'])}"
-                     f"{_held(z)}{_where(z)}{_htf(z)}).")
-    if facts.get("support"):
-        z = facts["support"][0]
-        lines.append(f"Nearest {tf} support {_fmt(z['low'])}–{_fmt(z['high'])} ({_touches(z['touches'])}"
-                     f"{_held(z)}{_where(z)}{_htf(z)}).")
-    if "supply" in facts and not facts["supply"]:
-        lines.append(f"No unmitigated {tf} supply zone above price right now.")
-    if "demand" in facts and not facts["demand"]:
-        lines.append(f"No unmitigated {tf} demand zone below price right now.")
-    for key in ("supply", "demand"):
-        if facts.get(key):
-            z = facts[key][0]
-            tested = " (untested" if z["tests"] == 0 else f" (tested {z['tests']}x"
-            lines.append(f"Unmitigated {key} {_fmt(z['low'])}–{_fmt(z['high'])}{tested}{_held(z)}{_where(z)}"
-                         f"{_htf(z)}).")
+    asked = {k for k, rx in _TOPIC_WORDS if re.search(rx, prompt, re.I)}
+    trend = {"up": "trending up", "down": "trending down"}.get(facts["trend"], "ranging")
+    atr_pct = facts.get("atr_pct") or round(facts["atr"] / last * 100, 2)
+    head = [f"{_base(symbol)} is {trend} on the {tf} at {_fmt(last)}, moving about {atr_pct:g}% a candle "
+            f"(ATR {_fmt(facts['atr'], last)})."]
+    lead: list[str] = []      # what the question asked, first
+    body: list[tuple[str, str]] = []  # (topic, sentence), in order of importance
+    tail: list[str] = list(facts.get("navigation", []))  # always said
+
+    if facts.get("price_in_question"):
+        lead += _price_sentences(facts["price_in_question"], last)
+
+    for kind in ("resistance", "support"):
+        if facts.get(kind):
+            body.append(("support_resistance", _zone_sentence(kind, facts[kind][0], tf)))
+    for kind, side in (("supply", "above"), ("demand", "below")):
+        if kind in facts and not facts[kind]:
+            body.append(("supply_demand", f"There's no unmitigated {tf} {kind} zone {side} price right now."))
+        elif facts.get(kind):
+            body.append(("supply_demand", _zone_sentence(kind, facts[kind][0], tf)))
     for w in facts.get("windows", []):
-        lines.append(f"{w['tf']} window: high {_fmt(w['high'])}, low {_fmt(w['low'])}.")
+        body.append(("windows", f"The last completed {w['tf']} candle ran from {_fmt(w['low'])} to "
+                                f"{_fmt(w['high'])}, so {_fmt(w['high'])} is the {w['tf']} high to beat and "
+                                f"{_fmt(w['low'])} the low to hold."))
     if facts.get("structure"):
-        lines.append("Recent structure: " + " → ".join(facts["structure"]) + ".")
+        body.append(("structure", "Recent swings: " + " → ".join(facts["structure"]) + "."))
     br = facts.get("last_structure_break")
     if br and (facts.get("structure") is not None or br["bars_ago"] <= 20):
-        lines.append(f"Last break: {br['direction']} {br['type']} through {_fmt(br['level'])}, "
-                     f"{br['bars_ago']} bars ago.")
-    mom = facts.get("momentum") or {}
-    if mom.get("divergence"):
-        lines.append(f"RSI {mom.get('rsi')} with {mom['divergence']} divergence.")
-    elif mom.get("rsi") is not None and (mom["rsi"] >= 70 or mom["rsi"] <= 30):
-        lines.append(f"RSI {mom['rsi']} ({'overbought' if mom['rsi'] >= 70 else 'oversold'}).")
+        body.append(("structure", _break_sentence(br)))
+    if m := _momentum_sentence(facts.get("momentum") or {}):
+        body.append(("momentum", m))
     for sw in facts.get("sweeps", [])[:2]:
-        lines.append(f"{sw['direction'].title()} sweep of {_fmt(sw['level'])} {sw['bars_ago']} bars ago.")
+        body.append(("sweeps", f"There was a {sw['direction']} sweep of {_fmt(sw['level'])} {sw['bars_ago']} "
+                               f"candles ago."))
     if "sweeps" in facts and not facts["sweeps"]:
-        lines.append("No liquidity sweeps in the last 30 bars.")
+        body.append(("sweeps", "No liquidity sweeps in the last 30 candles."))
     for g in facts.get("fvg", [])[:2]:
-        lines.append(f"Unfilled {g['direction']} FVG {_fmt(g['low'])}–{_fmt(g['high'])}.")
+        body.append(("fvg", f"There's an unfilled {g['direction']} fair value gap at {_fmt(g['low'])}–"
+                            f"{_fmt(g['high'])}."))
     for o in facts.get("order_blocks", [])[:2]:
-        lines.append(f"{o['direction'].title()} order block {_fmt(o['low'])}–{_fmt(o['high'])}.")
+        body.append(("order_blocks", f"A {o['direction']} order block sits at {_fmt(o['low'])}–{_fmt(o['high'])}."))
     if facts.get("patterns"):
-        lines.append("Patterns: " + "; ".join(facts["patterns"]) + ".")
+        body.append(("patterns", "Patterns in play: " + "; ".join(facts["patterns"]) + "."))
     elif "patterns" in facts:
-        lines.append("No range, triangle, wedge or double top/bottom right now.")
+        body.append(("patterns", "No range, triangle, wedge or double top/bottom right now."))
     if facts.get("volume_profile"):
         vp = facts["volume_profile"]
-        lines.append(f"Volume profile: POC {_fmt(vp['poc'])}, value area {_fmt(vp['val'])}–{_fmt(vp['vah'])}.")
-    if facts.get("derivatives") and not facts.get("futures_context"):
-        d = facts["derivatives"]
-        bits = []
-        if d.get("funding_rate_pct") is not None:
-            bits.append(f"funding {d['funding_rate_pct']}%")
-        if d.get("oi_change_24h_pct") is not None:
-            bits.append(f"open interest {d['oi_change_24h_pct']:+}% in 24h")
-        if bits:
-            lines.append("Futures: " + ", ".join(bits) + ".")
+        body.append(("volume_profile", f"Most volume traded at {_fmt(vp['poc'])} (the POC), with the value area "
+                                       f"{_fmt(vp['val'])}–{_fmt(vp['vah'])}."))
     if facts.get("futures_context"):
-        lines += _futures_lines(facts["futures_context"])
+        body += [("futures", s) for s in _futures_lines(facts["futures_context"])]
+    elif d := facts.get("derivatives"):
+        if s := _futures_sentence(d.get("funding_rate_pct"), d.get("oi_change_24h_pct")):
+            body.append(("futures", s))
     if facts.get("session_levels"):
-        lines += level_lines(facts["session_levels"])
+        body += [("sessions", s) for s in level_lines(facts["session_levels"])]
+    if (facts.get("volume") or {}).get("unusual"):
+        v = facts["volume"]
+        body.append(("volume", f"Volume is unusually high: the last candle traded {v['last_vs_avg']}x its average "
+                               f"and the last five {v['recent_vs_avg']}x."))
+
+    # Things the user asked for by name are never trimmed.
     if facts.get("upcoming_events"):
         ev = facts["upcoming_events"]
-        lines.append("Coming up: " + "; ".join(f"{e['country']} {e['title']} in {e['in_hours']:.0f}h" for e in ev[:3])
-                     + ".")
+        tail.append("Coming up: " + "; ".join(f"{e['country']} {e['title']} in {e['in_hours']:.0f}h" for e in ev[:3])
+                    + ".")
     elif "upcoming_events" in facts and not facts.get("plan"):
-        lines.append("No high-impact economic events in the next 48 hours.")
+        tail.append("No high-impact economic events in the next 48 hours.")
     if facts.get("headlines"):
-        lines.append("Headlines: " + "; ".join(h["title"] for h in facts["headlines"][:3]) + ".")
+        tail.append("Headlines: " + "; ".join(h["title"] for h in facts["headlines"][:3]) + ".")
     if facts.get("plan"):
         p = facts["plan"]
         tgts = ", ".join(f"{_fmt(t['price'])} ({t['rr']}R)" for t in p["targets"])
-        lines.append(f"{p['direction'].title()} plan from {p['basis']}: entry {_fmt(p['entry'])}, "
-                     f"stop {_fmt(p['stop'])}, targets {tgts}.")
-        lines += p.get("notes", [])
+        lead.append(f"{p['direction'].title()} plan from {p['basis']}: enter at {_fmt(p['entry'])}, stop at "
+                    f"{_fmt(p['stop'])}, targets {tgts}.")
+        lead += p.get("notes", [])
         if (p.get("track_record") or {}).get("summary"):
-            lines.append(f"Track record: {p['track_record']['summary']}.")
+            lead.append(f"Track record: {p['track_record']['summary']}.")
     elif "plan" in facts:
-        lines.append("No clean trade plan here: no zone or swing to put a stop behind.")
+        lead.append("There's no clean trade plan here: no zone or swing to put a stop behind.")
     if any(k in facts for k in ("scan", "market_scan", "spot_buys", "grid_coins")) and (
             mood := market_mood(facts.get("market_overview"))):
-        lines.append(mood)
+        lead.append(mood)
     if facts.get("scan"):
         best = facts["scan"][:3]
-        lines.append("Watchlist: " + "; ".join(f"{r['symbol']} " + (", ".join(r["signals"][:2]) or r["trend"])
-                                               for r in best) + ".")
+        lead.append("Watchlist: " + "; ".join(f"{r['symbol']} " + (", ".join(r["signals"][:2]) or r["trend"])
+                                              for r in best) + ".")
     elif "scan" in facts:
-        lines.append("Couldn't scan the watchlist.")
+        lead.append("Couldn't scan the watchlist.")
     if "market_scan" in facts:
         ms = facts["market_scan"]
         if ms.get("setups"):
             demo = " (demo data)" if ms.get("data_source") == "synthetic" else ""
-            lines.append(f"Best {ms['timeframe']} setups across {ms['coins']} coins{demo}: " + "; ".join(
+            lead.append(f"Best {ms['timeframe']} setups across {ms['coins']} coins{demo}: " + "; ".join(
                 f"{s['direction']} {s['symbol']} entry {_fmt(s['entry'])}, stop {_fmt(s['stop'])}, T1 "
                 f"{_fmt(s['target'])} ({s['rr']}R, {s['distance_pct']}% away)"
                 + (f", {s['track_record']}" if s.get("track_record") else "") for s in ms["setups"][:3]) + ".")
         else:
-            lines.append(ms.get("note") or f"No {ms['timeframe']} setups across the market right now.")
+            lead.append(ms.get("note") or f"No {ms['timeframe']} setups across the market right now.")
     if facts.get("kimi"):
-        lines += _kimi_lines(facts["kimi"])
-    if (facts.get("volume") or {}).get("unusual"):
-        v = facts["volume"]
-        lines.append(f"Unusual volume: the last bar is {v['last_vs_avg']}x its average, the last 5 bars "
-                     f"{v['recent_vs_avg']}x.")
+        lead += _kimi_lines(facts["kimi"])
     if facts.get("your_note_on_this_coin"):
-        lines.append(f"Your note on this coin: {facts['your_note_on_this_coin']}")
-    lines += _position_lines(facts.get("your_position"), facts.get("your_holdings"))
-    lines += facts.get("actions", [])
-    if len(lines) == 1:
-        lines.append("No qualifying levels found for this request.")
-    return " ".join(lines)
+        tail.append(f"Your note on this coin: {facts['your_note_on_this_coin']}")
+    tail += _position_lines(facts.get("your_position"), facts.get("your_holdings"))
+    tail += facts.get("actions", [])
+
+    # The topics the question named go first, then the rest in order; the answer length trims the rest.
+    order = [k for k, _ in _TOPIC_WORDS]
+    ranked = [s for t, s in sorted((b for b in body if b[0] in asked), key=lambda b: order.index(b[0]))] + \
+        [s for t, s in body if t not in asked]
+    if not lead and not ranked and len(tail) == len(facts.get("navigation", [])):
+        ranked = ["No qualifying levels found for this request."]
+    keep = SENTENCES.get(detail)
+    if keep is not None:
+        named = sum(1 for t, _ in body if t in asked)
+        room = 0 if lead and detail == "short" else keep - (1 if lead else 0)
+        ranked = ranked[:max(room, named if detail != "short" else 0)]
+    return " ".join(head + lead + ranked + tail)

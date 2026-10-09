@@ -49,7 +49,8 @@ from .sell_check import sell_scan
 from .top_down import ladder as walk_ladder
 from .top_down import walk
 from .binance_account import BinanceAccount, BinanceApiError, BinanceKeyError
-from .binance_import import BinanceImportService, ClassifyRequest, ImportSettings
+from .pnl_calendar import daily_pnl
+from .binance_import import MAX_FILLS, BinanceImportService, ClassifyRequest, ImportSettings
 from .journal import JournalPatch, JournalService, NewJournalEntry, entry_json
 from .dca import DcaRequest, plan_dca
 from .holdings_watch import HoldingsWatch, WatchSettings
@@ -1101,7 +1102,8 @@ async def backtest(req: BacktestRequest, request: Request) -> dict:
 #   GET    /api/binance/fills                ?symbol=&kind=manual|bot|unknown&market=spot|futures&limit=
 #   GET    /api/binance/trades               ?kind= → round trips rebuilt from the fills
 #   POST   /api/binance/classify             {keys, kind (null clears), bot_id?} → re-classify, journal re-synced
-#   GET    /api/binance/positions            ?refresh= → own spot holdings + futures positions, bots' separately
+#   GET    /api/binance/positions            ?refresh= → own spot holdings, Simple Earn, futures positions; bots' apart
+#   GET    /api/binance/pnl-calendar         ?kind=&tz_offset= → realized PnL per day from the imported fills
 #   GET    /api/binance/gridbots/{id}/compare  a tracked grid bot's real fills next to the simulated ones
 
 
@@ -1178,6 +1180,17 @@ async def binance_classify(req: ClassifyRequest, request: Request) -> dict:
 @app.get("/api/binance/positions")
 async def binance_positions(request: Request, refresh: bool = Query(False)) -> dict:
     return await _binance_run(request.app.state.binance.positions(refresh))
+
+
+@app.get("/api/binance/pnl-calendar")
+async def binance_pnl_calendar(request: Request,
+                               kind: str | None = Query(None, pattern="^(manual|bot|unknown)$"),
+                               tz_offset: int = Query(0, ge=-900, le=900)) -> dict:
+    """Realized PnL per calendar day (in the browser's time zone) from the fills imported so far; no Binance call."""
+    svc = request.app.state.binance
+    fills = svc.fills(kind=kind, limit=MAX_FILLS)
+    return {**daily_pnl(fills, tz_offset), "kind": kind, "fills": len(fills),
+            "last_import": (svc.last or {}).get("at")}
 
 
 @app.get("/api/holdings-watch")

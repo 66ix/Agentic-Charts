@@ -1,7 +1,7 @@
 "use client";
 
 import clsx from "clsx";
-import { Download, KeyRound, Loader2, RefreshCw, ShieldCheck, ShieldAlert, Trash2 } from "lucide-react";
+import { ChevronLeft, ChevronRight, Download, KeyRound, Loader2, RefreshCw, ShieldCheck, ShieldAlert, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 
 import { usePersistentState } from "@/hooks/usePersistentState";
@@ -12,6 +12,7 @@ import {
   fetchAccountPositions,
   fetchHoldingsWatch,
   fetchImportStatus,
+  fetchPnlCalendar,
   removeBinanceKey,
   runHoldingsWatch,
   runImport,
@@ -23,12 +24,14 @@ import {
   type AccountMarket,
   type AccountPositions,
   type BinanceKeyStatus,
+  type EarnPosition,
   type FillKind,
   type FuturesPosition,
   type HoldingsWatchSettings,
   type HoldingsWatchStatus,
   type ImportSettings,
   type ImportStatus,
+  type PnlCalendar,
   type SpotHolding,
 } from "@/lib/binance";
 import { displaySymbol, formatPrice } from "@/lib/format";
@@ -36,7 +39,7 @@ import { fetchGridBots, type GridBot } from "@/lib/gridbot";
 
 const STATUS_MS = 60_000;
 
-type Tab = "setup" | "positions" | "fills";
+type Tab = "setup" | "positions" | "pnl" | "fills";
 
 const KIND_LABEL: Record<FillKind, string> = { manual: "Mine", bot: "Bot", unknown: "Unknown" };
 const KIND_CLASS: Record<FillKind, string> = {
@@ -428,6 +431,159 @@ function PositionRow({ p, bots, busy, onClassify }: { p: FuturesPosition; bots: 
   );
 }
 
+function EarnRow({ e }: { e: EarnPosition }) {
+  const term =
+    e.product === "locked"
+      ? `Locked${e.duration_days ? ` ${e.duration_days}d` : ""}${e.redeem_at ? `, ends ${new Date(e.redeem_at * 1000).toLocaleDateString([], { month: "short", day: "numeric" })}` : ""}${e.auto_renew ? ", renews" : ""}`
+      : "Flexible";
+  return (
+    <div className="grid grid-cols-[3.5rem_1fr_auto_auto] items-baseline gap-2 font-mono text-[11px]">
+      <span className="font-sans font-medium text-ink">{e.asset}</span>
+      <span className="truncate font-sans text-[10px] text-mute" title={term}>{term}</span>
+      <span className="text-ink">{qty(e.qty)}</span>
+      <span className="text-right">
+        <span className="text-ink">{money(e.value)}</span>
+        {e.apr_pct != null && <span className="ml-1.5 text-up">{e.apr_pct.toFixed(2)}%</span>}
+      </span>
+    </div>
+  );
+}
+
+// ------------------------------------------------------------- PnL calendar --
+
+const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+/** "+12.3", "−1.2k": short enough for a calendar cell. */
+function compact(v: number): string {
+  const a = Math.abs(v);
+  const s = a >= 10_000 ? `${(a / 1000).toFixed(0)}k` : a >= 1000 ? `${(a / 1000).toFixed(1)}k` : a >= 100 ? a.toFixed(0) : a.toFixed(1);
+  return `${v < 0 ? "−" : v > 0 ? "+" : ""}${s}`;
+}
+
+function monthKey(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function PnlView({ enabled, version }: { enabled: boolean; version: number }) {
+  const [kind, setKind] = usePersistentState<"" | FillKind>("ac:account-pnl-kind", "");
+  const [month, setMonth] = useState(() => monthKey(new Date()));
+  const [data, setData] = useState<PnlCalendar | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!enabled) return;
+    const ctrl = new AbortController();
+    fetchPnlCalendar(kind || null, ctrl.signal)
+      .then((r) => {
+        setData(r);
+        setError(null);
+      })
+      .catch((err: Error) => {
+        if (err.name !== "AbortError") setError(err.message);
+      });
+    return () => ctrl.abort();
+  }, [enabled, kind, version]);
+
+  if (!enabled) return <p className="px-3 py-4 text-[12px] leading-relaxed text-mute">Add a read-only Binance key (Setup) and import your fills to see your daily PnL.</p>;
+
+  const [y, mo] = month.split("-").map(Number);
+  const first = new Date(y, mo - 1, 1);
+  const daysIn = new Date(y, mo, 0).getDate();
+  const lead = (first.getDay() + 6) % 7; // Monday first
+  const byDate = new Map((data?.days ?? []).map((d) => [d.date, d]));
+  const inMonth = (data?.days ?? []).filter((d) => d.date.startsWith(month));
+  const monthTotal = inMonth.reduce((a, d) => a + d.pnl, 0);
+  const scale = Math.max(1e-9, ...inMonth.map((d) => Math.abs(d.pnl)));
+  const shift = (n: number) => setMonth(monthKey(new Date(y, mo - 1 + n, 1)));
+  const today = new Date();
+  const todayKey = `${monthKey(today)}-${String(today.getDate()).padStart(2, "0")}`;
+
+  return (
+    <div className="space-y-3 px-3 py-2 text-[12px]">
+      <div className="flex items-center gap-1">
+        <button type="button" onClick={() => shift(-1)} className="btn-ghost h-6 w-6 p-0" title="Previous month">
+          <ChevronLeft className="h-3.5 w-3.5" />
+        </button>
+        <div className="min-w-[7.5rem] text-center text-[12px] font-medium text-ink">
+          {first.toLocaleDateString([], { month: "long", year: "numeric" })}
+        </div>
+        <button type="button" onClick={() => shift(1)} className="btn-ghost h-6 w-6 p-0" title="Next month">
+          <ChevronRight className="h-3.5 w-3.5" />
+        </button>
+        <div className="flex-1" />
+        <select value={kind} onChange={(e) => setKind(e.target.value as "" | FillKind)} className="h-6 rounded border border-line bg-panel2 px-1 text-[11px] text-ink" title="Whose trades">
+          <option value="">All trades</option>
+          <option value="manual">Mine</option>
+          <option value="bot">Bots</option>
+          <option value="unknown">Unknown</option>
+        </select>
+      </div>
+      {error && <Notice tone="error">{error}</Notice>}
+      {!data && !error && <Loader2 className="mx-auto h-4 w-4 animate-spin text-mute" />}
+      {data && (
+        <>
+          <div className="flex items-baseline gap-3 font-mono text-[11px]">
+            <span className="text-mute">
+              Month <span className={clsx("text-[13px] font-semibold", tone(monthTotal))}>{money(monthTotal, true)}</span> USD
+            </span>
+            <span className="text-mute">
+              <span className="text-up">{inMonth.filter((d) => d.pnl > 0).length}</span> up ·{" "}
+              <span className="text-down">{inMonth.filter((d) => d.pnl < 0).length}</span> down
+            </span>
+          </div>
+          <div className="grid grid-cols-7 gap-0.5">
+            {WEEKDAYS.map((w) => (
+              <div key={w} className="pb-0.5 text-center text-[9px] uppercase text-mute">
+                {w}
+              </div>
+            ))}
+            {Array.from({ length: lead }, (_, i) => (
+              <div key={`pad-${i}`} />
+            ))}
+            {Array.from({ length: daysIn }, (_, i) => {
+              const date = `${month}-${String(i + 1).padStart(2, "0")}`;
+              const d = byDate.get(date);
+              const alpha = d ? 0.12 + 0.5 * Math.min(1, Math.abs(d.pnl) / scale) : 0;
+              return (
+                <div
+                  key={date}
+                  className={clsx("flex h-11 flex-col rounded border px-1 py-0.5", date === todayKey ? "border-accent/60" : "border-line/60")}
+                  style={d && d.pnl !== 0 ? { backgroundColor: d.pnl > 0 ? `rgba(34,197,94,${alpha})` : `rgba(239,68,68,${alpha})` } : undefined}
+                  title={d ? `${date}: ${money(d.pnl, true)} USD (spot ${money(d.spot, true)}, futures ${money(d.futures, true)}), ${d.closes} closing fill${d.closes === 1 ? "" : "s"}` : date}
+                >
+                  <span className="text-[9px] text-mute">{i + 1}</span>
+                  {d && <span className={clsx("mt-auto truncate text-right font-mono text-[10px]", d.pnl === 0 ? "text-mute" : "text-ink")}>{compact(d.pnl)}</span>}
+                </div>
+              );
+            })}
+          </div>
+          <div className="space-y-0.5 font-mono text-[11px] text-mute">
+            <div>
+              All time <span className={tone(data.total)}>{money(data.total, true)}</span> USD over {data.win_days + data.loss_days} trading days ({data.win_days} up, {data.loss_days} down)
+            </div>
+            {data.best && (
+              <div>
+                Best day {data.best.date} <span className="text-up">{money(data.best.pnl, true)}</span>
+                {data.worst && (
+                  <>
+                    {" "}· worst {data.worst.date} <span className="text-down">{money(data.worst.pnl, true)}</span>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+          {data.fills === 0 && <Notice>No fills imported yet: run an import in Setup, then come back.</Notice>}
+          {data.notes.map((n) => (
+            <p key={n} className="text-[10px] leading-snug text-mute">
+              {n}
+            </p>
+          ))}
+        </>
+      )}
+    </div>
+  );
+}
+
 function PositionsView({ bots, enabled }: { bots: GridBot[]; enabled: boolean }) {
   const [data, setData] = useState<AccountPositions | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -489,6 +645,13 @@ function PositionsView({ bots, enabled }: { bots: GridBot[]; enabled: boolean })
               </div>
             )}
           </Section>
+          {m.earn && m.earn.length > 0 && (
+            <Section title="Simple Earn" right={<span className="font-mono text-[11px] text-ink">{money(m.earn.reduce((a, e) => a + (e.value ?? 0), 0))} USDT</span>}>
+              {m.earn.map((e) => (
+                <EarnRow key={e.key} e={e} />
+              ))}
+            </Section>
+          )}
           <Section title="Your USD-M futures positions">
             {m.futures.length === 0 && <p className="text-[11px] text-mute">No open positions.</p>}
             {m.futures.map((p) => (
@@ -809,14 +972,14 @@ export default function AccountPanel() {
   return (
     <div className="flex h-full min-h-0 flex-col text-xs">
       <div className="flex items-center gap-1 border-b border-line px-2 py-1.5">
-        {(["setup", "positions", "fills"] as const).map((t) => (
+        {(["setup", "positions", "pnl", "fills"] as const).map((t) => (
           <button
             key={t}
             type="button"
             onClick={() => setTab(t)}
             className={clsx("rounded px-2 py-1 text-[11px] font-medium", tab === t ? "bg-panel2 text-ink" : "text-mute hover:text-ink")}
           >
-            {t === "setup" ? "Setup" : t === "positions" ? "Positions" : `Fills${status ? ` · ${status.fills}` : ""}`}
+            {t === "setup" ? "Setup" : t === "positions" ? "Positions" : t === "pnl" ? "PnL" : `Fills${status ? ` · ${status.fills}` : ""}`}
           </button>
         ))}
       </div>
@@ -835,6 +998,7 @@ export default function AccountPanel() {
           </div>
         )}
         {tab === "positions" && <PositionsView bots={bots} enabled={enabled} />}
+        {tab === "pnl" && <PnlView enabled={enabled} version={version} />}
         {tab === "fills" && <FillsView bots={bots} enabled={enabled} version={version} />}
       </div>
     </div>

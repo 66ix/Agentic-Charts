@@ -32,7 +32,10 @@ The LLM never invents prices. It plans: it can look at any coin or timeframe, sc
 and read funding and open interest through read-only tools, then calls `draw_on_chart` with a
 JSON-schema plan saying which detectors to run, which chart to show and what to alert on. Every
 level, zone and trade plan price comes from the SciPy engine, and the whole pipeline works with no
-LLM at all (a keyword parser and templated summary take over).
+LLM at all (a keyword parser and a built-in writer take over). The built-in writer answers in plain sentences,
+leads with what the question asked about (a supply zone, a window high, a price such as "what's at 7.15?") and
+follows the answer length setting; an answer it wrote is marked "reply: built-in writer (no AI model)" under it.
+For freer phrasing set up a model under Settings → AI model.
 
 ## Project structure
 
@@ -380,8 +383,15 @@ through an API key that can only read (`binance_account.py`, `binance_import.py`
   `electron_`) is yours; a fill on a tracked grid bot's pair, while it ran, on one of its grid lines and with its
   order size is that bot's; any other API order (random or broker `x-` ids) is unknown. Change any of them in the
   Account tab; overrides are saved on the server and the journal follows.
-- **Positions:** your spot holdings with the average entry from your own buys, your USD-M positions, and the bots
+- **Positions:** your spot holdings with the average entry from your own buys, coins in **Simple Earn** (flexible
+  and locked, with their APR and, for locked ones, the term and end date), your USD-M positions, and the bots
   apart: the Trading Bots wallet's total, holdings you marked as a bot's, and the tracked bots' simulated holdings.
+  The chart agent counts Earn coins as held ("You also have 4 INJ in Simple Earn locked at 12% APR").
+- **PnL calendar:** the **PnL** tab shows realized PnL per day for a month at a time, built from the imported fills
+  (`pnl_calendar.py`, no extra Binance calls): spot sells against the average cost of your imported buys, futures
+  from Binance's realized PnL, fees paid in the quote asset taken off. Filter by mine, bots or unknown. Days follow
+  your browser's time zone. Sells of coins bought before the imported history, pairs not quoted in a dollar
+  stablecoin, fees paid in BNB, futures funding and Earn rewards are left out, and the tab says so.
 
 What is documented and what is inferred: Binance documents the per-wallet balances
 (`GET /sapi/v1/asset/wallet/balance`, which lists a "Trading Bots" wallet with its total value only) and the
@@ -434,7 +444,8 @@ like, not documented. Fees paid in BNB are not converted into the PnL (noted on 
 | GET | `/api/binance/fills?kind=&market=&symbol=` | Imported fills with their classification and reason |
 | GET | `/api/binance/trades?kind=` | Round trips rebuilt from the fills |
 | POST | `/api/binance/classify` | `{keys, kind ("manual"\|"bot"\|"unknown", null = automatic), bot_id?}` |
-| GET | `/api/binance/positions?refresh=` | Your spot holdings and USD-M positions, and the bots' apart |
+| GET | `/api/binance/positions?refresh=` | Your spot holdings, Simple Earn positions and USD-M positions, and the bots' apart |
+| GET | `/api/binance/pnl-calendar?kind=&tz_offset=` | Realized PnL per day (USD) from the imported fills; `tz_offset` as JavaScript's `getTimezoneOffset()` |
 | GET | `/api/binance/gridbots/{id}/compare` | A tracked bot's real fills next to the simulated ones |
 | GET/POST | `/api/journal` | Logged trades with their evaluation; POST a trade `{symbol, interval, direction, entry, stop, targets, …}` |
 | PATCH/DELETE | `/api/journal/{id}` | Notes, tags, setup, cancel or close a trade; delete it |
@@ -486,6 +497,8 @@ Overlay types: `box`, `horizontal_line`, `trendline`, `marker` (see `backend/app
 - **Window highs/lows:** the high and low of the last completed H4 / D1 (or requested) candle, drawn as rays from that candle.
 - **Trendlines:** through the two latest swing highs (if falling) and swing lows (if rising), extended right.
 - **Higher-timeframe confluence:** S/R and supply/demand zones are also detected on the next two timeframes up (H4 → D1, W1). A zone overlapping one of them scores higher and is labelled, e.g. "H4 Demand + D1/W1".
+- **Higher-timeframe zones on lower charts:** of the zones the agent drew on the timeframes above the chart's, only the best one above price (resistance or supply) and the best one below (support or demand) are carried down, so the 15m shows one D1-or-H4 box per side instead of every higher timeframe's boxes stacked on each other. "Best" is the detector's strength (touches, freshness, confluence), with a small edge to the higher timeframe. Hide them with the "Higher-timeframe levels" layer.
+- **Ask about a price:** "what's at 7.1561?" or "is 25.4 support?" checks that price on the chart's timeframe: the zone there (and whether a higher-timeframe zone covers it), whether it is support or resistance now, how often price bounced off it or crossed it in the loaded candles, and the next zone if it breaks.
 - **Liquidity sweeps:** a wick through a swing high/low that closes back inside (`patterns.py`).
 - **Fair value gaps:** three-candle gaps that price has not filled yet. **Order blocks:** the last opposite candle before an impulse that broke structure, while unmitigated.
 - **Patterns:** ranges (a flat box that held for 30+ bars), triangles and wedges (lines fitted through swings), double tops/bottoms with their neckline.

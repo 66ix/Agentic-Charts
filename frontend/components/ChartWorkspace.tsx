@@ -128,7 +128,9 @@ const SEARCH_TITLES: Record<SearchMode, string | undefined> = {
 function engineNote(r: AnalyzeResponse): string {
   const tf = TIMEFRAMES.find((t) => t.value === r.analysis_interval)?.label ?? r.analysis_interval;
   const llm = r.engine.intent === "rules" || r.engine.intent === "default" ? "rule parser" : r.engine.intent;
-  return `${tf} · ${r.overlays.length} overlays · intent: ${llm} · detector: ${r.engine.detector}` +
+  // "template": no model was reachable, so the built-in writer phrased the answer (Settings → AI model sets one up).
+  const reply = r.engine.summary === "template" ? " · reply: built-in writer (no AI model)" : "";
+  return `${tf} · ${r.overlays.length} overlays · intent: ${llm} · detector: ${r.engine.detector}${reply}` +
     (r.data_source === "synthetic" ? " · demo data" : "");
 }
 

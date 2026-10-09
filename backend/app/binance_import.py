@@ -697,9 +697,15 @@ class BinanceImportService:
                 futures = await self.account.futures_positions()
             except (BinanceApiError, httpx.HTTPError) as exc:
                 notes.append(f"USD-M futures unavailable: {exc}")
+        earn_rows: list[dict] = []
+        try:
+            earn_rows = await self.account.earn_positions()
+        except (BinanceApiError, httpx.HTTPError) as exc:
+            notes.append(f"Simple Earn unavailable: {exc}")
         fills = list(self._fills.values())
         coins = [a for a in balances if a not in STABLES]
-        prices = await self._prices([f"{a}USDT" for a in coins] + [p["symbol"] for p in futures])
+        earn_coins = [r["asset"] for r in earn_rows if r["asset"] not in STABLES]
+        prices = await self._prices([f"{a}USDT" for a in coins + earn_coins] + [p["symbol"] for p in futures])
 
         manual_spot, bot_spot, cash = [], [], []
         for asset, qty in sorted(balances.items()):
@@ -765,8 +771,15 @@ class BinanceImportService:
             tracked_bots.append({"bot_id": b.id, "name": b.name, "symbol": b.params.symbol,
                                  "base_held": r.base_held if r else None, "quote_held": r.quote_held if r else None,
                                  "value": r.current_value if r else None, "simulated": True})
+        earn = []
+        for r in sorted(earn_rows, key=lambda r: (r["asset"], r["product"])):
+            price = 1.0 if r["asset"] in STABLES else prices.get(f"{r['asset']}USDT")
+            earn.append({**r, "key": f"earn:{r['product']}:{r['asset']}:{r.get('position_id') or ''}",
+                         "symbol": f"{r['asset']}USDT", "price": price,
+                         "value": round(r["qty"] * price, 2) if price else None})
+        earn.sort(key=lambda r: -(r["value"] or 0))
         bot_wallet = next((w for w in wallets if w["wallet"].lower().replace(" ", "") == "tradingbots"), None)
-        out = {"manual": {"spot": manual_spot, "futures": manual_fut, "cash": cash},
+        out = {"manual": {"spot": manual_spot, "futures": manual_fut, "cash": cash, "earn": earn},
                "bots": {"wallet": bot_wallet, "spot": bot_spot, "futures": bot_fut, "tracked": tracked_bots},
                "wallets": wallets, "notes": notes, "updated_at": int(time.time())}
         self._positions = (time.monotonic(), out)

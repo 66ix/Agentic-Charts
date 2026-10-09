@@ -24,6 +24,8 @@ Endpoints used (all GET, all read-only; weights from Binance's docs):
   /fapi/v1/allOrders                     USD-M futures orders of one symbol, by orderId          (5)
   /fapi/v1/income?incomeType=REALIZED_PNL which futures symbols had realized PnL                (30)
   /fapi/v2/positionRisk                  open USD-M positions                                   (5)
+  /sapi/v1/simple-earn/flexible/position coins in Simple Earn Flexible, paged                    (150)
+  /sapi/v1/simple-earn/locked/position   coins in Simple Earn Locked, paged                      (150)
 """
 
 from __future__ import annotations
@@ -346,6 +348,54 @@ class BinanceAccount:
         """Open USD-M positions (positionAmt != 0)."""
         rows = await self.get(self.futures_url, "/fapi/v2/positionRisk", {})
         return [r for r in rows if isinstance(r, dict) and float(r.get("positionAmt", 0) or 0) != 0]
+
+    async def earn_positions(self) -> list[dict]:
+        """Coins in Simple Earn, flexible and locked: [{"product", "asset", "qty", "apr_pct", ...}]. Binance pages
+        these EARN_PAGE rows at a time; at most EARN_PAGES pages of each are read."""
+        out: list[dict] = []
+        for product, path in (("flexible", "/sapi/v1/simple-earn/flexible/position"),
+                              ("locked", "/sapi/v1/simple-earn/locked/position")):
+            for page in range(1, EARN_PAGES + 1):
+                data = await self.get(self.spot_url, path, {"current": page, "size": EARN_PAGE})
+                rows = data.get("rows", []) if isinstance(data, dict) else []
+                out += [r for r in (parse_earn(product, r) for r in rows) if r]
+                if len(rows) < EARN_PAGE:
+                    break
+        return out
+
+
+EARN_PAGE = 100
+EARN_PAGES = 5
+
+
+def _num(v: Any) -> Optional[float]:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_earn(product: str, r: Any) -> Optional[dict]:
+    """One Simple Earn position in the app's shape. Flexible rows carry totalAmount and latestAnnualPercentageRate
+    (a fraction: 0.05 = 5%); locked rows amount, APY (also a fraction), duration in days and redeemDate (ms)."""
+    if not isinstance(r, dict) or not r.get("asset"):
+        return None
+    qty = _num(r.get("totalAmount") if product == "flexible" else r.get("amount"))
+    if not qty or qty <= 0:
+        return None
+    apr = _num(r.get("latestAnnualPercentageRate") if product == "flexible" else r.get("APY"))
+    out = {"product": product, "asset": str(r["asset"]).upper(), "qty": qty,
+           "apr_pct": round(apr * 100, 2) if apr is not None else None}
+    if product == "flexible":
+        out["rewards_total"] = _num(r.get("cumulativeTotalRewards"))
+        out["can_redeem"] = bool(r.get("canRedeem", True))
+    else:
+        out["duration_days"] = int(_num(r.get("duration")) or 0) or None
+        redeem = _num(r.get("redeemDate"))
+        out["redeem_at"] = int(redeem // 1000) if redeem else None
+        out["auto_renew"] = bool(r.get("isAutoRenew", False))
+        out["position_id"] = r.get("positionId")
+    return out
 
 
 def _refusal(chk: dict) -> str:

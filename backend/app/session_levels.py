@@ -356,10 +356,10 @@ def level_lines(f: dict) -> list[str]:
     out = []
     if f.get("at"):
         out.append("Price is at the " + " and the ".join(f["at"][:3]) + ".")
-    near = [f"{r['level']} {_fmt(r['price'])} ({r['distance_pct']:+.2f}%)" for r in
+    near = [f"the {r['level']} at {_fmt(r['price'])} ({r['distance_pct']:+.2f}%)" for r in
             (f.get("above", [])[:1] + f.get("below", [])[:1])]
     if near:
-        out.append("Nearest session/period levels: " + "; ".join(near) + ".")
+        out.append("The closest session levels are " + " and ".join(near) + ".")
     return out
 
 
