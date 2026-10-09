@@ -15,6 +15,7 @@ import { fetchAccountPositions, fetchBinanceKey, positionOverlays } from "@/lib/
 import { analyzeStream } from "@/lib/api";
 import { imageToDataUrl, readScreenshot } from "@/lib/screenshot";
 import { statusProblems } from "@/lib/status";
+import { syncDeskSymbols } from "@/lib/desk";
 import { composeSnapshot, shareSnapshot } from "@/lib/snapshot";
 import { DEFAULT_INTERVAL, DEFAULT_SYMBOL } from "@/lib/config";
 import { isCustom } from "@/lib/customSymbols";
@@ -203,6 +204,13 @@ export default function ChartWorkspace() {
   const [sort, setSort] = usePersistentState<WatchlistSort>("ac:watchlist-sort", "manual");
   const currentList = lists.find((l) => l.id === activeListId) ?? lists[0] ?? DEFAULT_LISTS[0];
   const watchlist = currentList.symbols;
+  // The agent desk follows the active watchlist (when it is set to); sent once the list settles.
+  const watchKey = watchlist.join(",");
+  useEffect(() => {
+    if (!listsLoaded || !watchKey) return;
+    const id = setTimeout(() => void syncDeskSymbols(watchKey.split(",")).catch(() => undefined), 1500);
+    return () => clearTimeout(id);
+  }, [watchKey, listsLoaded]);
 
   // One-time move from the single watchlist (ac:watchlist) to named lists.
   useEffect(() => {

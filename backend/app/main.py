@@ -37,6 +37,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import StreamingResponse
 
 from .agent import run_analysis
+from .agent_desk import AgentDesk, DeskSettings
 from .alerts import AlertPatch, AlertService
 from .backtest import BacktestRequest, run_backtest
 from .brief import BriefService, BriefSettings, NoChannelError
@@ -146,6 +147,10 @@ async def lifespan(app: FastAPI):
     # Market-wide setup scanner (market_scanner.py) with plan track records (track_record.py), shared with the agent.
     app.state.market_scanner = MarketScanner(market, TrackRecordService(market), app.state.alerts)
     app.state.market_scanner.start()
+    # The agent desk (agent_desk.py): its own calls at 1h/4h/1d closes, scored, paper-traded and learned from.
+    app.state.desk = AgentDesk(market, app.state.db, app.state.alerts, app.state.market_scanner.track)
+    app.state.desk.start()
+    app.state.brief.desk_lines = app.state.desk.brief_lines
     # Session/period levels (session_levels.py) and the order-book heatmap (orderbook_heatmap.py).
     app.state.session_levels = SessionLevelsService(market)
     app.state.heatmap = OrderbookHeatmapService(market, app.state.hub)
@@ -157,6 +162,7 @@ async def lifespan(app: FastAPI):
              app.state.llm.provider, app.state.llm.model)
     yield
     await app.state.postmortems.close()
+    await app.state.desk.close()
     await app.state.market_scanner.close()
     await app.state.brief.close()
     await app.state.models.close()
@@ -304,7 +310,8 @@ async def agent_analyze(req: AnalyzeRequest, request: Request) -> AnalyzeRespons
                                   getattr(st, "market_scanner", None), levels=getattr(st, "session_levels", None),
                                   gridbots=getattr(st, "gridbots", None), metrics=getattr(st, "metrics", None),
                                   metric_alerts=getattr(st, "metric_alerts", None),
-                                  level_log=getattr(st, "levels", None), binance=getattr(st, "binance", None))
+                                  level_log=getattr(st, "levels", None), binance=getattr(st, "binance", None),
+                                  desk=getattr(st, "desk", None))
     except MarketDataError as exc:
         raise HTTPException(502, str(exc)) from exc
     except ValueError as exc:
@@ -334,7 +341,7 @@ async def agent_analyze_stream(req: AnalyzeRequest, request: Request) -> Streami
                                      gridbots=getattr(st, "gridbots", None), metrics=getattr(st, "metrics", None),
                                      metric_alerts=getattr(st, "metric_alerts", None),
                                      level_log=getattr(st, "levels", None), binance=getattr(st, "binance", None),
-                                     on_result=on_result, on_delta=on_delta)
+                                     desk=getattr(st, "desk", None), on_result=on_result, on_delta=on_delta)
             await queue.put({"type": "done", "response": res.model_dump(mode="json")})
         except MarketDataError as exc:
             await queue.put({"type": "error", "status": 502, "detail": str(exc)})
@@ -1353,6 +1360,80 @@ async def market_scan_run(request: Request, interval: str = Query("4h"),
     except MarketDataError as exc:
         raise HTTPException(502, str(exc)) from exc
     return scanner.status(iv)
+# ------------------------------------------------------------------------------- agent desk --
+#   GET  /api/desk                       settings, coins, last and next runs, record, calibration, setups
+#   GET  /api/desk/calls?status=&symbol=&limit=&watched=   calls (or watched zones), newest first; status: active,
+#                                        closed, or one status
+#   PUT  /api/desk/settings              DeskSettings
+#   PUT  /api/desk/symbols               {symbols} the app's active watchlist, followed when follow_watchlist is on
+#   POST /api/desk/run?interval=1h       look at the latest closed candle now (whatever its age) → the new calls
+#   POST /api/desk/score                 bring the running calls up to date now
+#   GET  /api/desk/wallet                the desk's paper wallet
+#   POST /api/desk/wallet/reset          {start_cash}
+
+
+def _desk(request: Request) -> AgentDesk:
+    return request.app.state.desk
+
+
+@app.get("/api/desk")
+async def desk_status(request: Request) -> dict:
+    return _desk(request).status()
+
+
+@app.get("/api/desk/calls")
+async def desk_calls(request: Request, status: str | None = Query(None, max_length=20),
+                     symbol: str | None = Query(None), limit: int = Query(200, ge=1, le=2000),
+                     watched: bool = Query(False, description="The zones watched instead of called")) -> dict:
+    rows = _desk(request).calls(status, _norm_symbol(symbol) if symbol else None, limit, watched)
+    return {"calls": [c.model_dump() for c in rows]}
+
+
+@app.put("/api/desk/settings")
+async def desk_settings(new: DeskSettings, request: Request) -> dict:
+    return _desk(request).update_settings(new)
+
+
+@app.put("/api/desk/symbols")
+async def desk_symbols(request: Request, body: dict = Body(...)) -> dict:
+    raw = body.get("symbols")
+    if not isinstance(raw, list):
+        raise HTTPException(422, "Give symbols: a list of pairs")
+    return _desk(request).follow([s for s in raw if isinstance(s, str)])
+
+
+@app.post("/api/desk/run")
+async def desk_run(request: Request, interval: str = Query("1h")) -> dict:
+    desk = _desk(request)
+    try:
+        made = await desk.run_interval(interval, force=True)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    await desk.score()
+    return {"calls": [c.model_dump() for c in made], "status": desk.status()}
+
+
+@app.post("/api/desk/score")
+async def desk_score(request: Request) -> dict:
+    changed = await _desk(request).score()
+    return {"changed": [c.model_dump() for c in changed]}
+
+
+@app.get("/api/desk/wallet")
+async def desk_wallet(request: Request) -> dict:
+    return (await _desk(request).wallet()).model_dump()
+
+
+@app.post("/api/desk/wallet/reset")
+async def desk_wallet_reset(request: Request, body: dict | None = Body(None)) -> dict:
+    cash = (body or {}).get("start_cash", get_settings().agent_wallet_cash)
+    try:
+        _desk(request).reset_wallet(float(cash))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return (await _desk(request).wallet()).model_dump()
+
+
 # ------------------------------------------------------ session and period levels, order-book heatmap --
 #   GET /api/levels/sessions?symbol=BTCUSDT&interval=1h&or_minutes=30
 #       {source, price, sessions: [{key, name, label, which, open, close, live, high, low, high_taken_at,

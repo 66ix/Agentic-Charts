@@ -358,7 +358,7 @@ export function chartZones(overlays: Overlay[], drawings: Drawing[], selectedId?
 
 // ------------------------------------------------------------------- history --
 
-export type AlertHistoryKind = "price" | "signal" | "brief" | "trade";
+export type AlertHistoryKind = "price" | "signal" | "brief" | "trade" | "desk";
 
 /** One fire. Mirrors AlertHistory items in backend/app/alerts.py. */
 export interface AlertHistoryItem {
@@ -395,6 +395,8 @@ export interface BriefSections {
   holdings: boolean;
   /** Your note on each coin. */
   notes: boolean;
+  /** The agent desk: calls it is running, what closed in the last day, its record. */
+  desk: boolean;
 }
 
 /** Mirrors BriefSettings in backend/app/brief.py. */
@@ -444,6 +446,7 @@ export const BRIEF_SECTION_NAMES: Record<keyof BriefSections, string> = {
   market: "Market mood",
   holdings: "My holdings",
   notes: "My coin notes",
+  desk: "Agent desk",
 };
 
 export function fetchBriefSettings(signal?: AbortSignal) {

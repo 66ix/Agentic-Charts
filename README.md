@@ -220,6 +220,9 @@ scores are kept in `LLM_CHOICE_STORE` (default `.cache/llm_choice.json`). The sa
 | `HEATMAP_INTERVAL_SECONDS` | `10` | How often the order-book heatmap samples the book of a symbol someone is viewing |
 | `HEATMAP_DEPTH_LIMIT` | `1000` | Levels per snapshot (Binance request weight 50; `5000` reaches further but weighs 250) |
 | `HEATMAP_HISTORY_MINUTES` / `HEATMAP_RANGE_PCT` | `240`, `3` | Heatmap history kept per symbol (in memory) and how far from the mid it reaches |
+| `AGENT_DB` | `backend/.cache/agent.db` | SQLite for the agent desk's calls and what it learns; `memory` = not saved |
+| `AGENT_DESK` | `on` | The agent desk making calls on its own at 1h/4h/1d closes (`off` = only when you press Run) |
+| `AGENT_PAPER_STORE` / `AGENT_WALLET_CASH` | `backend/.cache/agent_paper.json`, `1000` | The desk's own paper wallet and its starting USDT |
 | `NEXT_PUBLIC_API_URL` | `http://localhost:8000` | Frontend → backend |
 | `NEXT_PUBLIC_WS_URL` | derived from API URL | Override for proxies |
 
@@ -234,6 +237,49 @@ rolling 24h total saved to `backend/.cache/`). Both futures figures cover Binanc
 sends at most one liquidation per symbol per second, so that total is a lower bound; hover a metric
 for its source. Binance futures has no US-accessible mirror, so from a US IP those two fall back to
 mocked values (marked with a dot).
+
+## Agent desk
+
+The **Agent desk** tab (V) is the agent trading on its own, on paper, and learning from it (`agent_desk.py`,
+`desk_calls.py`, `desk_learning.py`). Spot only: it calls buys, never shorts.
+
+- **Calls.** At every 1h, 4h and 1d candle close (45 s after, so Binance has the final bar) it looks at the coins of
+  your active watchlist with the chart agent's own detectors. Each support or demand zone at or below price is a
+  possible call: a limit buy at the top of the zone, an invalidation just below it (where the idea is wrong) and a
+  take-profit at the next resistance or supply. The zone with the best expected R after fees becomes a call when its
+  confidence is at least the minimum and the coin has no call running on that timeframe. A candle that closed long
+  ago (after a restart) is skipped; **Run** in Settings looks at the latest one now.
+- **Confidence** is the chance of reaching the take-profit before the invalidation. It starts from the odds on a
+  random walk, 1 / (1 + R) for a level R risk-units away, times the setup's learned **edge**: hits against what random
+  odds would give. The edge is built up from the coin's backtest of the same setup (track_record.py), then the
+  desk's own results on that timeframe and zone kind, that setup (fresh or tested, a higher-timeframe zone behind it,
+  trend agreement) and that coin, each level leaning on the one above it until it has evidence of its own. Recent
+  results count more (90-day half-life). With no evidence there is no edge and no call: on 1h, fees alone are often
+  0.2–0.4R, so 1h calls are rarer.
+- **Watched zones.** Every other new zone it looked at is watched instead of called: scored the same way and learned
+  from, never traded or announced. That keeps the learning going on setups it doesn't trade yet.
+- **Scoring.** Every two minutes, on 5m (1h calls), 15m (4h) or 1h (1d) candles with the journal's rules: only candles
+  after the call, the invalidation first when both levels are inside one candle, fees on both sides. A buy that
+  doesn't fill in 24/18/10 candles expires; a position that reaches neither level in 72/60/45 candles is closed at
+  that candle's close. Each call also records whether price reached the full level before the invalidation and how
+  far it got, which is what the learning uses.
+- **Take-profit placement.** Once a setup has 15 finished zones, the take-profit can sit 70–90% of the way to the
+  level when that earned more on those zones than the full level (price stalling just under resistance).
+- **Paper wallet.** The desk has its own wallet (1000 USDT; reset it in Settings). Each call's size is Kelly-scaled to
+  its confidence and reward-to-risk: a quarter of the Kelly fraction of the wallet, at most 15%, never more than the
+  free cash. The buy, take-profit and stop go in as one group, so whichever exit fills first cancels the other.
+- **Record.** How many calls reached the take-profit, R in all, by setup with each setup's edge, and whether the
+  confidence is right: calls grouped by what they said against how often they worked, and whether they sort good
+  calls from bad better than a flat guess. Under 20 finished calls it says it is too early to judge.
+- **Notifications.** New calls, fills and results go to Discord / Telegram (each can be turned off; expiries are off
+  by default) and to Alerts → History. The brief has an "Agent desk" section, and the chart agent mentions a call
+  the desk has running on the coin you ask about.
+
+## Status
+
+The **Status** tab shows whether the AI model answers (Ollama reachable and the model installed, the last answer and
+the last failure), whether Binance answers, the Binance key, the alert channels, and every background job's last
+run and last error; a job that stops reporting is marked overdue. The tab's badge counts what is wrong.
 
 ## Live trades (trade manager)
 
@@ -447,6 +493,12 @@ like, not documented. Fees paid in BNB are not converted into the PnL (noted on 
 | GET | `/api/binance/positions?refresh=` | Your spot holdings, Simple Earn positions and USD-M positions, and the bots' apart |
 | GET | `/api/binance/pnl-calendar?kind=&tz_offset=` | Realized PnL per day (USD) from the imported fills; `tz_offset` as JavaScript's `getTimezoneOffset()` |
 | GET | `/api/binance/gridbots/{id}/compare` | A tracked bot's real fills next to the simulated ones |
+| GET | `/api/status` | The AI model, market data, Binance key, alert channels and background jobs |
+| GET | `/api/desk` | The agent desk: settings, coins, last and next runs, record, calibration, setups |
+| GET | `/api/desk/calls?status=&symbol=&watched=` | Calls (or watched zones), newest first |
+| PUT | `/api/desk/settings` / `/api/desk/symbols` | Desk settings; the active watchlist it follows |
+| POST | `/api/desk/run?interval=1h` / `/api/desk/score` | Look at the latest closed candle now; score the running calls now |
+| GET / POST | `/api/desk/wallet` / `/api/desk/wallet/reset` | The desk's paper wallet; start it again `{start_cash}` |
 | GET/POST | `/api/journal` | Logged trades with their evaluation; POST a trade `{symbol, interval, direction, entry, stop, targets, …}` |
 | PATCH/DELETE | `/api/journal/{id}` | Notes, tags, setup, cancel or close a trade; delete it |
 | GET | `/api/journal/stats?symbol=&setup=&direction=` | Win rate, R, expectancy, profit factor, breakdowns, equity curve |

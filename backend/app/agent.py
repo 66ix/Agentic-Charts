@@ -638,6 +638,7 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
                        metric_alerts: MetricAlertService | None = None,
                        level_log: LevelLog | None = None,
                        binance: Any = None,
+                       desk: Any = None,
                        on_result: Callable[[AnalyzeResponse], Awaitable[None]] | None = None,
                        on_delta: Callable[[str], Awaitable[None]] | None = None) -> AnalyzeResponse:
     """The agent's answer to one request. With `on_result` and `on_delta` (the streaming endpoint) the drawings,
@@ -836,6 +837,8 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
             facts["your_holdings"] = portfolio_facts(positions)
     if (asked := asked_price(req.prompt, intent, result.stats.last_price)) is not None:
         facts["price_in_question"] = await asyncio.to_thread(price_check, df, asked, tf, htf_frames)
+    if desk is not None and not custom_chart and (dk := desk.facts_for(symbol)):
+        facts["agent_desk"] = dk  # the calls the desk made on its own on this coin (agent_desk.py)
     if req.previous_answer and (past := past_answer_facts(req.previous_answer, result.stats.last_price)):
         facts["last_time_you_asked"] = past
     if overview:

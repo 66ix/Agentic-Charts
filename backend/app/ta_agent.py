@@ -1259,6 +1259,11 @@ def describe(facts: dict, symbol: str, detail: str = "normal", prompt: str = "")
     if facts.get("your_note_on_this_coin"):
         tail.append(f"Your note on this coin: {facts['your_note_on_this_coin']}")
     tail += _position_lines(facts.get("your_position"), facts.get("your_holdings"))
+    for c in (facts.get("agent_desk") or {}).get("running", [])[:2]:
+        tf_l = TF_LABEL.get(c["interval"], c["interval"])
+        what = "holding from" if c["status"] == "open" else "waiting to buy at"
+        tail.append(f"The desk has a {tf_l} call running: {what} {_fmt(c['entry'])}, take-profit {_fmt(c['tp'])}, "
+                    f"wrong below {_fmt(c['stop'])} ({c['confidence'] * 100:.0f}% confidence).")
     tail += facts.get("actions", [])
 
     # The topics the question named go first, then the rest in order; the answer length trims the rest.

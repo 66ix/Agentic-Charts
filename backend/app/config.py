@@ -172,6 +172,10 @@ class Settings:
     # The agent desk (agent_desk.py): automatic calls on the watchlist at candle closes, scored as candles close.
     # AGENT_DESK=off stops it from making calls on its own (the scoreboard and wallet stay readable).
     agent_desk: bool = field(default_factory=lambda: _env("AGENT_DESK", "on").lower() not in ("off", "0", "false"))
+    # The desk's own paper wallet (paper.py rules), apart from yours. AGENT_PAPER_STORE=memory keeps it in memory.
+    agent_paper_store: str = field(default_factory=lambda: _env(
+        "AGENT_PAPER_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "agent_paper.json")))
+    agent_wallet_cash: float = field(default_factory=lambda: float(_env("AGENT_WALLET_CASH", "1000")))
 
     # Read-only Binance account import (binance_account.py, binance_import.py). The env key wins over one entered
     # in the app, which is kept in BINANCE_KEY_STORE (mode 600). Imported fills live in BINANCE_IMPORT_STORE.

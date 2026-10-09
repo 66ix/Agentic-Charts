@@ -51,7 +51,7 @@ REPEAT_COOLDOWN_MS = 5 * 60_000  # a repeating alert fires at most this often
 EXPIRY_CHECK_SECONDS = 30.0
 MAX_HISTORY = 500
 Side = Literal["above", "below", "inside"]
-HistoryKind = Literal["price", "signal", "brief", "trade"]
+HistoryKind = Literal["price", "signal", "brief", "trade", "desk"]
 
 
 # ------------------------------------------------------------- evaluation --

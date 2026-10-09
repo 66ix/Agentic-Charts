@@ -86,6 +86,7 @@ class BriefSections(BaseModel):
     market: bool = True     # the market mood: Fear & Greed, BTC dominance, market cap (live values only)
     holdings: bool = True   # your Binance holdings and positions, when a read-only key is set
     notes: bool = True      # your note on each coin
+    desk: bool = True       # the agent desk: calls it is running, what closed in the last day, its record
 
 
 class BriefSettings(BaseModel):
@@ -319,7 +320,7 @@ def holdings_lines(pos: dict) -> list[str]:
 
 def render_brief(now: datetime, tz_name: str, interval: str, coins: list[CoinBrief], sections: BriefSections,
                  events: Optional[list[dict]] = None, market: Optional[str] = None,
-                 holdings: Optional[list[str]] = None) -> str:
+                 holdings: Optional[list[str]] = None, desk: Optional[list[str]] = None) -> str:
     """The brief's plain text. `now` is local to `tz_name`."""
     tfl = TF_LABEL.get(interval, interval)
     out = [f"Market brief — {now:%a %d %b %Y, %H:%M} ({tz_name})",
@@ -340,6 +341,8 @@ def render_brief(now: datetime, tz_name: str, interval: str, coins: list[CoinBri
     blocks = ["\n".join(out + overview)]
     if holdings:
         blocks.append("\n".join([holdings[0]] + [f"  {x}" for x in holdings[1:]]))
+    if desk:
+        blocks.append("\n".join([desk[0]] + [f"  {x}" for x in desk[1:]]))
     blocks += [_coin_block(c, tfl, sections) for c in coins]
     if sections.events and events:
         lines, demo = _event_lines(events, now.tzinfo or timezone.utc, now)
@@ -363,6 +366,8 @@ class BriefService:
                  metrics: Optional[MarketMetricsService] = None, holdings_provider: Optional[HoldingsProvider] = None,
                  levels: Optional[LevelLog] = None) -> None:
         self.market = market
+        # The agent desk's lines for the brief (agent_desk.AgentDesk.brief_lines), set once the desk exists.
+        self.desk_lines: Optional[Callable[[float], list[str]]] = None
         self.kimi = kimi
         self.derivatives = derivatives
         self.alerts = alerts
@@ -454,7 +459,13 @@ class BriefService:
                 if note := self._notes.get(c.symbol):
                     c.notes.append(f"Your note: {note}")
         holdings = holdings_lines(positions) if secs.holdings and positions else None
-        text = render_brief(local, cfg.timezone, iv, list(coins), secs, events, market, holdings)
+        desk = None
+        if secs.desk and self.desk_lines is not None:
+            try:
+                desk = self.desk_lines(ts) or None
+            except Exception as exc:  # the brief goes out without it
+                log.info("Brief: desk lines failed: %s", exc)
+        text = render_brief(local, cfg.timezone, iv, list(coins), secs, events, market, holdings, desk)
         limit = min((c.limit for c in self.alerts.channels), default=4000)
         return BriefResult(text=text, messages=split_message(text, limit),
                            generated_at=datetime.fromtimestamp(ts, timezone.utc), symbols=syms, interval=iv,

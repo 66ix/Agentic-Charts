@@ -367,11 +367,13 @@ def build_wallet(start_cash: float, fee_pct: float, created_at: int, orders: lis
 class PaperService:
     """The paper wallet: orders saved to PAPER_STORE, the wallet replayed on demand (cached until the next minute)."""
 
-    def __init__(self, market: "MarketData", settings: Optional[Settings] = None) -> None:
+    def __init__(self, market: "MarketData", settings: Optional[Settings] = None, store: Optional[str] = None,
+                 start_cash: float = DEFAULT_CASH) -> None:
+        """`store` and `start_cash` give a second wallet of its own (the agent desk's); default: the user's."""
         self.market = market
         self.s = settings or get_settings()
-        self._store = store_path(self.s.paper_store)
-        self.start_cash = DEFAULT_CASH
+        self._store = store_path(self.s.paper_store if store is None else store)
+        self.start_cash = start_cash
         self.fee_pct = DEFAULT_FEE
         self.created_at = int(time.time())
         self._orders: dict[str, PaperOrder] = {}
