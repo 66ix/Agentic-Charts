@@ -39,6 +39,8 @@ from fastapi.responses import StreamingResponse
 from .agent import run_analysis
 from .agent_desk import AgentDesk, DeskSettings
 from .alerts import AlertPatch, AlertService
+from .changes import changes as chart_changes
+from .coach import CoachService
 from .backtest import BacktestRequest, run_backtest
 from .brief import BriefService, BriefSettings, NoChannelError
 from .config import get_settings
@@ -151,6 +153,8 @@ async def lifespan(app: FastAPI):
     app.state.desk = AgentDesk(market, app.state.db, app.state.alerts, app.state.market_scanner.track)
     app.state.desk.start()
     app.state.brief.desk_lines = app.state.desk.brief_lines
+    # Coaching from your own imported trades (coach.py).
+    app.state.coach = CoachService(market, app.state.binance, app.state.desk)
     # Session/period levels (session_levels.py) and the order-book heatmap (orderbook_heatmap.py).
     app.state.session_levels = SessionLevelsService(market)
     app.state.heatmap = OrderbookHeatmapService(market, app.state.hub)
@@ -311,7 +315,7 @@ async def agent_analyze(req: AnalyzeRequest, request: Request) -> AnalyzeRespons
                                   gridbots=getattr(st, "gridbots", None), metrics=getattr(st, "metrics", None),
                                   metric_alerts=getattr(st, "metric_alerts", None),
                                   level_log=getattr(st, "levels", None), binance=getattr(st, "binance", None),
-                                  desk=getattr(st, "desk", None))
+                                  desk=getattr(st, "desk", None), coach=getattr(st, "coach", None))
     except MarketDataError as exc:
         raise HTTPException(502, str(exc)) from exc
     except ValueError as exc:
@@ -341,7 +345,8 @@ async def agent_analyze_stream(req: AnalyzeRequest, request: Request) -> Streami
                                      gridbots=getattr(st, "gridbots", None), metrics=getattr(st, "metrics", None),
                                      metric_alerts=getattr(st, "metric_alerts", None),
                                      level_log=getattr(st, "levels", None), binance=getattr(st, "binance", None),
-                                     desk=getattr(st, "desk", None), on_result=on_result, on_delta=on_delta)
+                                     desk=getattr(st, "desk", None), coach=getattr(st, "coach", None),
+                                     on_result=on_result, on_delta=on_delta)
             await queue.put({"type": "done", "response": res.model_dump(mode="json")})
         except MarketDataError as exc:
             await queue.put({"type": "error", "status": 502, "detail": str(exc)})
@@ -1432,6 +1437,33 @@ async def desk_wallet_reset(request: Request, body: dict | None = Body(None)) ->
     except (TypeError, ValueError) as exc:
         raise HTTPException(422, str(exc)) from exc
     return (await _desk(request).wallet()).model_dump()
+
+
+# ----------------------------------------------------------------------- coaching and what changed --
+#   GET  /api/coach?refresh=      habits in your own imported trades and how they compare with the desk's zones
+#   POST /api/changes             {symbol, interval, since} → what changed on that chart since `since` (UNIX s)
+
+
+@app.get("/api/coach")
+async def coach_report(request: Request, refresh: bool = Query(False)) -> dict:
+    return await request.app.state.coach.report(refresh)
+
+
+@app.post("/api/changes")
+async def changes_since(request: Request, body: dict = Body(...)) -> dict:
+    st = request.app.state
+    try:
+        symbol = _norm_symbol(str(body.get("symbol", "")))
+        interval = _check_interval(str(body.get("interval", "4h")))
+        since = int(body.get("since", 0))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(422, "Give symbol, interval and since (UNIX seconds)") from exc
+    if since <= 0 or since > time.time():
+        raise HTTPException(422, "since must be a past time in UNIX seconds")
+    try:
+        return await chart_changes(st.market, symbol, interval, since, st.kimi, getattr(st, "desk", None), st.alerts)
+    except MarketDataError as exc:
+        raise HTTPException(502, str(exc)) from exc
 
 
 # ------------------------------------------------------ session and period levels, order-book heatmap --

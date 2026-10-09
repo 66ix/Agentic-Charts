@@ -128,6 +128,9 @@ export interface DeskSummary {
   };
   verdict: string;
   setups: DeskSetupRow[];
+  /** Setups by how their zones did in the last `recent_days` days, best first. */
+  working_now: { bucket: string; setup: string; zones: number; hits: number; expected: number; lift: number; verdict: string }[];
+  recent_days: number;
 }
 
 /** What the last run of a timeframe found. */

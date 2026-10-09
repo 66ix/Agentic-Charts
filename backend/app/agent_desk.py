@@ -43,7 +43,8 @@ from .config import Settings, get_settings
 from .db import Database
 from .desk_calls import (ACTIVE, CLOSED, DESK_TIMEFRAMES, ENTRY_BARS, MIN_EXPECTED_R, SCORE_RES, Candidate, DeskCall,
                          call_text, candidates, expected_r, kelly, new_call, outcome_text, score_call, size_for)
-from .desk_learning import calibration, estimate, learnable, take_profit, verdict, bucket_table
+from .desk_learning import (RECENT_DAYS, bucket_table, calibration, estimate, learnable, take_profit, verdict,
+                            working_now)
 from .jobs import jobs
 from .market_data import INTERVAL_SECONDS, MarketData, candles_to_df
 from .paper import NewPaperOrder, PaperService
@@ -229,7 +230,8 @@ class AgentDesk:
                 "timed_out": sum(c.status == "timed_out" for c in closed),
                 "expired": sum(c.status == "expired" for c in rows),
                 "avg_r": round(sum(rs) / len(rs), 3) if rs else None, "total_r": round(sum(rs), 3) if rs else None,
-                "calibration": cal, "verdict": verdict(cal), "setups": bucket_table(tracked, now, self.demo_ok)}
+                "calibration": cal, "verdict": verdict(cal), "setups": bucket_table(tracked, now, self.demo_ok),
+                "working_now": working_now(tracked, now, RECENT_DAYS, self.demo_ok), "recent_days": RECENT_DAYS}
 
     def status(self) -> dict:
         now = time.time()

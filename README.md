@@ -275,6 +275,21 @@ The **Agent desk** tab (V) is the agent trading on its own, on paper, and learni
   by default) and to Alerts → History. The brief has an "Agent desk" section, and the chart agent mentions a call
   the desk has running on the coin you ask about.
 
+- **Working now.** The Record tab also ranks setups by how their zones did over the last 30 days against random odds
+  (at least 5 finished zones each). Ask the agent "what's working right now?".
+
+## Coaching and "since you last looked"
+
+- **Coach** (Account → Coach, `coach.py`): habits in your own closed spot trades from the Binance import, each with the
+  numbers behind it and only once there are 5+ trades: selling winners early (how often price went 3%+ higher within
+  3 days of your sell, and by how much), losers held longer than winners, average win against average loss and the
+  win rate that needs, buying after a pump or near the top of the week's range against your other buys, fees as a
+  share of what the trades made, and how your buys inside the desk's zones did against your other buys on those
+  coins. Ask the agent "how am I trading?".
+- **Since you last looked** (`changes.py`): back on a coin and timeframe after two hours or more, a card on the chart
+  says what changed: price, zones of the agent's that broke, were tested or are new, a structure break, Kimi's
+  signals, the desk's calls and alerts that fired. Nothing to say, no card.
+
 ## Status
 
 The **Status** tab shows whether the AI model answers (Ollama reachable and the model installed, the last answer and
@@ -494,6 +509,8 @@ like, not documented. Fees paid in BNB are not converted into the PnL (noted on 
 | GET | `/api/binance/pnl-calendar?kind=&tz_offset=` | Realized PnL per day (USD) from the imported fills; `tz_offset` as JavaScript's `getTimezoneOffset()` |
 | GET | `/api/binance/gridbots/{id}/compare` | A tracked bot's real fills next to the simulated ones |
 | GET | `/api/status` | The AI model, market data, Binance key, alert channels and background jobs |
+| GET | `/api/coach?refresh=` | Habits in your own imported trades |
+| POST | `/api/changes` | `{symbol, interval, since}` → what changed on that chart since then |
 | GET | `/api/desk` | The agent desk: settings, coins, last and next runs, record, calibration, setups |
 | GET | `/api/desk/calls?status=&symbol=&watched=` | Calls (or watched zones), newest first |
 | PUT | `/api/desk/settings` / `/api/desk/symbols` | Desk settings; the active watchlist it follows |

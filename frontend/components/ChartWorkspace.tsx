@@ -76,6 +76,7 @@ import IndicatorSettingsDialog from "./IndicatorSettingsDialog";
 import LayersPanel from "./LayersPanel";
 import SettingsDialog from "./SettingsDialog";
 import ShortcutsDialog from "./ShortcutsDialog";
+import SinceLastLooked from "./SinceLastLooked";
 import SymbolSearch from "./SymbolSearch";
 import Watchlist, { type WatchlistList, type WatchlistSort } from "./Watchlist";
 
@@ -1269,6 +1270,7 @@ const convoRef = useRef({ messages, overlays, lastIntent, watchlist, spotOnly, i
               );
             })}
           </div>
+          {!replay && <SinceLastLooked symbol={symbol} interval={interval} />}
           {replay && (
             <ReplayBar
               state={replay}

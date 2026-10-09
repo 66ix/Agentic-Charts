@@ -34,12 +34,13 @@ import {
   type PnlCalendar,
   type SpotHolding,
 } from "@/lib/binance";
+import { fetchCoach, type CoachFinding, type CoachReport } from "@/lib/coach";
 import { displaySymbol, formatPrice } from "@/lib/format";
 import { fetchGridBots, type GridBot } from "@/lib/gridbot";
 
 const STATUS_MS = 60_000;
 
-type Tab = "setup" | "positions" | "pnl" | "fills";
+type Tab = "setup" | "positions" | "pnl" | "coach" | "fills";
 
 const KIND_LABEL: Record<FillKind, string> = { manual: "Mine", bot: "Bot", unknown: "Unknown" };
 const KIND_CLASS: Record<FillKind, string> = {
@@ -584,6 +585,73 @@ function PnlView({ enabled, version }: { enabled: boolean; version: number }) {
   );
 }
 
+const COACH_TONE: Record<CoachFinding["tone"], string> = {
+  warn: "border-yellow-400/40 bg-yellow-400/5",
+  good: "border-up/40 bg-up/5",
+  info: "border-line bg-panel2/40",
+};
+
+function CoachView({ enabled, version }: { enabled: boolean; version: number }) {
+  const [data, setData] = useState<CoachReport | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async (refresh = false, signal?: AbortSignal) => {
+    setLoading(true);
+    try {
+      setData(await fetchCoach(refresh, signal));
+      setError(null);
+    } catch (err) {
+      if ((err as Error).name !== "AbortError") setError((err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!enabled) return;
+    const ctrl = new AbortController();
+    void load(false, ctrl.signal);
+    return () => ctrl.abort();
+  }, [enabled, load, version]);
+
+  if (!enabled) return <p className="px-3 py-4 text-[12px] leading-relaxed text-mute">Add a read-only Binance key (Setup) and import your fills: the coach reads your own closed trades.</p>;
+  const ov = data?.overview;
+  return (
+    <div className="space-y-3 px-3 py-2 text-[12px]">
+      <div className="flex items-center gap-2 text-[11px] text-mute">
+        <span>Habits in your own closed spot trades, with the numbers behind each.</span>
+        <div className="flex-1" />
+        <button type="button" onClick={() => void load(true)} className="btn-ghost h-6 w-6 p-0" title="Look again">
+          <RefreshCw className={clsx("h-3.5 w-3.5", loading && "animate-spin")} />
+        </button>
+      </div>
+      {error && <Notice tone="error">{error}</Notice>}
+      {!data && !error && <Loader2 className="mx-auto h-4 w-4 animate-spin text-mute" />}
+      {ov && ov.trades > 0 && (
+        <div className="flex flex-wrap gap-x-3 font-mono text-[11px] text-mute">
+          <span>
+            {ov.trades} trades · won <span className="text-ink">{ov.win_rate}%</span>
+          </span>
+          <span>
+            PnL <span className={tone(ov.pnl)}>{money(ov.pnl, true)}</span>
+          </span>
+          <span>fees {money(ov.fees)}</span>
+        </div>
+      )}
+      {data?.note && <Notice>{data.note}</Notice>}
+      {data && !data.note && data.findings.length === 0 && <Notice>Nothing stands out in your trades: no habit the coach looks for showed up.</Notice>}
+      {data?.findings.map((f) => (
+        <div key={f.code} className={clsx("rounded border px-2.5 py-2", COACH_TONE[f.tone])}>
+          <div className="text-[12px] font-medium text-ink">{f.title}</div>
+          <p className="mt-0.5 text-[11px] leading-snug text-mute">{f.detail}</p>
+          <p className="mt-0.5 text-[10px] text-mute">On {f.trades} trades.</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function PositionsView({ bots, enabled }: { bots: GridBot[]; enabled: boolean }) {
   const [data, setData] = useState<AccountPositions | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -972,14 +1040,14 @@ export default function AccountPanel() {
   return (
     <div className="flex h-full min-h-0 flex-col text-xs">
       <div className="flex items-center gap-1 border-b border-line px-2 py-1.5">
-        {(["setup", "positions", "pnl", "fills"] as const).map((t) => (
+        {(["setup", "positions", "pnl", "coach", "fills"] as const).map((t) => (
           <button
             key={t}
             type="button"
             onClick={() => setTab(t)}
             className={clsx("rounded px-2 py-1 text-[11px] font-medium", tab === t ? "bg-panel2 text-ink" : "text-mute hover:text-ink")}
           >
-            {t === "setup" ? "Setup" : t === "positions" ? "Positions" : t === "pnl" ? "PnL" : `Fills${status ? ` · ${status.fills}` : ""}`}
+            {t === "setup" ? "Setup" : t === "positions" ? "Positions" : t === "pnl" ? "PnL" : t === "coach" ? "Coach" : `Fills${status ? ` · ${status.fills}` : ""}`}
           </button>
         ))}
       </div>
@@ -999,6 +1067,7 @@ export default function AccountPanel() {
         )}
         {tab === "positions" && <PositionsView bots={bots} enabled={enabled} />}
         {tab === "pnl" && <PnlView enabled={enabled} version={version} />}
+        {tab === "coach" && <CoachView enabled={enabled} version={version} />}
         {tab === "fills" && <FillsView bots={bots} enabled={enabled} version={version} />}
       </div>
     </div>

@@ -1256,6 +1256,25 @@ def describe(facts: dict, symbol: str, detail: str = "normal", prompt: str = "")
             lead.append(ms.get("note") or f"No {ms['timeframe']} setups across the market right now.")
     if facts.get("kimi"):
         lead += _kimi_lines(facts["kimi"])
+    if (yt := facts.get("your_trading")) is not None:
+        if yt.get("note"):
+            lead.append(yt["note"])
+        ov = yt.get("overview") or {}
+        if ov.get("trades"):
+            lead.append(f"Across your {ov['trades']} closed spot trades you won {ov['win_rate']:g}% for "
+                        f"{ov['pnl']:+,.2f} USDT after {ov['fees']:,.2f} in fees.")
+        lead += [h["detail"] for h in yt.get("habits", [])[:3]]
+    if (wn := facts.get("what_works_now")) is not None:
+        rows = wn.get("setups") or []
+        if not rows:
+            lead.append(f"Not enough finished zones in the last {wn['days']} days to say what is working yet.")
+        else:
+            best, worst = rows[0], rows[-1]
+            lead.append(f"Over the last {wn['days']} days the best was {best['setup']}: {best['hits']} of "
+                        f"{best['zones']} zones reached their level ({best['lift']:.1f}x random odds).")
+            if worst is not best:
+                lead.append(f"The worst was {worst['setup']}: {worst['hits']} of {worst['zones']} "
+                            f"({worst['lift']:.1f}x).")
     if facts.get("your_note_on_this_coin"):
         tail.append(f"Your note on this coin: {facts['your_note_on_this_coin']}")
     tail += _position_lines(facts.get("your_position"), facts.get("your_holdings"))

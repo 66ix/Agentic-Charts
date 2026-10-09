@@ -233,6 +233,20 @@ function Record({ d, wallet }: { d: DeskState; wallet: PaperWallet | null }) {
           </div>
         )}
       </Section>
+      <Section title={`Working now (last ${s.recent_days} days)`}>
+        {s.working_now.length === 0 && <p className="text-[11px] text-mute">Not enough finished zones in the last {s.recent_days} days yet (5 per setup).</p>}
+        {s.working_now.map((r) => (
+          <div key={r.bucket} className="flex items-baseline gap-2 text-[11px]">
+            <span className="min-w-0 flex-1 truncate text-ink" title={r.setup}>
+              {r.setup}
+            </span>
+            <span className="font-mono text-mute">
+              {r.hits}/{r.zones}
+            </span>
+            <span className={clsx("w-12 text-right font-mono", r.lift >= 1.2 ? "text-up" : r.lift <= 0.8 ? "text-down" : "text-mute")}>{r.lift.toFixed(2)}x</span>
+          </div>
+        ))}
+      </Section>
       <Section title="By setup">
         {s.setups.length === 0 && <p className="text-[11px] text-mute">No closed calls yet. Results appear here as calls finish.</p>}
         {s.setups.length > 0 && (

@@ -285,3 +285,30 @@ def bucket_table(calls: list[DeskCall], now: float, demo_ok: bool = False) -> li
                     "total_r": round(sum(rs), 3) if rs else None,
                     "lift": round(_shrink(hits, exp, BASE_LIFT), 3)})
     return sorted(out, key=lambda r: (-r["calls"], r["bucket"]))
+
+
+# ----------------------------------------------------------------------- working now --
+
+RECENT_DAYS = 30
+MIN_RECENT = 5
+
+
+def working_now(calls: list[DeskCall], now: float, days: int = RECENT_DAYS, demo_ok: bool = False) -> list[dict]:
+    """Setups by how their zones did in the last `days` days (calls and watched zones whose level outcome is known),
+    against what random odds would have given, best first. Only setups with MIN_RECENT finished zones."""
+    since = now - days * 86400
+    groups: dict[str, list[DeskCall]] = {}
+    for c in learnable(calls, demo_ok):
+        if (c.closed_at or c.created_at) >= since:
+            groups.setdefault(c.bucket, []).append(c)
+    out = []
+    for b, rows in groups.items():
+        if len(rows) < MIN_RECENT:
+            continue
+        hits = sum(1 for c in rows if c.level_hit)
+        exp = sum(random_odds(level_r(c)) for c in rows)
+        lift = hits / exp if exp else 0.0
+        out.append({"bucket": b, "setup": rows[-1].setup, "zones": len(rows), "hits": hits,
+                    "expected": round(exp, 2), "lift": round(lift, 2),
+                    "verdict": "working" if lift >= 1.2 else "not working" if lift <= 0.8 else "no edge either way"})
+    return sorted(out, key=lambda r: (-r["lift"], -r["zones"]))

@@ -438,6 +438,11 @@ async def _confluence_frames(market: MarketData, symbol: str, tf: str, features:
 
 
 KIMI_WORDS = re.compile(r"\bkimi\b", re.I)
+# "What's working right now?" → the desk's setups over the last 30 days; "how am I trading?" → coaching.
+WORKING_WORDS = re.compile(r"\b(what(?:'s| is) working|working (?:right )?now|which setups?|best setups? (?:lately|now|"
+                           r"this (?:week|month))|desk(?:'s)? (?:record|results?|doing))\b", re.I)
+COACH_WORDS = re.compile(r"\b(coach|my (?:trading|trades|habits|mistakes)|how am i (?:trading|doing)|what am i doing "
+                         r"wrong|am i (?:selling|buying) too)\b", re.I)
 
 # A price in the question ("what's at 7.1561?", "is 25.4 support?"); not one followed by a timeframe, percent or
 # multiplier, and only within PRICE_RANGE of the last price so "top 10 coins" or "2025" isn't read as one.
@@ -639,6 +644,7 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
                        level_log: LevelLog | None = None,
                        binance: Any = None,
                        desk: Any = None,
+                       coach: Any = None,
                        on_result: Callable[[AnalyzeResponse], Awaitable[None]] | None = None,
                        on_delta: Callable[[str], Awaitable[None]] | None = None) -> AnalyzeResponse:
     """The agent's answer to one request. With `on_result` and `on_delta` (the streaming endpoint) the drawings,
@@ -839,6 +845,16 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         facts["price_in_question"] = await asyncio.to_thread(price_check, df, asked, tf, htf_frames)
     if desk is not None and not custom_chart and (dk := desk.facts_for(symbol)):
         facts["agent_desk"] = dk  # the calls the desk made on its own on this coin (agent_desk.py)
+    if desk is not None and WORKING_WORDS.search(req.prompt):
+        summ = desk.summary()
+        facts["what_works_now"] = {"days": summ["recent_days"], "setups": summ["working_now"][:8],
+                                   "desk_record": {k: summ[k] for k in ("closed", "tp", "total_r")}}
+    if coach is not None and COACH_WORDS.search(req.prompt):
+        rep = await _guarded(coach.report(), "coaching", 30.0)
+        if rep is not None:
+            facts["your_trading"] = {"overview": rep["overview"], "note": rep.get("note"),
+                                     "habits": [{"title": f["title"], "detail": f["detail"], "tone": f["tone"]}
+                                                for f in rep["findings"]]}
     if req.previous_answer and (past := past_answer_facts(req.previous_answer, result.stats.last_price)):
         facts["last_time_you_asked"] = past
     if overview:
