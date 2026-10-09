@@ -68,6 +68,8 @@ CONCURRENCY = 3
 TRACK_TIMEOUT = 30.0
 REPEAT_BARS = 2 * max(ENTRY_BARS.values())
 MAX_SYMBOLS = 40
+KEEP_WATCHED_DAYS = 365   # watched zones older than this count for ~6% at a 90-day half-life: dropped once a day
+PRUNE_SECONDS = 86400.0
 
 SCHEMA = [
     """CREATE TABLE desk_calls (
@@ -173,6 +175,7 @@ class AgentDesk:
         self._score_lock = asyncio.Lock()
         self._tasks: list[asyncio.Task] = []
         self._scored_at = 0.0
+        self._pruned_at = 0.0
         self.last_run: dict[str, dict] = (self._kv("last_run") or {})
 
     # ------------------------------------------------------------------ storage
@@ -531,7 +534,22 @@ class AgentDesk:
                 ran.append(tf)
         if ran or now - self._scored_at >= self.score_seconds:
             await self.score(now)
+        if now - self._pruned_at >= PRUNE_SECONDS:
+            await self.prune(now)
         return ran
+
+    async def prune(self, now: Optional[float] = None) -> int:
+        """Drop watched zones that finished more than KEEP_WATCHED_DAYS ago (calls are always kept) → how many."""
+        now = time.time() if now is None else now
+        self._pruned_at = now
+        cutoff = now - KEEP_WATCHED_DAYS * 86400
+        old = [c.id for c in self._calls.values() if c.shadow and c.status not in ACTIVE
+               and (c.closed_at or c.created_at) < cutoff]
+        for cid in old:
+            self._calls.pop(cid, None)
+        if old:
+            await self.db.run(self.db.executemany, "DELETE FROM desk_calls WHERE id = ?", [(cid,) for cid in old])
+        return len(old)
 
     def start(self) -> None:
         if not self._tasks:

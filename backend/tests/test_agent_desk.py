@@ -275,6 +275,12 @@ def test_a_run_makes_calls_with_paper_orders_and_scores_them():
     facts = desk.facts_for(c.symbol)
     assert facts and facts["recent_results"][0]["status"] == "tp"
 
+    # Watched zones that finished over a year ago are dropped; calls are kept.
+    w = desk.calls(watched=True)[0]
+    desk._calls[w.id] = w.model_copy(update={"status": "expired", "closed_at": end - 400 * 86400})
+    assert asyncio.run(desk.prune(now=end)) == 1 and w.id not in {x.id for x in desk.calls(watched=True, limit=5000)}
+    assert desk.db.one("SELECT id FROM desk_calls WHERE id = ?", (w.id,)) is None
+
     # Calls are kept in the database: a new desk on the same database sees them.
     again = AgentDesk(market, desk.db, None, StubTrack(), desk.paper, settings=desk.s)
     assert {x.id for x in again.calls()} == {x.id for x in desk.calls()}
