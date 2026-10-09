@@ -41,6 +41,7 @@ from .alerts import AlertPatch, AlertService
 from .backtest import BacktestRequest, run_backtest
 from .brief import BriefService, BriefSettings, NoChannelError
 from .config import get_settings
+from .db import Database
 from .derivatives import DerivativesService
 from .gridbot import GridBotCreate, GridBotPatch, GridBotService, GridSimulateRequest, error_text
 from .grid_planner import GridBacktestRequest, GridPlanRequest, backtest_grid, plan_grid
@@ -57,6 +58,7 @@ from .holdings_watch import HoldingsWatch, WatchSettings
 from .paper import NewPaperOrder, PaperService
 from .events import EventsService
 from .futures_data import FUTURES_PERIODS, FuturesDataService
+from .jobs import jobs
 from .kimi_service import KimiService
 from .llm import LLMClient
 from .postmortem import PostMortemService, ReviewSettings
@@ -93,6 +95,7 @@ log = logging.getLogger("agentic-charts")
 async def lifespan(app: FastAPI):
     market = MarketData()
     app.state.market = market
+    app.state.db = Database()  # SQLite for the agent desk's records (db.py)
     app.state.llm = LLMClient()
     app.state.models = ModelChooser(app.state.llm)  # model picked in the app's settings, and model evals
     app.state.derivatives = DerivativesService()
@@ -169,6 +172,7 @@ async def lifespan(app: FastAPI):
     await app.state.hub.shutdown()
     await asyncio.gather(market.close(), app.state.llm.close(), app.state.metrics.close(),
                          app.state.derivatives.close())
+    app.state.db.close()
 
 
 settings = get_settings()
@@ -204,6 +208,35 @@ async def health(request: Request) -> dict:
         "llm": {"provider": st.llm.provider, "model": st.llm.model},
         "streams": st.hub.stats(),
         "liquidation_stream": st.derivatives.stream_connected,
+    }
+
+
+@app.get("/api/status")
+async def status(request: Request) -> dict:
+    """Everything the status panel shows: whether the AI model answers, market data, the Binance key, alert channels
+    and every background job's last run and error."""
+    st = request.app.state
+    llm = st.llm.health()
+    if llm["provider"] == "ollama":
+        tags = await st.models.ollama_models()
+        names = {m["model"] for m in tags["installed"]}
+        llm["reachable"] = tags["error"] is None
+        llm["installed"] = st.llm.model in names or f"{st.llm.model}:latest" in names
+        llm["problem"] = tags["error"] or (None if llm["installed"] else
+                                           f"{st.llm.model} isn't installed in Ollama (ollama pull {st.llm.model})")
+    else:
+        llm["reachable"] = None if llm["configured"] else False  # cloud models aren't pinged: it would cost a call
+        llm["problem"] = None if llm["configured"] else "No AI model set up: answers use the built-in writer"
+    key = st.binance.account.status()
+    return {
+        "time": int(time.time()),
+        "llm": llm,
+        "market": {"data_source": st.market.settings.data_source, "binance_reachable": st.market.binance_usable(),
+                   "streams": st.hub.stats(), "liquidation_stream": st.derivatives.stream_connected},
+        "binance_key": {k: key.get(k) for k in ("configured", "ok", "masked", "problems", "error", "checked_at")},
+        "channels": st.alerts.channel_status,
+        "database": {"path": st.db.path, "memory": st.db.memory},
+        "jobs": jobs.status(),
     }
 
 

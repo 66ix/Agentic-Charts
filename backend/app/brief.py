@@ -38,6 +38,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from .alerts import AlertService, fmt_price, read_store, split_message, store_path, write_store
 from .config import Settings, get_settings
+from .jobs import jobs
 from .kimi_service import closed_only, summarize as kimi_summarize
 from .market_data import INTERVAL_SECONDS, MarketData, candles_to_df
 from .scanner import DEFAULT_WATCHLIST, SCAN_INTENT, summarize as scan_summarize
@@ -616,6 +617,7 @@ class BriefService:
 
     def start(self) -> None:
         if self._task is None:
+            jobs.declare("brief", "Brief and weekly level check", self.check_seconds)
             self._task = asyncio.create_task(self._run(), name="brief:scheduler")
 
     async def close(self) -> None:
@@ -630,7 +632,9 @@ class BriefService:
             await asyncio.sleep(self.check_seconds)
             try:
                 await self.tick()
-            except Exception:
+                jobs.ok("brief")
+            except Exception as exc:
+                jobs.fail("brief", exc)
                 log.exception("Brief scheduler check failed")
 
     def _save(self) -> None:

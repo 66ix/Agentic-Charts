@@ -59,6 +59,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 from .binance_account import BinanceAccount, BinanceApiError, BinanceKeyError, write_private
 from .config import Settings, get_settings
 from .gridbot import RECENT_FILLS, GridBot, GridBotResult, GridBotService, split_symbol
+from .jobs import jobs
 from .journal import ImportedTrade, JournalService, NewJournalEntry
 from .scanner import tickers
 
@@ -461,6 +462,8 @@ class BinanceImportService:
     # ----------------------------------------------------------- lifecycle
     def start(self) -> None:
         if self._task is None:
+            jobs.declare("binance_import", "Binance auto-import", max(60, self.settings.auto_minutes * 60),
+                         self.settings.auto_minutes > 0)
             self._task = asyncio.create_task(self._loop())
 
     async def close(self) -> None:
@@ -481,13 +484,16 @@ class BinanceImportService:
         """Run the import when auto-import is on and it is due. True when it ran (or tried to)."""
         now = time.time() if now is None else now
         minutes = self.settings.auto_minutes
+        jobs.declare("binance_import", "Binance auto-import", max(60, minutes * 60), minutes > 0)
         if minutes <= 0 or self._lock.locked() or self.account.store.load() is None:
             return False
         if now - (self.last or {}).get("at", 0) < minutes * 60:
             return False
         try:
             await self.run(auto=True)
+            jobs.ok("binance_import")
         except Exception as exc:  # the next tick tries again; the status shows the error
+            jobs.fail("binance_import", exc)
             log.warning("Binance auto-import failed: %s", exc)
             self.last = {"at": int(now), "auto": True, "error": str(exc)}
             self._save()

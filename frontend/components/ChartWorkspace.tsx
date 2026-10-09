@@ -5,6 +5,7 @@ import { Bell, Bot, CandlestickChart, Layers as LayersIcon, List, Loader2, Messa
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useAlerts, type FiredAlert, type SignalFired } from "@/hooks/useAlerts";
+import { useAppStatus } from "@/hooks/useAppStatus";
 import { useHigherTfOverlays } from "@/hooks/useHigherTfOverlays";
 import { useIsMobile } from "@/hooks/useMediaQuery";
 import { readStored, usePersistentState, writeStored } from "@/hooks/usePersistentState";
@@ -13,6 +14,7 @@ import { alertFromDrawing, alertOverlays, chartZones, saveBriefNotes, SELL_SIGNA
 import { fetchAccountPositions, fetchBinanceKey, positionOverlays } from "@/lib/binance";
 import { analyzeStream } from "@/lib/api";
 import { imageToDataUrl, readScreenshot } from "@/lib/screenshot";
+import { statusProblems } from "@/lib/status";
 import { composeSnapshot, shareSnapshot } from "@/lib/snapshot";
 import { DEFAULT_INTERVAL, DEFAULT_SYMBOL } from "@/lib/config";
 import { isCustom } from "@/lib/customSymbols";
@@ -420,6 +422,8 @@ export default function ChartWorkspace() {
   const alertsApi = useAlerts(onAlertsFired, onSignalFired);
   const { alerts, add: addAlerts, update: updateAlert, addTrigger, addSignal } = alertsApi;
   const armedAlerts = alerts.filter((a) => a.armed).length;
+  // Problems worth a badge on the Status tab: the AI model not answering, Binance down, failing or stalled jobs.
+  const statusBadge = statusProblems(useAppStatus(60_000).data) || undefined;
   const alertOverlaysFor = useCallback((s: string) => alertOverlays(alerts, s), [alerts]);
 
   const htf = useHigherTfOverlays(symbol, interval);
@@ -1145,6 +1149,7 @@ const convoRef = useRef({ messages, overlays, lastIntent, watchlist, spotOnly, i
       id: def.id,
       label: def.label,
       icon: def.icon,
+      badge: def.id === "status" ? statusBadge : undefined,
       render: () => <def.Component {...dockProps} />,
     })),
   ];

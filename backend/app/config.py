@@ -166,6 +166,13 @@ class Settings:
     market_scan_store: str = field(default_factory=lambda: _env(
         "MARKET_SCAN_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "market_scan.json")))
 
+    # SQLite for records that grow and need queries (db.py): the agent desk's calls and what it learns from them.
+    agent_db: str = field(default_factory=lambda: _env(
+        "AGENT_DB", str(Path(__file__).resolve().parent.parent / ".cache" / "agent.db")))
+    # The agent desk (agent_desk.py): automatic calls on the watchlist at candle closes, scored as candles close.
+    # AGENT_DESK=off stops it from making calls on its own (the scoreboard and wallet stay readable).
+    agent_desk: bool = field(default_factory=lambda: _env("AGENT_DESK", "on").lower() not in ("off", "0", "false"))
+
     # Read-only Binance account import (binance_account.py, binance_import.py). The env key wins over one entered
     # in the app, which is kept in BINANCE_KEY_STORE (mode 600). Imported fills live in BINANCE_IMPORT_STORE.
     binance_api_key: str = field(default_factory=lambda: _env("BINANCE_API_KEY", ""), repr=False)

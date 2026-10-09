@@ -41,6 +41,7 @@ from . import sell_check
 from .alerts import AlertService, fmt_price, read_store, store_path, write_store
 from .config import Settings, get_settings
 from .indicators import rsi, rsi_divergence, structure_breaks
+from .jobs import jobs
 from .kimi_service import closed_only
 from .market_data import INTERVAL_SECONDS, MarketData, candles_to_df
 from .patterns import liquidity_sweeps
@@ -622,6 +623,9 @@ class SignalAlertService:
             for key in sorted(want - self._watches.keys()):
                 queue = await self.hub.subscribe(*key)
                 self._watches[key] = (queue, asyncio.create_task(self._watch(*key, queue), name=f"signals:{key}"))
+            # Checked on candle closes: expect one at least every slowest-armed timeframe.
+            slowest = max((INTERVAL_SECONDS.get(iv, 3600) for _, iv in want), default=3600)
+            jobs.declare("signal_alerts", "Signal alerts", slowest, bool(want))
 
     async def _watch(self, symbol: str, interval: str, queue: asyncio.Queue) -> None:
         key = (symbol, interval)
@@ -648,7 +652,9 @@ class SignalAlertService:
         await asyncio.sleep(self.close_delay)
         try:
             await self.on_bar_close(symbol, interval, bar_time)
-        except Exception:
+            jobs.ok("signal_alerts", f"last check {symbol} {interval}")
+        except Exception as exc:
+            jobs.fail("signal_alerts", exc)
             log.exception("Signal check failed for %s %s", symbol, interval)
 
     async def on_bar_close(self, symbol: str, interval: str, bar_time: int) -> list[SignalAlert]:

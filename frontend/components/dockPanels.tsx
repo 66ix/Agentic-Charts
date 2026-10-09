@@ -1,6 +1,6 @@
 "use client";
 
-import { CalendarClock, Coins, CalendarRange, Crosshair, FlaskConical, Gauge, Grid3x3, NotebookPen, Radar, Wallet, type LucideIcon } from "lucide-react";
+import { Activity, CalendarClock, Coins, CalendarRange, Crosshair, FlaskConical, Gauge, Grid3x3, NotebookPen, Radar, Wallet, type LucideIcon } from "lucide-react";
 import type { ComponentType } from "react";
 
 import type { DockPanelProps } from "@/lib/dock";
@@ -14,6 +14,7 @@ import JournalPanel from "./JournalPanel";
 import MarketDataPanel from "./MarketDataPanel";
 import PaperPanel from "./PaperPanel";
 import ScannerPanel from "./ScannerPanel";
+import StatusPanel from "./StatusPanel";
 import TradeManagerPanel from "./TradeManagerPanel";
 
 /** A side-panel tab that only needs the shared dock props (the workspace builds the agent, watchlist,
@@ -38,4 +39,5 @@ export const EXTRA_PANELS: DockPanelDef[] = [
   { id: "gridbots", label: "Grid bots", icon: Grid3x3, hotkey: "b", Component: GridBotPanel },
   { id: "scanner", label: "Scanner", icon: Radar, hotkey: "u", Component: ScannerPanel },
   { id: "account", label: "Account", icon: Wallet, Component: AccountPanel },
+  { id: "status", label: "Status", icon: Activity, Component: StatusPanel },
 ];

@@ -905,8 +905,13 @@ def _context_block(history: list[ChatTurn], overlays: list, previous: AnalysisIn
 class LLMClient:
     def __init__(self, settings: Settings | None = None) -> None:
         self.s = settings or get_settings()
-        self._client = httpx.AsyncClient(timeout=httpx.Timeout(self.s.llm_timeout, connect=3.0))
+        self._client = httpx.AsyncClient(timeout=httpx.Timeout(self.s.llm_timeout, connect=3.0),
+                                         event_hooks={"response": [self._seen_response]})
         self._down_until = 0.0  # circuit breaker: skip the LLM briefly after a connection failure
+        # For the status panel: the last answer from the model and the last failure (HTTP error or no connection).
+        self.last_ok_at: float | None = None
+        self.last_error: str | None = None
+        self.last_error_at: float | None = None
         # Provider and model picked in the app's settings (model_choice.py); None = the .env ones.
         self.choice: tuple[str, str] | None = None
 
@@ -914,8 +919,22 @@ class LLMClient:
         return self.provider != "none" and time.monotonic() >= self._down_until
 
     def _trip(self, exc: Exception) -> None:
+        self.last_error, self.last_error_at = f"{type(exc).__name__}: {exc}"[:300], time.time()
         if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout)):
             self._down_until = time.monotonic() + 30
+
+    async def _seen_response(self, response: httpx.Response) -> None:
+        if response.status_code < 400:
+            self.last_ok_at = time.time()
+        else:
+            self.last_error, self.last_error_at = f"HTTP {response.status_code} from {response.url.host}", time.time()
+
+    def health(self) -> dict:
+        """What the status panel shows about the model: configured, paused after a connection failure, last answer
+        and last failure."""
+        return {"provider": self.provider, "model": self.model, "configured": self.provider != "none",
+                "paused": time.monotonic() < self._down_until, "last_ok_at": self.last_ok_at,
+                "last_error": self.last_error, "last_error_at": self.last_error_at}
 
     async def close(self) -> None:
         await self._client.aclose()

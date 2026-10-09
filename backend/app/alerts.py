@@ -36,6 +36,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 from .config import Settings, get_settings
+from .jobs import jobs
 from .schemas import AlertSpec, PriceAlert
 
 if TYPE_CHECKING:
@@ -419,6 +420,7 @@ class AlertService:
         self.expire_due()  # alerts that ran out while the server was down
         await self._sync()
         if self._expiry_task is None:
+            jobs.declare("alerts", "Price alerts", EXPIRY_CHECK_SECONDS)
             self._expiry_task = asyncio.create_task(self._expiry_loop(), name="alerts:expiry")
 
     async def close(self) -> None:
@@ -531,7 +533,9 @@ class AlertService:
             await asyncio.sleep(EXPIRY_CHECK_SECONDS)
             try:
                 self.expire_due()
-            except Exception:
+                jobs.ok("alerts", f"{len(self._alerts)} alerts, watching {len(self._watches)} coins")
+            except Exception as exc:
+                jobs.fail("alerts", exc)
                 log.exception("Alert expiry check failed")
 
     # ----------------------------------------------------- notifications
