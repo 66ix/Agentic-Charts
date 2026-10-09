@@ -23,8 +23,10 @@ from .config import get_settings
 from .kimi import Inputs, KimiCooked, Result, __version__
 from .market_data import DERIVED_INTERVALS, INTERVAL_SECONDS, MarketData
 from .kimi.patterns_v574 import HARM_NAMES, HARM_SHORT, HARM_STATES
-from .schemas import (Candle, KimiBreakout, KimiFib, KimiFibLevel, KimiForecast, KimiHarmonic, KimiLevel,
-                      KimiNextCandle, KimiPattern, KimiPoint, KimiResponse, KimiRow, KimiSegment, KimiSignal)
+from .kimi_agent import MIN_EVALS, MIN_SIGNALS, SignalFilter, apply_fix, features, forecast_fix, signal_filter
+from .schemas import (Candle, KimiAgentForecast, KimiBreakout, KimiFib, KimiFibLevel, KimiForecast, KimiHarmonic,
+                      KimiLevel, KimiNextCandle, KimiPattern, KimiPoint, KimiResponse, KimiRow, KimiSegment,
+                      KimiSignal)
 
 log = logging.getLogger(__name__)
 
@@ -146,16 +148,59 @@ def _fib(res: Result, fc: dict, times: np.ndarray, step: int) -> KimiFib | None:
                    pocket_low=min(pocket), pocket_high=max(pocket))
 
 
-def _signals(res: Result, times: np.ndarray) -> list[KimiSignal]:
+def _signals(res: Result, times: np.ndarray, verdicts: dict | None = None) -> list[KimiSignal]:
     sigs = [s for s in res.signals if s.typ < 3]   # pattern break-outs and harmonics are drawn as patterns
     keep = [s for s in sigs if s.typ < 2][-MAX_LABELS:] + [s for s in sigs if s.typ == 2][-MAX_LABELS:]
     keep.sort(key=lambda s: (s.pivot_bar, s.bar))
+    verdicts = verdicts or {}
     return [KimiSignal(type=TYPE_NAMES[s.typ], direction="long" if s.dir > 0 else "short",
                        text=LABELS[(s.typ, s.dir)], time=int(times[s.pivot_bar]), confirm_time=int(times[s.bar]),
                        price=s.price, entry=float(s.entry), confluence=int(s.conf),
                        tier={1: "top", 0: "rest", -1: "warm-up"}[s.tier],
                        result={0: "open", 1: "win", 2: "loss", 3: "expiry"}[s.result],
-                       r=None if math.isnan(s.r) else round(float(s.r), 2)) for s in keep]
+                       r=None if math.isnan(s.r) else round(float(s.r), 2),
+                       agent=verdicts[s.bar][0] if s.bar in verdicts else None,
+                       agent_r=verdicts[s.bar][1] if s.bar in verdicts else None) for s in keep]
+
+
+def _agent(res: Result, fc: KimiForecast | None, o: np.ndarray, h: np.ndarray, l: np.ndarray,
+           c: np.ndarray) -> tuple[KimiForecast | None, list[KimiRow], SignalFilter]:
+    """Kimi + Agent (kimi_agent.py): the corrected forecast, the comparison rows and the signal filter."""
+    feats = features(o, h, l, c)
+    fix = forecast_fix(res.forecasts, feats, np.asarray(res.atr, dtype=float), len(c) - 1)
+    sf = signal_filter(res.signals, feats)
+    rows: list[KimiRow] = []
+    if fc is not None:
+        path, hi, lo, nudge = apply_fix(fix, fc.path, fc.band_high, fc.band_low, float(res.atr[-1]), fc.horizon)
+        final = path[-1]
+        born = path[0]
+        head = (f"▲ Proj: {fmt_price(final)}" if final > born * 1.0001 else f"▼ Proj: {fmt_price(final)}"
+                if final < born * 0.9999 else fc.headline)
+        fc = fc.model_copy(update={"agent": KimiAgentForecast(
+            active=fix.active, reason=fix.reason, path=path, band_high=hi, band_low=lo, final=final,
+            pct_change=(final - born) / born * 100.0 if born else 0.0, nudge_pct=round(nudge, 3),
+            headline=head if fix.active else fc.headline, evals=fix.evals, kimi_err=fix.kimi_err,
+            agent_err=fix.agent_err, kimi_dir=fix.kimi_dir, agent_dir=fix.agent_dir, t=fix.t, weights=fix.weights,
+            now=fix.now)})
+    if fix.kimi_err is not None:
+        better = fix.agent_err is not None and fix.agent_err < fix.kimi_err
+        rows.append(KimiRow(label="End error Kimi / +Agent", value=f"{fix.kimi_err:.2f}% / {fix.agent_err:.2f}%",
+                            tone="up" if fix.active else "down" if not better else None))
+        rows.append(KimiRow(label="Direction Kimi / +Agent",
+                            value=f"{(fix.kimi_dir or 0) * 100:.0f}% / {(fix.agent_dir or 0) * 100:.0f}%"))
+    learning = fix.evals < MIN_EVALS
+    rows.append(KimiRow(label="Forecast correction",
+                        value=(f"on, {fix.nudge_vol:+.2f}σ now" if fix.active else
+                               f"off: learning {fix.evals}/{MIN_EVALS}" if learning else "off: not better yet"),
+                        tone="up" if fix.active else "mute"))
+    if sf.all_r is not None:
+        rows.append(KimiRow(label="Signals all / taken",
+                            value=f"{sf.all_r:+.2f}R / {(sf.take_r or 0):+.2f}R ({sf.took}/{sf.judged})",
+                            tone="up" if sf.active else None))
+    rows.append(KimiRow(label="Signal filter", value="on" if sf.active else (
+        f"off: learning {sf.judged}/{MIN_SIGNALS}" if sf.judged < MIN_SIGNALS else "off: not better yet"),
+        tone="up" if sf.active else "mute"))
+    return fc, rows, sf
 
 
 def _bar_time(times: np.ndarray, step: int):
@@ -249,13 +294,14 @@ def compute(symbol: str, interval: str, candles: list[Candle], source: str,
     fc = res.last_forecast()
     odds = {px: pct for _, px, pct in fc["level_odds"]} if fc else {}
     patterns, breakouts = _patterns(res, times, step)
+    forecast, agent_rows, sf = _agent(res, _forecast(res, fc, times, c, step) if fc else None, o, h, l, c)
     return KimiResponse(
         symbol=symbol, interval=interval, version=__version__, data_source=source, bars=len(candles),
         last_closed=int(times[-1]), levels=_levels(res, times, odds),
-        fib=_fib(res, fc, times, step) if fc else None, signals=_signals(res, times),
-        forecast=_forecast(res, fc, times, c, step) if fc else None,
-        patterns=patterns, breakouts=breakouts, harmonics=_harmonics(res, times, step),
-        verify=verify_rows(res), stats=stats_rows(res), notes=NOTES,
+        fib=_fib(res, fc, times, step) if fc else None, signals=_signals(res, times, sf.verdicts),
+        forecast=forecast, patterns=patterns, breakouts=breakouts, harmonics=_harmonics(res, times, step),
+        verify=verify_rows(res), stats=stats_rows(res), agent=agent_rows, agent_filter=sf.active,
+        agent_filter_reason=sf.reason, notes=NOTES,
         seconds=round(time.perf_counter() - started, 2))
 
 
@@ -276,6 +322,15 @@ def summarize(k: KimiResponse) -> dict:
         out["forecast"] = {"headline": f.headline, "close": last, "end": round(f.final, 8), "bars": f.horizon,
                            "range": [f.range_low, f.range_high], "volatility": f.vol_regime,
                            **({"next_candle": f.next_candle.direction} if f.next_candle else {})}
+        if f.agent is not None:
+            a = f.agent
+            out["kimi_plus_agent"] = {"in_use": a.active, "end": round(a.final, 8), "headline": a.headline,
+                                      "correction_pct": a.nudge_pct, "why": a.reason}
+    if k.agent_filter:
+        out["agent_signal_filter"] = "on: each recent signal says take or skip"
+        for s, sig in zip(out["recent_signals"], k.signals[-5:]):
+            if sig.agent:
+                s["agent"] = sig.agent
     if k.fib:
         out["fib"] = [{"ratio": x.ratio, "price": x.price, "odds_pct": x.odds} for x in k.fib.levels]
     ago = lambda t: round((k.last_closed - t) / INTERVAL_SECONDS[k.interval])  # noqa: E731

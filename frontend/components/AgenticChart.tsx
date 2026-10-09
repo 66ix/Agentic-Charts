@@ -19,6 +19,7 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useSta
 import KimiPanel from "./KimiPanel";
 
 import { useChartEvents } from "@/hooks/useChartEvents";
+import { usePersistentState } from "@/hooks/usePersistentState";
 import { useOrderbookHeatmap } from "@/hooks/useOrderbookHeatmap";
 import { useSessionLevels } from "@/hooks/useSessionLevels";
 
@@ -40,6 +41,7 @@ import { TimeMapper } from "@/lib/chart/timeMapper";
 import { HISTORY_BARS, WS_URL } from "@/lib/config";
 import { customLabel, fetchCustom, isCustom, POLL_MS } from "@/lib/customSymbols";
 import { formatCompact, formatPrice, pricePrecision } from "@/lib/format";
+import { KIMI_PLAIN_KEY, withAgent } from "@/lib/kimiAgent";
 import { isVisible, type LayerVisibility } from "@/lib/layers";
 import { sessionDrawing } from "@/lib/sessionLevels";
 import {
@@ -348,6 +350,8 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
   const [loading, setLoading] = useState(true);
   const [plotHeight, setPlotHeight] = useState(0); // container minus time axis, for sub-pane labels
   const [paneVals, setPaneVals] = useState<PaneValues>(NO_PANE_VALUES);
+  // Kimi + Agent once the agent's correction is proven; true = Kimi's own line (kimiAgent.ts).
+  const [kimiPlain, setKimiPlain] = usePersistentState<boolean>(KIMI_PLAIN_KEY, false);
   const [kimi, setKimi] = useState<{ data: KimiResult | null; loading: boolean; error: string | null }>({
     data: null,
     loading: false,
@@ -1179,7 +1183,7 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
     if (kimiPrimRef.current) series.detachPrimitive(kimiPrimRef.current);
     kimiPrimRef.current = null;
     markersRef.current.kimi = [];
-    const data = kimi.data;
+    const data = kimi.data ? withAgent(kimi.data, kimiPlain) : null;
     if (data && !loading && data.symbol === props.symbol && data.interval === props.interval) {
       const prim = new KimiPrimitive(mapperRef.current, data, kimiParts);
       series.attachPrimitive(prim);
@@ -1190,19 +1194,21 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
         ? []
         : data.signals.filter((s) => s.time >= first).map((s) => {
             const style = KIMI_MARKER[s.text] ?? { color: "#9ca3af", shape: "circle" as const };
+            // With the agent's signal filter in use, the signals it would skip are greyed and crossed.
+            const skip = !kimiPlain && data.agent_filter && s.agent === "skip";
             return {
               time: toTime(s.time),
               position: s.direction === "long" ? "belowBar" : "aboveBar",
               shape: style.shape,
-              color: style.color,
-              text: s.text,
+              color: skip ? "#6b7280" : style.color,
+              text: skip ? `${s.text}✕` : s.text,
               size: s.type === "U/Dn" ? 0.6 : 0.8,
             };
           });
     }
     applyMarkers();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [kimi.data, loading, props.symbol, props.interval, applyMarkers, kimiPartsKey]);
+  }, [kimi.data, loading, props.symbol, props.interval, applyMarkers, kimiPartsKey, kimiPlain]);
 
   // Room on the right for the forecast and its label while Kimi Cooked is on.
   const kimiHorizon = kimiOn && kimiParts.forecast ? (kimi.data?.forecast?.horizon ?? 0) : 0;
@@ -1617,7 +1623,7 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
           {eventTip.item.title ?? eventTip.item.label}
         </div>
       )}
-      {kimiOn && <KimiPanel data={kimi.data} loading={kimi.loading} error={kimi.error} />}
+      {kimiOn && <KimiPanel data={kimi.data} loading={kimi.loading} error={kimi.error} plain={kimiPlain} onPlain={setKimiPlain} />}
       {loading && (
         <div className="pointer-events-none absolute inset-0 z-10 grid place-items-center text-sm text-mute">
           Loading candles…
