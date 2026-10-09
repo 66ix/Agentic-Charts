@@ -1,0 +1,511 @@
+diff --git a/backend/app/agent.py b/backend/app/agent.py
+index 1a876e2..f12f77b 100644
+--- a/backend/app/agent.py
++++ b/backend/app/agent.py
+@@ -32,7 +32,7 @@ from .grid_planner import plan_facts as grid_plan_facts
+ from .gridbot import GridBotService
+ from .kimi_service import KimiService, summarize
+ from .llm import ChartContext, LLMClient
+-from .market_data import INTERVAL_SECONDS, MarketData, candles_to_df
++from .market_data import FALLBACK_SYMBOLS, INTERVAL_SECONDS, MarketData, candles_to_df
+ from .market_metrics import MarketMetricsService, overview_facts
+ from .market_scanner import MarketScanner, MarketScanResult
+ from .scanner import DEFAULT_WATCHLIST, scan, tickers
+@@ -256,6 +256,13 @@ async def _market_overview(metrics: MarketMetricsService | None) -> dict | None:
+     return overview_facts(res) if res else None
+ 
+ 
++async def _listed(market: MarketData) -> frozenset[str] | None:
++    """Binance's live USDT pairs, or None when only the built-in fallback list is at hand (synthetic data, or
++    exchangeInfo failed): that list is too short to rule a coin out."""
++    symbols = await _guarded(market.list_symbols(), "symbol list", 5.0)
++    return frozenset(symbols) if symbols and symbols is not FALLBACK_SYMBOLS else None
++
++
+ async def _vs_btc(market: MarketData, symbol: str) -> dict | None:
+     """The coin against BTC on daily candles (relative.py): change vs BTC today and over 7 days, 30-day correlation
+     and beta. None for BTC itself, pairs not quoted in a dollar stablecoin, or when the candles can't be had."""
+@@ -382,7 +389,7 @@ async def _chart_cvd(futures: FuturesDataService | None, symbol: str, tf: str) -
+ 
+ 
+ # Left out of the "numbers used" view: tool transcripts and what the answer did rather than read.
+-USED_SKIP = frozenset({"research", "actions", "navigation", "spot_note", "trading_style"})
++USED_SKIP = frozenset({"research", "actions", "navigation", "spot_note", "trading_style", "symbol", "coin"})
+ SHOW_VERBS = re.compile(r"\b(?:show|add|turn on|switch on|enable|display|plot|put|overlay|bring up|pull up|"
+                         r"draw|toggle|apply|equip|load)\b", re.I)
+ FUTURES_WORDS = re.compile(r"\b(funding|open interest|oi|long[ /-]?short|l/s|liquidat\w*|order ?book|walls?|cvd|"
+@@ -651,7 +658,7 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
+     plan and the rest go to `on_result` before the summary is written, and the summary to `on_delta` as it is."""
+     settings = get_settings()
+     scanner = scanner or MarketScanner(market)
+-    chart = ChartContext(req.symbol, req.interval, req.watchlist, req.spot_only)
++    chart = ChartContext(req.symbol, req.interval, req.watchlist, req.spot_only, await _listed(market))
+     steps: list[str] = []
+     research: list[dict] = []
+     loop = None
+@@ -779,7 +786,11 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
+     df = candles_to_df(candles)
+     # Detection is CPU-bound (SciPy); keep the event loop free for streams.
+     result = await asyncio.to_thread(analyze, df, run_intent, tf, higher, frames, req.indicator_settings)
+-    facts = dict(result.facts)
++    # The coin by name, so the narrator never guesses one, and a flag when the candles are demo data. The chart's own
++    # candles ("client") are demo data when this server only has synthetic data to give.
++    demo = source == "synthetic" or (source == "client" and market.settings.data_source == "synthetic")
++    facts = {"symbol": symbol, "coin": symbol if custom_chart else base,
++             **({"data_source": "demo (synthetic)"} if demo else {}), **result.facts}
+ 
+     for ov in result.overlays:
+         ov.id = _new_id()
+diff --git a/backend/app/agent_loop.py b/backend/app/agent_loop.py
+index 26b73a2..af883a8 100644
+--- a/backend/app/agent_loop.py
++++ b/backend/app/agent_loop.py
+@@ -18,7 +18,8 @@ import httpx
+ from pydantic import ValidationError
+ 
+ from .llm import INTENT_SCHEMA, INTENT_SYSTEM, ChartContext, LLMClient
+-from .schemas import ALL_FEATURES, INTERVALS, SCAN_FILTERS, AnalysisIntent, ChatTurn
++from .schemas import ALL_FEATURES, INTERVALS, SCAN_FILTERS, AnalysisIntent, ChatTurn, norm_symbol
++from .symbols import QUOTES, find_symbol
+ 
+ log = logging.getLogger(__name__)
+ 
+@@ -141,9 +142,26 @@ def _clip(obj: Any) -> str:
+     return text if len(text) <= MAX_RESULT_CHARS else text[:MAX_RESULT_CHARS] + "…"
+ 
+ 
++def _pair(raw: Any, chart: ChartContext) -> tuple[str, str | None]:
++    """The coin a tool call names, as a Binance pair ('INJ', 'BTC/USDT', 'solana' → INJUSDT, BTCUSDT, SOLUSDT),
++    and an error instead when there is none to look up: looking up a bad pair would give demo candles or fail."""
++    text = str(raw or chart.symbol).strip()
++    parts = text.upper().split("/")
++    ratio = len(parts) == 2 and all(len(p) > 4 and p.endswith(QUOTES) for p in parts)  # ETHUSDT/BTCUSDT, not ETH/USDT
++    if ratio or text.upper().startswith("INDEX:"):
++        return text, f"{text} is built in the browser and can't be looked up; use a USDT pair like ETHUSDT"
++    sym = find_symbol(text) or norm_symbol(text)
++    if not sym.isalnum() or (chart.listed and sym.endswith("USDT") and sym not in chart.listed):
++        return sym, f"unknown symbol {text}; use a USDT pair like INJUSDT"
++    return sym, None
++
++
+ async def _run_tool(box: Toolbox, name: str, args: dict, chart: ChartContext) -> tuple[Any, str]:
++    if name in ("look_at_chart", "read_kimi", "market_context"):
++        sym, error = _pair(args.get("symbol"), chart)
++        if error:
++            return {"error": error}, ""
+     if name == "look_at_chart":
+-        sym = str(args.get("symbol") or chart.symbol).upper()
+         tf = args.get("timeframe") if args.get("timeframe") in INTERVALS else chart.interval
+         feats = [f for f in args.get("features") or [] if f in ALL_FEATURES] or ["support_resistance"]
+         return await box.look(sym, tf, feats), f"Looked at {sym} on {tf}"
+@@ -158,11 +176,9 @@ async def _run_tool(box: Toolbox, name: str, args: dict, chart: ChartContext) ->
+         res = await box.market_scan(tf, direction)
+         return res, f"Scanned the top {res.get('coins', 0)} coins for {tf} setups"
+     if name == "read_kimi" and box.kimi is not None:
+-        sym = str(args.get("symbol") or chart.symbol).upper()
+         tf = args.get("timeframe") if args.get("timeframe") in INTERVALS else chart.interval
+         return await box.kimi(sym, tf), f"Read Kimi Cooked on {sym} {tf}"
+     if name == "market_context":
+-        sym = str(args.get("symbol") or chart.symbol).upper()
+         return await box.context(sym), f"Checked futures data, order flow and upcoming events for {sym}"
+     return {"error": f"unknown tool {name}"}, ""
+ 
+@@ -192,7 +208,11 @@ async def plan_with_tools(llm: LLMClient, prompt: str, history: list[ChatTurn],
+                 return LoopResult(intent, f"{llm.provider}:{llm.model} (tools)", steps, research)
+             for call in turn.calls:
+                 calls_made += 1
+-                result, step = await _run_tool(box, call.name, call.args, chart)
++                try:
++                    result, step = await _run_tool(box, call.name, call.args, chart)
++                except Exception as exc:  # one failed look (too few candles, Binance down) doesn't end the plan
++                    log.info("Planner tool %s failed: %s", call.name, exc)
++                    result, step = {"error": f"{call.name} failed: {exc}"}, ""
+                 if step:
+                     steps.append(step)
+                     research.append({"tool": call.name, "args": call.args, "result": result})
+diff --git a/backend/app/llm.py b/backend/app/llm.py
+index 76f13a3..d3b465d 100644
+--- a/backend/app/llm.py
++++ b/backend/app/llm.py
+@@ -277,6 +277,9 @@ INTENT_SYSTEM = (
+     "'Best setups right now' or 'scan the market' is scan_market (the whole market, not the watchlist) with no "
+     "features and keep_existing true. "
+     "Keep what is on the chart (keep_existing true) whenever the request doesn't ask for a new analysis. "
++    "A question about the plan, zone, price or indicator already in view ('what would invalidate this?', 'does the "
++    "daily agree?', 'is RSI overbought here?', 'why?', 'is that a good entry?') draws nothing: features empty, "
++    "timeframe null, keep_existing true. "
+     "An alert on a lower-timeframe confirmation inside a zone ('alert me when 1m shows a CHoCH inside the 4h "
+     "demand', 'ping me on a 5m confirmation in the H4 supply') is zone_trigger, not alert_targets: features empty, "
+     "keep_existing true. "
+@@ -293,7 +296,9 @@ INTENT_SYSTEM = (
+ NARRATE_SYSTEM = (
+     "You are a concise crypto market-structure analyst inside a charting app. Answer the user's request "
+     "in at most 4 short sentences using ONLY the numbers in the FACTS JSON; never invent prices or "
+-    "indicators. Write the way an experienced trader talks to a friend: plain, connected sentences that answer the "
++    "indicators. FACTS.symbol and FACTS.coin are the coin this is about: call it by that name, never another; when "
++    "FACTS.data_source is set these are demo numbers, not live prices, so say so. "
++    "Write the way an experienced trader talks to a friend: plain, connected sentences that answer the "
+     "question first and say what the numbers mean (\"sellers are in control\", \"that zone has held every test\"), "
+     "not a list of readings. Use only the facts the question needs; leave the rest out. "
+     "FACTS.price_in_question answers a question about one price: lead with it, saying what sits there (the zone, its "
+@@ -494,6 +499,10 @@ _PROJECT_NEWS = (r"\b(?:upgrades?|hard ?forks?|mainnet|testnet|token unlocks?|un
+ _PROJECT_EVENTS = r"\b(?:upgrades?|hard ?forks?|mainnet|testnet|token unlocks?|unlocks?|airdrops?|halving)\b"
+ _QUESTION = r"^\s*(?:what|who|why|how|when|which|is|are|does|do|did|can|could|will|explain|tell me|any)\b"
+ _EXPLAIN = r"^\s*(?:what (?:is|are|does)|explain|how (?:does|do)|define|what's the difference)\b"
++_QUESTION_ONLY = (r"^\s*(?:why\b|what (?:would|could|will) (?:invalidate|kill|break|stop)|"
++                  r"does (?:the )?(?:daily|weekly|4h|h4|1d|d1|w1|1w|htf|higher)\b.*\bagree|"
++                  r"is (?:this|that|it) (?:a )?(?:good|safe|valid|worth)|how far (?:is|are)|"
++                  r"(?:is|what(?:'?s| is)|how(?:'?s| is)) (?:the )?(?:rsi|macd|ema|vwap|bollinger|stoch|sar|cvd)\b)")
+ _CHART_WORDS = (r"\b(?:chart|trend|price|level|zone|support|resistance|supply|demand|setup|entry|stop|target|rsi|macd|"
+                 r"ema|vwap|candle|breakout|pattern|swing|fvg|order ?block|liquidity|this coin|here|kimi|funding|"
+                 r"open interest|oi|long[ /-]?short|l/s|liquidat\w*|order ?book|walls?|cvd|order ?flow|positioning)\b")
+@@ -659,11 +668,11 @@ def _scan_filter(p: str) -> str:
+ 
+ 
+ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases: set[str] | None = None,
+-                chart_symbol: str | None = None) -> AnalysisIntent:
++                chart_symbol: str | None = None, listed: frozenset[str] | None = None) -> AnalysisIntent:
+     """Keyword parser used when no LLM is available."""
+     asked = prompt
+     p = prompt.lower()
+-    symbol = find_symbol(prompt, known_bases)
++    symbol = find_symbol(prompt, known_bases, listed)
+     names_coin = symbol is not None
+     if symbol == chart_symbol:
+         symbol = None
+@@ -674,7 +683,7 @@ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases
+     if metric_alerts:
+         for a, b in m_spans:
+             p, prompt = p[:a] + " " * (b - a) + p[b:], prompt[:a] + " " * (b - a) + prompt[b:]
+-        symbol = find_symbol(prompt, known_bases)
++        symbol = find_symbol(prompt, known_bases, listed)
+         names_coin = symbol is not None
+         if symbol == chart_symbol:
+             symbol = None
+@@ -821,6 +830,10 @@ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases
+         or bool(re.search(_EXPLAIN, p)))
+     # "What does Kimi say?" is read from Kimi's own facts: no detectors, and the chart stays as it is.
+     asks_kimi = not feats and bool(re.search(r"\bkimi\b", p))
++    # A question about what is already in view ("what would invalidate this?", "does the daily agree?", "is RSI
++    # overbought here?") is answered from the facts: nothing is redrawn, so a plan on the chart stays there.
++    if not feats and not acting and not navigating and not general and not asks_kimi and re.search(_QUESTION_ONLY, p):
++        return AnalysisIntent(features=[], keep_existing=True, answer_hint=asked.strip()[:200])
+     follow_up = previous is not None and not feats and not acting and not general and (
+         timeframe is not None or symbol is not None
+         or re.search(r"\b(same|again|that|it|this|now|instead|redo|refresh)\b", p))
+@@ -868,6 +881,8 @@ class ChartContext:
+     interval: str = ""
+     watchlist: list[str] = field(default_factory=list)
+     spot_only: bool = False
++    # Binance's live USDT pairs; None when only the built-in fallback list is at hand (too short to rule a coin out).
++    listed: frozenset[str] | None = None
+ 
+ 
+ @dataclass
+@@ -995,7 +1010,8 @@ class LLMClient:
+                 log.warning("LLM intent parsing failed (%s: %s); using rule parser", type(exc).__name__, exc)
+                 self._trip(exc)
+         known = {w.removesuffix("USDT") for w in (chart.watchlist if chart else [])}
+-        return rule_intent(prompt, previous, known, chart.symbol if chart else None), "rules"
++        return rule_intent(prompt, previous, known, chart.symbol if chart else None,
++                           chart.listed if chart else None), "rules"
+ 
+     async def tool_turn(self, system: str, messages: list[dict], tools: list[dict], force: str | None = None) -> ToolTurn:
+         """One model turn with tools. `messages` is provider-neutral:
+diff --git a/backend/app/schemas.py b/backend/app/schemas.py
+index 0f3a0d5..683d665 100644
+--- a/backend/app/schemas.py
++++ b/backend/app/schemas.py
+@@ -336,6 +336,12 @@ class ChatTurn(BaseModel):
+     role: Literal["user", "agent"]
+     text: str = Field("", max_length=2000)
+ 
++    @field_validator("text", mode="before")
++    @classmethod
++    def _clip(cls, v: Any) -> Any:
++        # A long earlier answer is cut, not rejected: rejecting it would fail every later request in the chat.
++        return v[:2000] if isinstance(v, str) else v
++
+ 
+ class AlertSpec(BaseModel):
+     """A price alert the client should arm. `cross` fires when price crosses `price`;
+diff --git a/backend/app/symbols.py b/backend/app/symbols.py
+index afee5b7..8a728b5 100644
+--- a/backend/app/symbols.py
++++ b/backend/app/symbols.py
+@@ -24,12 +24,18 @@ COMMON = {"BTC", "ETH", "SOL", "BNB", "XRP", "INJ", "DOGE", "ADA", "AVAX", "DOT"
+ QUOTES = ("USDT", "USDC", "FDUSD")
+ 
+ 
+-def find_symbol(text: str, known_bases: set[str] | None = None) -> str | None:
+-    """The first coin mentioned in `text`, as a USDT pair, or None."""
++def find_symbol(text: str, known_bases: set[str] | None = None, listed: frozenset[str] | None = None) -> str | None:
++    """The first coin mentioned in `text`, as a USDT pair, or None. `listed` is Binance's live USDT pairs, when
++    known: a typed USDT pair that isn't on it is skipped for the coin names and tickers in the text."""
+     bases = COMMON | (known_bases or set())
+-    m = re.search(r"\b([A-Za-z0-9]{2,12})(?:/|-)?(USDT|USDC|FDUSD)\b", text, flags=re.I)
+-    if m and m.group(1).upper() not in ("THE", "ON", "IN"):
+-        return f"{m.group(1).upper()}{m.group(2).upper()}"
++    for m in re.finditer(r"\b([A-Za-z0-9]{2,12})(?:/|-)?(USDT|USDC|FDUSD)\b", text, flags=re.I):
++        base, quote = m.group(1).upper(), m.group(2).upper()
++        # "buy INJ with 500usdt": an amount, not a coin; a base has a letter.
++        if base in ("THE", "ON", "IN") or not re.search(r"[A-Z]", base):
++            continue
++        if listed and quote == "USDT" and f"{base}{quote}" not in listed:
++            continue
++        return f"{base}{quote}"
+     low = text.lower()
+     for name in sorted(NAMES, key=len, reverse=True):
+         if re.search(rf"\b{re.escape(name)}\b", low):
+diff --git a/backend/evals/intents.jsonl b/backend/evals/intents.jsonl
+index fce8e5b..464e864 100644
+--- a/backend/evals/intents.jsonl
++++ b/backend/evals/intents.jsonl
+@@ -72,3 +72,11 @@
+ {"prompt": "plan a grid bot on SOL", "expect": {"grid_plan": true, "symbol": "SOLUSDT", "trade_plan": null}}
+ {"prompt": "what grid settings would you use here?", "expect": {"grid_plan": true, "trade_plan": null}}
+ {"prompt": "hide the grid lines", "expect": {"grid_plan": false}}
++{"prompt": "What would invalidate this?", "previous": {"features": [], "trade_plan": "long"}, "expect": {"features": [], "keep_existing": true, "timeframe": null, "trade_plan": null, "symbol": null}}
++{"prompt": "Does the daily agree?", "previous": {"features": [], "trade_plan": "long"}, "expect": {"features": [], "keep_existing": true, "timeframe": null, "trade_plan": null, "symbol": null}}
++{"prompt": "Does the weekly agree?", "previous": {"features": [], "trade_plan": "long"}, "expect": {"features": [], "keep_existing": true, "timeframe": null, "trade_plan": null, "symbol": null}}
++{"prompt": "Is RSI overbought here?", "previous": {"features": [], "trade_plan": "long"}, "expect": {"features": [], "keep_existing": true, "timeframe": null, "indicators_on": [], "symbol": null}}
++{"prompt": "why?", "previous": {"features": [], "trade_plan": "long"}, "expect": {"features": [], "keep_existing": true, "timeframe": null, "trade_plan": null, "symbol": null}}
++{"prompt": "is that a good entry?", "previous": {"features": [], "trade_plan": "long"}, "expect": {"features": [], "keep_existing": true, "timeframe": null, "trade_plan": null, "symbol": null}}
++{"prompt": "buy SOL with 500usdt", "expect": {"symbol": "SOLUSDT"}}
++{"prompt": "plan a 200USDT buy of ETH", "expect": {"symbol": "ETHUSDT"}}
+diff --git a/backend/tests/test_fixes_agent.py b/backend/tests/test_fixes_agent.py
+new file mode 100644
+index 0000000..d35d9e3
+--- /dev/null
++++ b/backend/tests/test_fixes_agent.py
+@@ -0,0 +1,230 @@
++"""Agent fixes: long chat turns, question-only follow-ups, amounts read as coins, tool-call symbols and the
++narrator's coin and demo-data flag."""
++
++import asyncio
++import json
++import os
++
++os.environ["DATA_SOURCE"] = "synthetic"
++os.environ["LLM_PROVIDER"] = "none"
++
++import httpx  # noqa: E402
++from fastapi.testclient import TestClient  # noqa: E402
++
++from app.agent import run_analysis  # noqa: E402
++from app.agent_loop import Toolbox, _run_tool, plan_with_tools  # noqa: E402
++from app.config import Settings  # noqa: E402
++from app.llm import ChartContext, LLMClient, ToolCall, ToolTurn, rule_intent  # noqa: E402
++from app.main import app  # noqa: E402
++from app.market_data import MarketData, synthetic_klines  # noqa: E402
++from app.schemas import AnalysisIntent, AnalyzeRequest  # noqa: E402
++from app.symbols import find_symbol  # noqa: E402
++
++PLAN_KINDS = {"plan_entry", "plan_stop", "plan_target"}
++
++
++# ------------------------------------------------------------- long chat turns --
++
++def test_a_long_earlier_answer_is_clipped_not_rejected():
++    req = AnalyzeRequest(prompt="and now?", history=[{"role": "agent", "text": "x" * 5000}])
++    assert len(req.history[0].text) == 2000
++    with TestClient(app) as client:
++        r = client.post("/api/agent/analyze", json={
++            "symbol": "INJUSDT", "interval": "4h", "prompt": "key levels",
++            "history": [{"role": "user", "text": "plan"}, {"role": "agent", "text": "word " * 1000}]})
++        assert r.status_code == 200, r.text
++
++
++# ------------------------------------------------------ question-only follow-ups --
++
++QUESTIONS = ["What would invalidate this?", "Does the daily agree?", "Is RSI overbought here?", "why?",
++             "is that a good entry?", "How far is the stop?"]
++
++
++def test_questions_about_the_plan_draw_nothing_and_keep_the_chart():
++    prev = rule_intent("Give me a long setup")
++    for q in QUESTIONS:
++        i = rule_intent(q, prev, chart_symbol="INJUSDT")
++        assert (i.features, i.keep_existing, i.timeframe, i.trade_plan) == ([], True, None, None), q
++        assert not i.has_actions and i.answer_hint == q
++    # Asking for something still draws it; another coin, the macro and Kimi keep their own paths.
++    assert rule_intent("does the daily agree with the 4h demand?", prev).features == ["supply_demand"]
++    assert rule_intent("why is SOL pumping?", prev, chart_symbol="INJUSDT").symbol == "SOLUSDT"
++    assert rule_intent("why is inflation rising?", prev).general_question
++    i = rule_intent("Same on daily", prev)
++    assert i.trade_plan == "long" and i.timeframe == "1d"
++
++
++def test_follow_up_chips_leave_the_plan_on_the_chart():
++    with TestClient(app) as client:
++        def ask(prompt, overlays=(), previous=None):
++            r = client.post("/api/agent/analyze", json={"symbol": "INJUSDT", "interval": "4h", "prompt": prompt,
++                                                        "overlays": list(overlays), "previous_intent": previous})
++            assert r.status_code == 200, r.text
++            return r.json()
++
++        first = ask("Give me a long setup")
++        assert first["plan"] and PLAN_KINDS <= {o["kind"] for o in first["overlays"]}
++        for q in ("What would invalidate this?", "Does the daily agree?", "Is RSI overbought here?"):
++            res = ask(q, first["overlays"], first["intent"])
++            assert {o["id"] for o in res["overlays"]} == {o["id"] for o in first["overlays"]}, q
++            assert res["navigate"] is None and res["analysis_interval"] == "4h"
++
++
++# ----------------------------------------------------------- amounts as coins --
++
++def test_an_amount_in_usdt_is_not_a_coin():
++    assert find_symbol("buy INJ with 500usdt") == "INJUSDT"
++    assert find_symbol("buy 200USDT of INJ") == "INJUSDT"
++    assert find_symbol("put 50usdc into sol") == "SOLUSDT"
++    assert find_symbol("show 1000PEPEUSDT") == "1000PEPEUSDT" and find_symbol("1inch/usdt daily") == "1INCHUSDT"
++    assert find_symbol("eth/usdt daily") == "ETHUSDT"
++    assert rule_intent("buy INJ with 500usdt", chart_symbol="SOLUSDT").symbol == "INJUSDT"
++
++
++def test_a_typed_pair_binance_does_not_list_falls_back_to_the_names():
++    listed = frozenset({"INJUSDT", "SOLUSDT", "ETHUSDT"})
++    assert find_symbol("XYZUSDT daily", listed=listed) is None
++    assert find_symbol("XYZUSDT or solana", listed=listed) == "SOLUSDT"
++    assert find_symbol("INJUSDT daily", listed=listed) == "INJUSDT"
++    assert find_symbol("ETHUSDC daily", listed=listed) == "ETHUSDC"  # the list only has USDT pairs
++    assert find_symbol("XYZUSDT daily") == "XYZUSDT"  # no live list: taken as typed
++    assert rule_intent("open XYZUSDT", listed=listed).symbol is None
++
++
++# --------------------------------------------------------- tool-call symbols --
++
++def _box(seen: list):
++    async def look(symbol, tf, features):
++        seen.append(("look", symbol, tf))
++        return {"symbol": symbol}
++
++    async def scan(tf, filt):
++        return []
++
++    async def context(symbol):
++        seen.append(("context", symbol))
++        return {"symbol": symbol}
++
++    async def kimi(symbol, tf):
++        seen.append(("kimi", symbol, tf))
++        return {}
++
++    return Toolbox(look=look, scan=scan, context=context, kimi=kimi)
++
++
++def test_tool_symbols_are_normalised_and_checked():
++    seen: list = []
++    box = _box(seen)
++    chart = ChartContext("INJUSDT", "4h", listed=frozenset({"INJUSDT", "BTCUSDT", "SOLUSDT"}))
++
++    async def go():
++        out = [await _run_tool(box, "look_at_chart", {"symbol": "INJ", "timeframe": "1d"}, chart),
++               await _run_tool(box, "market_context", {"symbol": "BTC/USDT"}, chart),
++               await _run_tool(box, "read_kimi", {"symbol": "solana", "timeframe": "1h"}, chart),
++               await _run_tool(box, "look_at_chart", {"symbol": "XYZ", "timeframe": "1d"}, chart),
++               await _run_tool(box, "look_at_chart", {"timeframe": "1d"},
++                               ChartContext("ETHUSDT/BTCUSDT", "4h"))]
++        return out
++
++    out = asyncio.run(go())
++    assert seen == [("look", "INJUSDT", "1d"), ("context", "BTCUSDT"), ("kimi", "SOLUSDT", "1h")]
++    assert out[0][1] == "Looked at INJUSDT on 1d"
++    assert "unknown symbol XYZ" in out[3][0]["error"] and out[3][1] == ""
++    assert "error" in out[4][0]
++    # Without Binance's live list (synthetic data) a pair is taken as given.
++    seen.clear()
++    asyncio.run(_run_tool(box, "look_at_chart", {"symbol": "pendle"}, ChartContext("INJUSDT", "4h")))
++    assert seen == [("look", "PENDLEUSDT", "4h")]
++
++
++class _ToolLLM:
++    """Looks at a coin whose candles fail, then draws."""
++
++    provider, model = "fake", "m"
++
++    def __init__(self):
++        self.tool_results: list[str] = []
++
++    def context_block(self, *a):
++        return ""
++
++    def note_failure(self, exc):
++        raise AssertionError(f"the planner gave up: {exc}")
++
++    async def tool_turn(self, system, messages, tools, force=None):
++        if messages[-1]["role"] == "tool":
++            self.tool_results.append(messages[-1]["content"])
++            return ToolTurn("", [ToolCall("2", "draw_on_chart", {"features": ["support_resistance"]})])
++        return ToolTurn("", [ToolCall("1", "look_at_chart", {"symbol": "INJUSDT", "timeframe": "1d",
++                                                              "features": []})])
++
++
++def test_a_failing_tool_is_an_error_result_not_the_end_of_the_plan():
++    async def look(symbol, tf, features):
++        raise RuntimeError("Binance klines failed: HTTP 400")  # MarketDataError in DATA_SOURCE=binance
++
++    async def nothing(*a):
++        return {}
++
++    llm = _ToolLLM()
++    box = Toolbox(look=look, scan=nothing, context=nothing)
++    res = asyncio.run(plan_with_tools(llm, "does the daily agree?", [], [], None, ChartContext("INJUSDT", "4h"),
++                                      box))
++    assert res is not None and res.intent.features == ["support_resistance"]
++    assert res.steps == [] and "Binance klines failed" in json.loads(llm.tool_results[0])["error"]
++
++
++# ------------------------------------------------- the narrator's coin and source --
++
++def _narrating_llm(seen: list) -> LLMClient:
++    def handler(req: httpx.Request) -> httpx.Response:
++        body = json.loads(req.content)
++        if "tools" in body:
++            return httpx.Response(200, json={"content": [{"type": "tool_use", "id": "t1", "name": "draw_on_chart",
++                                                          "input": AnalysisIntent().model_dump()}]})
++        seen.append(body)
++        return httpx.Response(200, json={"content": [{"type": "text", "text": "INJ holds."}]})
++
++    llm = LLMClient(Settings(llm_provider="anthropic", anthropic_api_key="k"))
++    llm._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
++    return llm
++
++
++def _analyse(req: AnalyzeRequest, md: MarketData, llm: LLMClient):
++    async def go():
++        try:
++            return await run_analysis(req, md, llm)
++        finally:
++            await md.close()
++            await llm.close()
++    return asyncio.run(go())
++
++
++def _facts_sent(body: dict) -> dict:
++    user = body["messages"][-1]["content"]
++    return json.loads(user.split("FACTS: ", 1)[1])
++
++
++def test_the_narrator_is_told_the_coin_and_that_the_data_is_demo():
++    seen: list = []
++    res = _analyse(AnalyzeRequest(symbol="INJUSDT", interval="4h", prompt="key levels"), MarketData(),
++                   _narrating_llm(seen))
++    assert res.data_source == "synthetic"
++    facts = _facts_sent(seen[0])
++    assert facts["symbol"] == "INJUSDT" and facts["coin"] == "INJ" and facts["data_source"] == "demo (synthetic)"
++    assert "FACTS.symbol" in seen[0]["system"] and "FACTS.data_source" in seen[0]["system"]
++    assert "symbol" not in res.facts and "coin" not in res.facts  # not numbers: left out of "numbers used"
++
++
++def test_the_charts_own_candles_are_flagged_only_when_the_server_is_on_demo_data():
++    candles = [c.model_dump() for c in synthetic_klines("SOLUSDT", "4h", 300)]
++    for data_source, flagged in (("synthetic", True), ("auto", False)):
++        seen: list = []
++        md = MarketData()
++        md.settings = Settings(data_source=data_source)
++        md.mark_binance_down(3600)  # auto: no network in tests, but the chart's candles may well be live
++        _analyse(AnalyzeRequest(symbol="SOLUSDT", interval="4h", prompt="key levels", candles=candles), md,
++                 _narrating_llm(seen))
++        facts = _facts_sent(seen[0])
++        assert facts["coin"] == "SOL" and ("data_source" in facts) is flagged, data_source
