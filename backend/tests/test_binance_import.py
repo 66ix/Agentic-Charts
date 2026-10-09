@@ -154,6 +154,15 @@ class MockBinance:
             return httpx.Response(200, json=[{"symbol": "ETHUSDT", "incomeType": "REALIZED_PNL", "income": "200"}])
         if path == "/fapi/v2/positionRisk":
             return httpx.Response(200, json=self.positions)
+        if path == "/sapi/v1/simple-earn/flexible/position":
+            rows = [{"asset": "USDT", "totalAmount": "100", "latestAnnualPercentageRate": "0.05", "canRedeem": True,
+                     "cumulativeTotalRewards": "1.2"},
+                    {"asset": "BTC", "totalAmount": "0", "latestAnnualPercentageRate": "0.01"}]  # empty: left out
+            return httpx.Response(200, json={"rows": rows if params["current"] == "1" else [], "total": 2})
+        if path == "/sapi/v1/simple-earn/locked/position":
+            return httpx.Response(200, json={"rows": [{"asset": "INJ", "amount": "4", "APY": "0.12", "duration": "30",
+                                                       "redeemDate": "1760000000000", "isAutoRenew": True,
+                                                       "positionId": 77}], "total": 1})
         if path == "/fapi/v1/userTrades":
             rows = self.futures.get(params["symbol"], [])
             if "fromId" in params:
@@ -403,6 +412,13 @@ def test_import_classify_journal_positions_and_bot_compare(tmp_path):
         assert spot["BTC"]["from_fills_qty"] == pytest.approx(0.5)
         assert spot["INJ"]["own_qty"] == pytest.approx(3.0)  # the bot's buy was sold again: nothing of it held
         assert pos["manual"]["cash"] == [{"asset": "USDT", "qty": 250.0}]
+        # Coins in Simple Earn: flexible and locked, with APR; a zero row is left out, stablecoins valued at $1.
+        earn = {(r["product"], r["asset"]): r for r in pos["manual"]["earn"]}
+        assert set(earn) == {("flexible", "USDT"), ("locked", "INJ")}
+        assert earn[("flexible", "USDT")]["value"] == 100 and earn[("flexible", "USDT")]["apr_pct"] == 5
+        assert earn[("locked", "INJ")]["qty"] == 4 and earn[("locked", "INJ")]["apr_pct"] == 12
+        assert earn[("locked", "INJ")]["redeem_at"] == 1_760_000_000 and earn[("locked", "INJ")]["duration_days"] == 30
+        assert not any("Earn" in n for n in pos["notes"])
         (sol,) = pos["manual"]["futures"]
         assert sol["side"] == "short" and sol["qty"] == 10 and sol["unrealized_pnl"] == 100
         assert pos["bots"]["wallet"] == {"wallet": "Trading Bots", "usdt": 512.5, "active": True}

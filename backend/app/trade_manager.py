@@ -37,6 +37,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from .alerts import AlertService, fmt_price, read_store, store_path, write_store
 from .config import Settings, get_settings
 from .indicators import structure_breaks
+from .jobs import jobs
 from .kimi_service import closed_only
 from .market_data import INTERVAL_SECONDS, MarketData, MarketDataError, candles_to_df
 from .schemas import INTERVALS, norm_symbol
@@ -303,6 +304,7 @@ class TradeManager:
         self._load()
 
     def start(self) -> None:
+        jobs.declare("trade_manager", "Trade manager", self.check_seconds)
         self._task = asyncio.create_task(self._loop(), name="trade-manager")
 
     async def close(self) -> None:
@@ -429,7 +431,8 @@ class TradeManager:
                         before = (t.last_bar, len(t.advice), t.status)
                         await self.check(t)
                         changed |= before != (t.last_bar, len(t.advice), t.status)
-                    except Exception:
+                    except Exception as exc:
+                        jobs.fail("trade_manager", exc)
                         log.exception("Trade manager check failed for %s", t.id)
                 if now - self._positions_checked >= POSITIONS_CHECK_SECONDS:
                     self._positions_checked = now
@@ -439,6 +442,7 @@ class TradeManager:
                         log.exception("Trade manager: Binance position check failed")
                 if changed:
                     self._save()
+            jobs.ok("trade_manager", f"{len(due)} trade{'s' if len(due) != 1 else ''} checked" if due else "")
 
     # ------------------------------------------------------- persistence
     def _load(self) -> None:

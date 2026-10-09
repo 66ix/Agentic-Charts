@@ -5,6 +5,7 @@ import { Bell, Bot, CandlestickChart, Layers as LayersIcon, List, Loader2, Messa
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useAlerts, type FiredAlert, type SignalFired } from "@/hooks/useAlerts";
+import { useAppStatus } from "@/hooks/useAppStatus";
 import { useHigherTfOverlays } from "@/hooks/useHigherTfOverlays";
 import { useIsMobile } from "@/hooks/useMediaQuery";
 import { readStored, usePersistentState, writeStored } from "@/hooks/usePersistentState";
@@ -13,6 +14,8 @@ import { alertFromDrawing, alertOverlays, chartZones, saveBriefNotes, SELL_SIGNA
 import { fetchAccountPositions, fetchBinanceKey, positionOverlays } from "@/lib/binance";
 import { analyzeStream } from "@/lib/api";
 import { imageToDataUrl, readScreenshot } from "@/lib/screenshot";
+import { statusProblems } from "@/lib/status";
+import { syncDeskSymbols } from "@/lib/desk";
 import { composeSnapshot, shareSnapshot } from "@/lib/snapshot";
 import { DEFAULT_INTERVAL, DEFAULT_SYMBOL } from "@/lib/config";
 import { isCustom } from "@/lib/customSymbols";
@@ -73,6 +76,7 @@ import IndicatorSettingsDialog from "./IndicatorSettingsDialog";
 import LayersPanel from "./LayersPanel";
 import SettingsDialog from "./SettingsDialog";
 import ShortcutsDialog from "./ShortcutsDialog";
+import SinceLastLooked from "./SinceLastLooked";
 import SymbolSearch from "./SymbolSearch";
 import Watchlist, { type WatchlistList, type WatchlistSort } from "./Watchlist";
 
@@ -128,7 +132,9 @@ const SEARCH_TITLES: Record<SearchMode, string | undefined> = {
 function engineNote(r: AnalyzeResponse): string {
   const tf = TIMEFRAMES.find((t) => t.value === r.analysis_interval)?.label ?? r.analysis_interval;
   const llm = r.engine.intent === "rules" || r.engine.intent === "default" ? "rule parser" : r.engine.intent;
-  return `${tf} · ${r.overlays.length} overlays · intent: ${llm} · detector: ${r.engine.detector}` +
+  // "template": no model was reachable, so the built-in writer phrased the answer (Settings → AI model sets one up).
+  const reply = r.engine.summary === "template" ? " · reply: built-in writer (no AI model)" : "";
+  return `${tf} · ${r.overlays.length} overlays · intent: ${llm} · detector: ${r.engine.detector}${reply}` +
     (r.data_source === "synthetic" ? " · demo data" : "");
 }
 
@@ -199,6 +205,13 @@ export default function ChartWorkspace() {
   const [sort, setSort] = usePersistentState<WatchlistSort>("ac:watchlist-sort", "manual");
   const currentList = lists.find((l) => l.id === activeListId) ?? lists[0] ?? DEFAULT_LISTS[0];
   const watchlist = currentList.symbols;
+  // The agent desk follows the active watchlist (when it is set to); sent once the list settles.
+  const watchKey = watchlist.join(",");
+  useEffect(() => {
+    if (!listsLoaded || !watchKey) return;
+    const id = setTimeout(() => void syncDeskSymbols(watchKey.split(",")).catch(() => undefined), 1500);
+    return () => clearTimeout(id);
+  }, [watchKey, listsLoaded]);
 
   // One-time move from the single watchlist (ac:watchlist) to named lists.
   useEffect(() => {
@@ -418,6 +431,8 @@ export default function ChartWorkspace() {
   const alertsApi = useAlerts(onAlertsFired, onSignalFired);
   const { alerts, add: addAlerts, update: updateAlert, addTrigger, addSignal } = alertsApi;
   const armedAlerts = alerts.filter((a) => a.armed).length;
+  // Problems worth a badge on the Status tab: the AI model not answering, Binance down, failing or stalled jobs.
+  const statusBadge = statusProblems(useAppStatus(60_000).data) || undefined;
   const alertOverlaysFor = useCallback((s: string) => alertOverlays(alerts, s), [alerts]);
 
   const htf = useHigherTfOverlays(symbol, interval);
@@ -1143,6 +1158,7 @@ const convoRef = useRef({ messages, overlays, lastIntent, watchlist, spotOnly, i
       id: def.id,
       label: def.label,
       icon: def.icon,
+      badge: def.id === "status" ? statusBadge : undefined,
       render: () => <def.Component {...dockProps} />,
     })),
   ];
@@ -1254,6 +1270,7 @@ const convoRef = useRef({ messages, overlays, lastIntent, watchlist, spotOnly, i
               );
             })}
           </div>
+          {!replay && <SinceLastLooked symbol={symbol} interval={interval} />}
           {replay && (
             <ReplayBar
               state={replay}

@@ -739,12 +739,37 @@ class KimiSignal(BaseModel):
     tier: Literal["top", "rest", "warm-up"]
     result: Literal["open", "win", "loss", "expiry"]
     r: Optional[float] = None
+    agent: Optional[Literal["take", "skip"]] = Field(None, description="Kimi + Agent's filter, judged walk-forward")
+    agent_r: Optional[float] = Field(None, description="The R the filter expected of it")
 
 
 class KimiNextCandle(BaseModel):
     direction: Literal["up", "down"]
     right_pct: Optional[float] = Field(None, description="Its live record on this chart; null under 30 calls")
     calls: int
+
+
+class KimiAgentForecast(BaseModel):
+    """Kimi + Agent (kimi_agent.py): Kimi's forecast with the agent's learned correction. Used (`active`) only once
+    the correction has beaten Kimi's own line on forecasts it wasn't fitted on; otherwise path = Kimi's path."""
+
+    active: bool
+    reason: str
+    path: list[float]
+    band_high: list[float]
+    band_low: list[float]
+    final: float
+    pct_change: float
+    nudge_pct: float = Field(0.0, description="The correction at the horizon, % of price")
+    headline: str
+    evals: int = 0
+    kimi_err: Optional[float] = Field(None, description="Average end error of Kimi's line, % of price")
+    agent_err: Optional[float] = Field(None, description="... and of Kimi + Agent, on the same forecasts")
+    kimi_dir: Optional[float] = None
+    agent_dir: Optional[float] = None
+    t: Optional[float] = None
+    weights: dict = Field(default_factory=dict)
+    now: dict = Field(default_factory=dict, description="The agent's features on the last closed candle")
 
 
 class KimiForecast(BaseModel):
@@ -762,6 +787,7 @@ class KimiForecast(BaseModel):
     vol_regime: Literal["LOW", "NORMAL", "HIGH"]
     headline: str = Field(..., description="'▲ Proj: 86,120', '► Flat (learning 12/30)', ...")
     next_candle: Optional[KimiNextCandle] = None
+    agent: Optional[KimiAgentForecast] = None
 
 
 class KimiRow(BaseModel):
@@ -851,5 +877,9 @@ class KimiResponse(BaseModel):
     harmonics: list[KimiHarmonic] = Field(default_factory=list, description="Harmonic patterns, oldest first")
     verify: list[KimiRow]
     stats: list[KimiRow]
+    agent: list[KimiRow] = Field(default_factory=list, description="Kimi + Agent: the forecast correction and the "
+                                                                    "signal filter against plain Kimi")
+    agent_filter: bool = Field(False, description="The signal filter is proven and in use")
+    agent_filter_reason: str = Field("", description="How the signal filter did, walk-forward")
     notes: list[str] = Field(default_factory=list)
     seconds: float = Field(0.0, description="Engine run time")

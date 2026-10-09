@@ -43,6 +43,7 @@ from pydantic import BaseModel, Field
 
 from .alerts import read_store, store_path, write_store
 from .config import Settings, get_settings
+from .jobs import jobs
 from .market_data import FALLBACK_SYMBOLS, INTERVAL_SECONDS, MarketData, candles_to_df
 from .pricefmt import _fmt
 from .scanner import change_24h
@@ -481,6 +482,7 @@ class MarketScanner:
 
     def start(self) -> None:
         if self.schedule and self._task is None:
+            jobs.declare("market_scan", "Timed market scans", self.check_seconds)
             self._task = asyncio.create_task(self._run_timer(), name="market-scan:timer")
 
     async def close(self) -> None:
@@ -496,8 +498,10 @@ class MarketScanner:
         while True:
             await asyncio.sleep(self.check_seconds)
             try:
-                await self.tick()
-            except Exception:
+                ran = await self.tick()
+                jobs.ok("market_scan", f"scanned {', '.join(ran)}" if ran else "")
+            except Exception as exc:
+                jobs.fail("market_scan", exc)
                 log.exception("Market scan timer check failed")
 
     def _save(self) -> None:

@@ -21,6 +21,9 @@ for _key in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "DISCORD_WEBHOOK_URL"):
 os.environ["AGENT_RATE_LIMIT"] = "0"
 os.environ["API_RATE_LIMIT"] = "0"
 os.environ["MARKET_SCAN_STORE"] = "memory"
+os.environ["AGENT_DB"] = "memory"
+os.environ["AGENT_PAPER_STORE"] = "memory"
+os.environ["AGENT_DESK"] = "off"  # tests start the desk themselves
 os.environ["BINANCE_KEY_STORE"] = "memory"
 os.environ["BINANCE_IMPORT_STORE"] = "memory"
 for _key in ("BINANCE_API_KEY", "BINANCE_API_SECRET"):

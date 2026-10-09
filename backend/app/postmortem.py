@@ -37,6 +37,7 @@ from pydantic import BaseModel, Field, field_validator
 from .alerts import AlertService, fmt_price, read_store, store_path, write_store
 from .brief import GRACE_SECONDS, NoChannelError, _TIME, _tz
 from .config import Settings, get_settings
+from .jobs import jobs
 from .journal import JournalEntry, JournalEvaluation, JournalService, PostMortem, journal_stats
 from .market_data import DERIVED_INTERVALS, INTERVAL_SECONDS, MarketDataError
 from .scanner import SCAN_INTENT
@@ -788,6 +789,7 @@ class PostMortemService:
     # ------------------------------------------------------------ lifecycle
     def start(self) -> None:
         if not self._tasks:
+            jobs.declare("postmortems", "Post-mortems and weekly review", self.sweep_seconds)
             self._tasks = [asyncio.create_task(self._loop(self.sweep_seconds, self.sweep), name="postmortem:sweep"),
                            asyncio.create_task(self._loop(self.check_seconds, self.tick), name="postmortem:weekly")]
 
@@ -804,7 +806,9 @@ class PostMortemService:
             await asyncio.sleep(seconds)
             try:
                 await fn()
-            except Exception:
+                jobs.ok("postmortems")
+            except Exception as exc:
+                jobs.fail("postmortems", exc)
                 log.exception("Post-mortem background check failed")
 
     def _save(self) -> None:

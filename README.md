@@ -32,7 +32,10 @@ The LLM never invents prices. It plans: it can look at any coin or timeframe, sc
 and read funding and open interest through read-only tools, then calls `draw_on_chart` with a
 JSON-schema plan saying which detectors to run, which chart to show and what to alert on. Every
 level, zone and trade plan price comes from the SciPy engine, and the whole pipeline works with no
-LLM at all (a keyword parser and templated summary take over).
+LLM at all (a keyword parser and a built-in writer take over). The built-in writer answers in plain sentences,
+leads with what the question asked about (a supply zone, a window high, a price such as "what's at 7.15?") and
+follows the answer length setting; an answer it wrote is marked "reply: built-in writer (no AI model)" under it.
+For freer phrasing set up a model under Settings → AI model.
 
 ## Project structure
 
@@ -217,6 +220,9 @@ scores are kept in `LLM_CHOICE_STORE` (default `.cache/llm_choice.json`). The sa
 | `HEATMAP_INTERVAL_SECONDS` | `10` | How often the order-book heatmap samples the book of a symbol someone is viewing |
 | `HEATMAP_DEPTH_LIMIT` | `1000` | Levels per snapshot (Binance request weight 50; `5000` reaches further but weighs 250) |
 | `HEATMAP_HISTORY_MINUTES` / `HEATMAP_RANGE_PCT` | `240`, `3` | Heatmap history kept per symbol (in memory) and how far from the mid it reaches |
+| `AGENT_DB` | `backend/.cache/agent.db` | SQLite for the agent desk's calls and what it learns; `memory` = not saved |
+| `AGENT_DESK` | `on` | The agent desk making calls on its own at 1h/4h/1d closes (`off` = only when you press Run) |
+| `AGENT_PAPER_STORE` / `AGENT_WALLET_CASH` | `backend/.cache/agent_paper.json`, `1000` | The desk's own paper wallet and its starting USDT |
 | `NEXT_PUBLIC_API_URL` | `http://localhost:8000` | Frontend → backend |
 | `NEXT_PUBLIC_WS_URL` | derived from API URL | Override for proxies |
 
@@ -231,6 +237,64 @@ rolling 24h total saved to `backend/.cache/`). Both futures figures cover Binanc
 sends at most one liquidation per symbol per second, so that total is a lower bound; hover a metric
 for its source. Binance futures has no US-accessible mirror, so from a US IP those two fall back to
 mocked values (marked with a dot).
+
+## Agent desk
+
+The **Agent desk** tab (V) is the agent trading on its own, on paper, and learning from it (`agent_desk.py`,
+`desk_calls.py`, `desk_learning.py`). Spot only: it calls buys, never shorts.
+
+- **Calls.** At every 1h, 4h and 1d candle close (45 s after, so Binance has the final bar) it looks at the coins of
+  your active watchlist with the chart agent's own detectors. Each support or demand zone at or below price is a
+  possible call: a limit buy at the top of the zone, an invalidation just below it (where the idea is wrong) and a
+  take-profit at the next resistance or supply. The zone with the best expected R after fees becomes a call when its
+  confidence is at least the minimum and the coin has no call running on that timeframe. A candle that closed long
+  ago (after a restart) is skipped; **Run** in Settings looks at the latest one now.
+- **Confidence** is the chance of reaching the take-profit before the invalidation. It starts from the odds on a
+  random walk, 1 / (1 + R) for a level R risk-units away, times the setup's learned **edge**: hits against what random
+  odds would give. The edge is built up from the coin's backtest of the same setup (track_record.py), then the
+  desk's own results on that timeframe and zone kind, that setup (fresh or tested, a higher-timeframe zone behind it,
+  trend agreement) and that coin, each level leaning on the one above it until it has evidence of its own. Recent
+  results count more (90-day half-life). With no evidence there is no edge and no call: on 1h, fees alone are often
+  0.2–0.4R, so 1h calls are rarer.
+- **Watched zones.** Every other new zone it looked at is watched instead of called: scored the same way and learned
+  from, never traded or announced. That keeps the learning going on setups it doesn't trade yet.
+- **Scoring.** Every two minutes, on 5m (1h calls), 15m (4h) or 1h (1d) candles with the journal's rules: only candles
+  after the call, the invalidation first when both levels are inside one candle, fees on both sides. A buy that
+  doesn't fill in 24/18/10 candles expires; a position that reaches neither level in 72/60/45 candles is closed at
+  that candle's close. Each call also records whether price reached the full level before the invalidation and how
+  far it got, which is what the learning uses.
+- **Take-profit placement.** Once a setup has 15 finished zones, the take-profit can sit 70–90% of the way to the
+  level when that earned more on those zones than the full level (price stalling just under resistance).
+- **Paper wallet.** The desk has its own wallet (1000 USDT; reset it in Settings). Each call's size is Kelly-scaled to
+  its confidence and reward-to-risk: a quarter of the Kelly fraction of the wallet, at most 15%, never more than the
+  free cash. The buy, take-profit and stop go in as one group, so whichever exit fills first cancels the other.
+- **Record.** How many calls reached the take-profit, R in all, by setup with each setup's edge, and whether the
+  confidence is right: calls grouped by what they said against how often they worked, and whether they sort good
+  calls from bad better than a flat guess. Under 20 finished calls it says it is too early to judge.
+- **Notifications.** New calls, fills and results go to Discord / Telegram (each can be turned off; expiries are off
+  by default) and to Alerts → History. The brief has an "Agent desk" section, and the chart agent mentions a call
+  the desk has running on the coin you ask about.
+
+- **Working now.** The Record tab also ranks setups by how their zones did over the last 30 days against random odds
+  (at least 5 finished zones each). Ask the agent "what's working right now?".
+
+## Coaching and "since you last looked"
+
+- **Coach** (Account → Coach, `coach.py`): habits in your own closed spot trades from the Binance import, each with the
+  numbers behind it and only once there are 5+ trades: selling winners early (how often price went 3%+ higher within
+  3 days of your sell, and by how much), losers held longer than winners, average win against average loss and the
+  win rate that needs, buying after a pump or near the top of the week's range against your other buys, fees as a
+  share of what the trades made, and how your buys inside the desk's zones did against your other buys on those
+  coins. Ask the agent "how am I trading?".
+- **Since you last looked** (`changes.py`): back on a coin and timeframe after two hours or more, a card on the chart
+  says what changed: price, zones of the agent's that broke, were tested or are new, a structure break, Kimi's
+  signals, the desk's calls and alerts that fired. Nothing to say, no card.
+
+## Status
+
+The **Status** tab shows whether the AI model answers (Ollama reachable and the model installed, the last answer and
+the last failure), whether Binance answers, the Binance key, the alert channels, and every background job's last
+run and last error; a job that stops reporting is marked overdue. The tab's badge counts what is wrong.
 
 ## Live trades (trade manager)
 
@@ -380,8 +444,15 @@ through an API key that can only read (`binance_account.py`, `binance_import.py`
   `electron_`) is yours; a fill on a tracked grid bot's pair, while it ran, on one of its grid lines and with its
   order size is that bot's; any other API order (random or broker `x-` ids) is unknown. Change any of them in the
   Account tab; overrides are saved on the server and the journal follows.
-- **Positions:** your spot holdings with the average entry from your own buys, your USD-M positions, and the bots
+- **Positions:** your spot holdings with the average entry from your own buys, coins in **Simple Earn** (flexible
+  and locked, with their APR and, for locked ones, the term and end date), your USD-M positions, and the bots
   apart: the Trading Bots wallet's total, holdings you marked as a bot's, and the tracked bots' simulated holdings.
+  The chart agent counts Earn coins as held ("You also have 4 INJ in Simple Earn locked at 12% APR").
+- **PnL calendar:** the **PnL** tab shows realized PnL per day for a month at a time, built from the imported fills
+  (`pnl_calendar.py`, no extra Binance calls): spot sells against the average cost of your imported buys, futures
+  from Binance's realized PnL, fees paid in the quote asset taken off. Filter by mine, bots or unknown. Days follow
+  your browser's time zone. Sells of coins bought before the imported history, pairs not quoted in a dollar
+  stablecoin, fees paid in BNB, futures funding and Earn rewards are left out, and the tab says so.
 
 What is documented and what is inferred: Binance documents the per-wallet balances
 (`GET /sapi/v1/asset/wallet/balance`, which lists a "Trading Bots" wallet with its total value only) and the
@@ -434,8 +505,17 @@ like, not documented. Fees paid in BNB are not converted into the PnL (noted on 
 | GET | `/api/binance/fills?kind=&market=&symbol=` | Imported fills with their classification and reason |
 | GET | `/api/binance/trades?kind=` | Round trips rebuilt from the fills |
 | POST | `/api/binance/classify` | `{keys, kind ("manual"\|"bot"\|"unknown", null = automatic), bot_id?}` |
-| GET | `/api/binance/positions?refresh=` | Your spot holdings and USD-M positions, and the bots' apart |
+| GET | `/api/binance/positions?refresh=` | Your spot holdings, Simple Earn positions and USD-M positions, and the bots' apart |
+| GET | `/api/binance/pnl-calendar?kind=&tz_offset=` | Realized PnL per day (USD) from the imported fills; `tz_offset` as JavaScript's `getTimezoneOffset()` |
 | GET | `/api/binance/gridbots/{id}/compare` | A tracked bot's real fills next to the simulated ones |
+| GET | `/api/status` | The AI model, market data, Binance key, alert channels and background jobs |
+| GET | `/api/coach?refresh=` | Habits in your own imported trades |
+| POST | `/api/changes` | `{symbol, interval, since}` → what changed on that chart since then |
+| GET | `/api/desk` | The agent desk: settings, coins, last and next runs, record, calibration, setups |
+| GET | `/api/desk/calls?status=&symbol=&watched=` | Calls (or watched zones), newest first |
+| PUT | `/api/desk/settings` / `/api/desk/symbols` | Desk settings; the active watchlist it follows |
+| POST | `/api/desk/run?interval=1h` / `/api/desk/score` | Look at the latest closed candle now; score the running calls now |
+| GET / POST | `/api/desk/wallet` / `/api/desk/wallet/reset` | The desk's paper wallet; start it again `{start_cash}` |
 | GET/POST | `/api/journal` | Logged trades with their evaluation; POST a trade `{symbol, interval, direction, entry, stop, targets, …}` |
 | PATCH/DELETE | `/api/journal/{id}` | Notes, tags, setup, cancel or close a trade; delete it |
 | GET | `/api/journal/stats?symbol=&setup=&direction=` | Win rate, R, expectancy, profit factor, breakdowns, equity curve |
@@ -486,6 +566,8 @@ Overlay types: `box`, `horizontal_line`, `trendline`, `marker` (see `backend/app
 - **Window highs/lows:** the high and low of the last completed H4 / D1 (or requested) candle, drawn as rays from that candle.
 - **Trendlines:** through the two latest swing highs (if falling) and swing lows (if rising), extended right.
 - **Higher-timeframe confluence:** S/R and supply/demand zones are also detected on the next two timeframes up (H4 → D1, W1). A zone overlapping one of them scores higher and is labelled, e.g. "H4 Demand + D1/W1".
+- **Higher-timeframe zones on lower charts:** of the zones the agent drew on the timeframes above the chart's, only the best one above price (resistance or supply) and the best one below (support or demand) are carried down, so the 15m shows one D1-or-H4 box per side instead of every higher timeframe's boxes stacked on each other. "Best" is the detector's strength (touches, freshness, confluence), with a small edge to the higher timeframe. Hide them with the "Higher-timeframe levels" layer.
+- **Ask about a price:** "what's at 7.1561?" or "is 25.4 support?" checks that price on the chart's timeframe: the zone there (and whether a higher-timeframe zone covers it), whether it is support or resistance now, how often price bounced off it or crossed it in the loaded candles, and the next zone if it breaks.
 - **Liquidity sweeps:** a wick through a swing high/low that closes back inside (`patterns.py`).
 - **Fair value gaps:** three-candle gaps that price has not filled yet. **Order blocks:** the last opposite candle before an impulse that broke structure, while unmitigated.
 - **Patterns:** ranges (a flat box that held for 30+ bars), triangles and wedges (lines fitted through swings), double tops/bottoms with their neckline.
@@ -503,6 +585,7 @@ Overlay types: `box`, `horizontal_line`, `trendline`, `marker` (see `backend/app
 - **Multiple charts:** the layout buttons in the chart header show 1, 2 or 4 charts. Click a chart to make it active (blue header); the timeframe buttons, toolbar and agent act on the active chart. Each chart keeps its own coin, timeframe and overlays. Hovering one chart shows the same time on the others, and **Every chart follows the same coin** (Settings) keeps one coin across charts with different timeframes. **Layouts** saves the open charts, timeframes, indicators, panels and layer toggles under a name (`Ctrl+S` saves the current one).
 - **Indicators:** two EMAs, Bollinger Bands, VWAP, Parabolic SAR, volume and a volume profile of the visible range on the price; RSI, MACD, Stoch RSI, ATR and CVD (taker buy minus sell volume) in panes under it; and Kimi Cooked (below). **Lengths and colours…** in the menu (or `I`) changes their settings. **Compare** draws other coins or the TOTAL indexes over the chart in % change; the ÷ button next to a compared coin opens it as a ratio chart. Search "ETH/BTC" for a ratio chart of any two coins, or "TOTAL" for the market-cap indexes (TOTAL, TOTAL2 without BTC, TOTAL3 without BTC and ETH, built from the top 20 coins). The countdown under the price shows when the candle closes. The camera button saves a PNG.
 - **Kimi Cooked v5.7.4:** Trick's own TradingView indicator, run from its Python port (`backend/app/kimi`) on the last 5,000 closed candles. Turn it on in the Indicators menu or ask the agent ("show my Kimi"). It draws what the script draws: S/R zones and rays with the chance price reaches each level within the forecast window, the auto Fib ladder with its odds and golden pocket, the B+/B-, U/Dn and B+?/B-? labels, and the forecast (confidence band, best-guess line, textured scenario path, end label and the next-candle ▲/▼). The **Kimi Cooked** pill under the legend opens the PATH VERIFY and Signal Stats tables and the latest signals with their outcomes. It reruns when a candle closes, like the script since v5.7.4. Ask "what does Kimi say?" and the agent reads its levels, signals and forecast; with an LLM it can also read it on other coins and timeframes. Only the higher-timeframe divergence factor is not ported, so confluence scores can run a little lower than on TradingView.
+- **Kimi + Agent:** the agent learns Kimi's forecast error from five features it can compute on every past candle (the trend a timeframe about four times higher would show, the trend, RSI, where price sits in its 100-candle range, momentum) with a decayed ridge regression on every H-th finished forecast (`kimi_agent.py`). It is judged walk-forward: each forecast corrected only with what had finished before it. When the corrected line has cut the average end error by at least 2% on 30+ such forecasts, with a paired t of at least 1.65, the chart shows **Kimi + Agent**: Kimi's path plus the correction ramped in over the horizon, the band moved with it. Until then Kimi's own line stands. The same features, turned to each signal's direction, learn which Kimi signals made money: once the ones it would take have made money walk-forward and beat the ones it would skip by a clear margin, the skipped ones are greyed with ✕ on the chart and the latest signals say take or skip. The Kimi tables show both against plain Kimi; **Kimi's own line** switches back. The ported engine is untouched, so plain Kimi still matches TradingView.
 - **Kimi chart patterns, harmonics and sessions:** the port also runs the script's chart-pattern engine (Double/Triple Top and Bottom, Head & Shoulders and its inverse, Ascending/Descending Triangle, Rising/Falling Wedge, Bull/Bear Flag) and harmonic engine (Gartley, Bat, Butterfly, Crab, Deep Crab, Alt Bat, Shark, 5-0, Three Drives, AB=CD), with the script's own tolerances, defaults and order of operations (`backend/app/kimi/patterns_v574.py`). Patterns are drawn with their outline and label (▲ after a break-out, ✕ once invalidated), each break-out with its level and measured-move target ("BO▲ …"); harmonics with their XABCD legs, the PRZ box (★ = PRZ confluence with S/R, golden pocket and divergence at D), the TP1/TP2 lines, and amber ⚠ when the opposing S/R level breaks. Each is its own layer under Kimi Cooked in the Layers tab, and the pill lists them. Break-outs and completed harmonics are signals like the script's (the Pat BO and Harmonics rows in Signal Stats; they also feed confluence and the forecast's magnet levels), and "what does Kimi say?" mentions the latest ones. The script's session filter and per-session zone/divergence multipliers are ported too (`sessions_v574.py`) and off by default, as in the script. The HTF divergence confluence factor (w8) is ported as well: the script's `f_htfDivState` runs on the anchor timeframe's own candles, built from the chart's candles and the daily history, and is read from the last completed anchor bar.
 - **Caching:** candles are kept in the browser (IndexedDB) and on the backend (SQLite), so opening the app draws the chart from cache at once and only the bars since the last visit are downloaded.
 - **Layers:** the layers tab lists what is drawn on the chart by group (agent zones, window levels, structure, trade plan, pinned answers, each part of Kimi Cooked, your drawings, alerts, journal trades, grid bots, …) with an eye toggle each, plus the pinned answers and your drawings. Labels that would overlap move apart.

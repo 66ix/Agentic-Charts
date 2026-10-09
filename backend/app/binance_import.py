@@ -59,6 +59,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 from .binance_account import BinanceAccount, BinanceApiError, BinanceKeyError, write_private
 from .config import Settings, get_settings
 from .gridbot import RECENT_FILLS, GridBot, GridBotResult, GridBotService, split_symbol
+from .jobs import jobs
 from .journal import ImportedTrade, JournalService, NewJournalEntry
 from .scanner import tickers
 
@@ -461,6 +462,8 @@ class BinanceImportService:
     # ----------------------------------------------------------- lifecycle
     def start(self) -> None:
         if self._task is None:
+            jobs.declare("binance_import", "Binance auto-import", max(60, self.settings.auto_minutes * 60),
+                         self.settings.auto_minutes > 0)
             self._task = asyncio.create_task(self._loop())
 
     async def close(self) -> None:
@@ -481,13 +484,16 @@ class BinanceImportService:
         """Run the import when auto-import is on and it is due. True when it ran (or tried to)."""
         now = time.time() if now is None else now
         minutes = self.settings.auto_minutes
+        jobs.declare("binance_import", "Binance auto-import", max(60, minutes * 60), minutes > 0)
         if minutes <= 0 or self._lock.locked() or self.account.store.load() is None:
             return False
         if now - (self.last or {}).get("at", 0) < minutes * 60:
             return False
         try:
             await self.run(auto=True)
+            jobs.ok("binance_import")
         except Exception as exc:  # the next tick tries again; the status shows the error
+            jobs.fail("binance_import", exc)
             log.warning("Binance auto-import failed: %s", exc)
             self.last = {"at": int(now), "auto": True, "error": str(exc)}
             self._save()
@@ -697,9 +703,15 @@ class BinanceImportService:
                 futures = await self.account.futures_positions()
             except (BinanceApiError, httpx.HTTPError) as exc:
                 notes.append(f"USD-M futures unavailable: {exc}")
+        earn_rows: list[dict] = []
+        try:
+            earn_rows = await self.account.earn_positions()
+        except (BinanceApiError, httpx.HTTPError) as exc:
+            notes.append(f"Simple Earn unavailable: {exc}")
         fills = list(self._fills.values())
         coins = [a for a in balances if a not in STABLES]
-        prices = await self._prices([f"{a}USDT" for a in coins] + [p["symbol"] for p in futures])
+        earn_coins = [r["asset"] for r in earn_rows if r["asset"] not in STABLES]
+        prices = await self._prices([f"{a}USDT" for a in coins + earn_coins] + [p["symbol"] for p in futures])
 
         manual_spot, bot_spot, cash = [], [], []
         for asset, qty in sorted(balances.items()):
@@ -765,8 +777,15 @@ class BinanceImportService:
             tracked_bots.append({"bot_id": b.id, "name": b.name, "symbol": b.params.symbol,
                                  "base_held": r.base_held if r else None, "quote_held": r.quote_held if r else None,
                                  "value": r.current_value if r else None, "simulated": True})
+        earn = []
+        for r in sorted(earn_rows, key=lambda r: (r["asset"], r["product"])):
+            price = 1.0 if r["asset"] in STABLES else prices.get(f"{r['asset']}USDT")
+            earn.append({**r, "key": f"earn:{r['product']}:{r['asset']}:{r.get('position_id') or ''}",
+                         "symbol": f"{r['asset']}USDT", "price": price,
+                         "value": round(r["qty"] * price, 2) if price else None})
+        earn.sort(key=lambda r: -(r["value"] or 0))
         bot_wallet = next((w for w in wallets if w["wallet"].lower().replace(" ", "") == "tradingbots"), None)
-        out = {"manual": {"spot": manual_spot, "futures": manual_fut, "cash": cash},
+        out = {"manual": {"spot": manual_spot, "futures": manual_fut, "cash": cash, "earn": earn},
                "bots": {"wallet": bot_wallet, "spot": bot_spot, "futures": bot_fut, "tracked": tracked_bots},
                "wallets": wallets, "notes": notes, "updated_at": int(time.time())}
         self._positions = (time.monotonic(), out)

@@ -125,29 +125,40 @@ export type PanelOverlays = Record<string, { symbol: string; overlays: Overlay[]
 export const pinsKey = (symbol: string, interval: string) => `ac:pins:${symbol}:${interval}`;
 export const overlaysKey = (symbol: string, interval: string) => `ac:overlays:${symbol}:${interval}`;
 
-/** Agent overlays that carry over to lower timeframes: zones and window highs/lows (not swings, plans or markers). */
-const HTF_KINDS = /^(support|resistance|supply|demand|window_high|window_low)$/;
+/** Agent zones that can carry over to lower timeframes, by the side of price they were drawn on. */
+const HTF_ABOVE = /^(resistance|supply)$/;
+const HTF_BELOW = /^(support|demand)$/;
+/** How much a timeframe one step higher counts for when two zones' strengths are close. */
+const HTF_STEP_BONUS = 0.05;
 
 /**
- * The agent's zones and window levels saved on the timeframes above `interval` for this coin, to show on this one:
- * what the agent drew on the daily stays visible on the 4H and below. Each gets its timeframe in front of its label
- * (unless the label already starts with it) and starts at the chart's left edge, since its first touch can be older
- * than the lower timeframe's candles. `read` returns the overlays saved under a key.
+ * The best zone the agent drew on the timeframes above `interval` for this coin, one above price (resistance or
+ * supply) and one below (support or demand), to show on this one: what the agent found on the daily or the 4H stays
+ * visible on the 15m without stacking every higher timeframe's boxes on top of each other. "Best" is the detector's
+ * strength (which already counts touches, freshness and confluence), with a small bonus per timeframe step up. Each
+ * gets its timeframe in front of its label (unless the label already starts with it) and starts at the chart's left
+ * edge, since its first touch can be older than the lower timeframe's candles. `read` returns the overlays saved
+ * under a key.
  */
 export function higherTfOverlays(symbol: string, interval: string, read: (key: string) => Overlay[]): Overlay[] {
   const order: string[] = TIMEFRAMES.map((t) => t.value);
   const at = order.indexOf(interval);
   if (at < 0) return [];
-  const out: Overlay[] = [];
-  for (const tf of order.slice(at + 1)) {
+  const best: { above?: [number, Overlay]; below?: [number, Overlay] } = {};
+  order.slice(at + 1).forEach((tf, step) => {
     const tag = HTF_TAGS[tf] ?? tf.toUpperCase();
     read(overlaysKey(symbol, tf)).forEach((o, i) => {
-      if (!HTF_KINDS.test(o.kind ?? "") || (o.type !== "box" && o.type !== "horizontal_line")) return;
+      const kind = o.kind ?? "";
+      const side = HTF_ABOVE.test(kind) ? "above" : HTF_BELOW.test(kind) ? "below" : null;
+      if (!side || o.type !== "box") return;
+      const score = (o.strength ?? 0.5) + HTF_STEP_BONUS * step;
+      const current = best[side];
+      if (current && current[0] >= score) return;
       const label = o.label.startsWith(tag) ? o.label : `${tag} ${o.label}`;
-      out.push({ ...o, id: `htf-${tf}-${o.id ?? i}`, label, time_start: null });
+      best[side] = [score, { ...o, id: `htf-${tf}-${o.id ?? i}`, label, time_start: null }];
     });
-  }
-  return out;
+  });
+  return [best.above?.[1], best.below?.[1]].filter((o): o is Overlay => !!o);
 }
 
 const HTF_TAGS: Record<string, string> = {

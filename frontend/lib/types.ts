@@ -760,6 +760,32 @@ export interface KimiSignal {
   tier: "top" | "rest" | "warm-up";
   result: "open" | "win" | "loss" | "expiry";
   r: number | null;
+  /** Kimi + Agent's filter, judged walk-forward (shown when the filter is in use). */
+  agent?: "take" | "skip" | null;
+  agent_r?: number | null;
+}
+
+/** Kimi + Agent (backend/app/kimi_agent.py): Kimi's forecast with the agent's learned correction, used only once it
+ *  has beaten Kimi's own line on forecasts it wasn't fitted on (`active`); otherwise path = Kimi's path. */
+export interface KimiAgentForecast {
+  active: boolean;
+  reason: string;
+  path: number[];
+  band_high: number[];
+  band_low: number[];
+  final: number;
+  pct_change: number;
+  /** The correction at the horizon, % of price. */
+  nudge_pct: number;
+  headline: string;
+  evals: number;
+  kimi_err: number | null;
+  agent_err: number | null;
+  kimi_dir: number | null;
+  agent_dir: number | null;
+  t: number | null;
+  weights: Record<string, number>;
+  now: Record<string, number>;
 }
 
 export interface KimiForecast {
@@ -778,6 +804,8 @@ export interface KimiForecast {
   vol_regime: "LOW" | "NORMAL" | "HIGH";
   headline: string;
   next_candle: { direction: "up" | "down"; right_pct: number | null; calls: number } | null;
+  /** Absent from servers older than Kimi + Agent. */
+  agent?: KimiAgentForecast | null;
 }
 
 /** One line of a Kimi pattern drawing; times past the last candle are future candles on the chart's grid. */
@@ -864,6 +892,11 @@ export interface KimiResult {
   harmonics: KimiHarmonic[];
   verify: KimiRow[];
   stats: KimiRow[];
+  /** Kimi + Agent against plain Kimi: the forecast correction and the signal filter. */
+  agent?: KimiRow[];
+  /** The signal filter is proven and in use. */
+  agent_filter?: boolean;
+  agent_filter_reason?: string;
   notes: string[];
   seconds: number;
 }

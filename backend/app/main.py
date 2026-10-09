@@ -37,10 +37,14 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import StreamingResponse
 
 from .agent import run_analysis
+from .agent_desk import AgentDesk, DeskSettings
 from .alerts import AlertPatch, AlertService
+from .changes import changes as chart_changes
+from .coach import CoachService
 from .backtest import BacktestRequest, run_backtest
 from .brief import BriefService, BriefSettings, NoChannelError
 from .config import get_settings
+from .db import Database
 from .derivatives import DerivativesService
 from .gridbot import GridBotCreate, GridBotPatch, GridBotService, GridSimulateRequest, error_text
 from .grid_planner import GridBacktestRequest, GridPlanRequest, backtest_grid, plan_grid
@@ -49,13 +53,15 @@ from .sell_check import sell_scan
 from .top_down import ladder as walk_ladder
 from .top_down import walk
 from .binance_account import BinanceAccount, BinanceApiError, BinanceKeyError
-from .binance_import import BinanceImportService, ClassifyRequest, ImportSettings
+from .pnl_calendar import daily_pnl
+from .binance_import import MAX_FILLS, BinanceImportService, ClassifyRequest, ImportSettings
 from .journal import JournalPatch, JournalService, NewJournalEntry, entry_json
 from .dca import DcaRequest, plan_dca
 from .holdings_watch import HoldingsWatch, WatchSettings
 from .paper import NewPaperOrder, PaperService
 from .events import EventsService
 from .futures_data import FUTURES_PERIODS, FuturesDataService
+from .jobs import jobs
 from .kimi_service import KimiService
 from .llm import LLMClient
 from .postmortem import PostMortemService, ReviewSettings
@@ -92,6 +98,7 @@ log = logging.getLogger("agentic-charts")
 async def lifespan(app: FastAPI):
     market = MarketData()
     app.state.market = market
+    app.state.db = Database()  # SQLite for the agent desk's records (db.py)
     app.state.llm = LLMClient()
     app.state.models = ModelChooser(app.state.llm)  # model picked in the app's settings, and model evals
     app.state.derivatives = DerivativesService()
@@ -142,6 +149,12 @@ async def lifespan(app: FastAPI):
     # Market-wide setup scanner (market_scanner.py) with plan track records (track_record.py), shared with the agent.
     app.state.market_scanner = MarketScanner(market, TrackRecordService(market), app.state.alerts)
     app.state.market_scanner.start()
+    # The agent desk (agent_desk.py): its own calls at 1h/4h/1d closes, scored, paper-traded and learned from.
+    app.state.desk = AgentDesk(market, app.state.db, app.state.alerts, app.state.market_scanner.track)
+    app.state.desk.start()
+    app.state.brief.desk_lines = app.state.desk.brief_lines
+    # Coaching from your own imported trades (coach.py).
+    app.state.coach = CoachService(market, app.state.binance, app.state.desk)
     # Session/period levels (session_levels.py) and the order-book heatmap (orderbook_heatmap.py).
     app.state.session_levels = SessionLevelsService(market)
     app.state.heatmap = OrderbookHeatmapService(market, app.state.hub)
@@ -153,6 +166,7 @@ async def lifespan(app: FastAPI):
              app.state.llm.provider, app.state.llm.model)
     yield
     await app.state.postmortems.close()
+    await app.state.desk.close()
     await app.state.market_scanner.close()
     await app.state.brief.close()
     await app.state.models.close()
@@ -168,6 +182,7 @@ async def lifespan(app: FastAPI):
     await app.state.hub.shutdown()
     await asyncio.gather(market.close(), app.state.llm.close(), app.state.metrics.close(),
                          app.state.derivatives.close())
+    app.state.db.close()
 
 
 settings = get_settings()
@@ -203,6 +218,35 @@ async def health(request: Request) -> dict:
         "llm": {"provider": st.llm.provider, "model": st.llm.model},
         "streams": st.hub.stats(),
         "liquidation_stream": st.derivatives.stream_connected,
+    }
+
+
+@app.get("/api/status")
+async def status(request: Request) -> dict:
+    """Everything the status panel shows: whether the AI model answers, market data, the Binance key, alert channels
+    and every background job's last run and error."""
+    st = request.app.state
+    llm = st.llm.health()
+    if llm["provider"] == "ollama":
+        tags = await st.models.ollama_models()
+        names = {m["model"] for m in tags["installed"]}
+        llm["reachable"] = tags["error"] is None
+        llm["installed"] = st.llm.model in names or f"{st.llm.model}:latest" in names
+        llm["problem"] = tags["error"] or (None if llm["installed"] else
+                                           f"{st.llm.model} isn't installed in Ollama (ollama pull {st.llm.model})")
+    else:
+        llm["reachable"] = None if llm["configured"] else False  # cloud models aren't pinged: it would cost a call
+        llm["problem"] = None if llm["configured"] else "No AI model set up: answers use the built-in writer"
+    key = st.binance.account.status()
+    return {
+        "time": int(time.time()),
+        "llm": llm,
+        "market": {"data_source": st.market.settings.data_source, "binance_reachable": st.market.binance_usable(),
+                   "streams": st.hub.stats(), "liquidation_stream": st.derivatives.stream_connected},
+        "binance_key": {k: key.get(k) for k in ("configured", "ok", "masked", "problems", "error", "checked_at")},
+        "channels": st.alerts.channel_status,
+        "database": {"path": st.db.path, "memory": st.db.memory},
+        "jobs": jobs.status(),
     }
 
 
@@ -270,7 +314,8 @@ async def agent_analyze(req: AnalyzeRequest, request: Request) -> AnalyzeRespons
                                   getattr(st, "market_scanner", None), levels=getattr(st, "session_levels", None),
                                   gridbots=getattr(st, "gridbots", None), metrics=getattr(st, "metrics", None),
                                   metric_alerts=getattr(st, "metric_alerts", None),
-                                  level_log=getattr(st, "levels", None), binance=getattr(st, "binance", None))
+                                  level_log=getattr(st, "levels", None), binance=getattr(st, "binance", None),
+                                  desk=getattr(st, "desk", None), coach=getattr(st, "coach", None))
     except MarketDataError as exc:
         raise HTTPException(502, str(exc)) from exc
     except ValueError as exc:
@@ -300,6 +345,7 @@ async def agent_analyze_stream(req: AnalyzeRequest, request: Request) -> Streami
                                      gridbots=getattr(st, "gridbots", None), metrics=getattr(st, "metrics", None),
                                      metric_alerts=getattr(st, "metric_alerts", None),
                                      level_log=getattr(st, "levels", None), binance=getattr(st, "binance", None),
+                                     desk=getattr(st, "desk", None), coach=getattr(st, "coach", None),
                                      on_result=on_result, on_delta=on_delta)
             await queue.put({"type": "done", "response": res.model_dump(mode="json")})
         except MarketDataError as exc:
@@ -1101,7 +1147,8 @@ async def backtest(req: BacktestRequest, request: Request) -> dict:
 #   GET    /api/binance/fills                ?symbol=&kind=manual|bot|unknown&market=spot|futures&limit=
 #   GET    /api/binance/trades               ?kind= → round trips rebuilt from the fills
 #   POST   /api/binance/classify             {keys, kind (null clears), bot_id?} → re-classify, journal re-synced
-#   GET    /api/binance/positions            ?refresh= → own spot holdings + futures positions, bots' separately
+#   GET    /api/binance/positions            ?refresh= → own spot holdings, Simple Earn, futures positions; bots' apart
+#   GET    /api/binance/pnl-calendar         ?kind=&tz_offset= → realized PnL per day from the imported fills
 #   GET    /api/binance/gridbots/{id}/compare  a tracked grid bot's real fills next to the simulated ones
 
 
@@ -1178,6 +1225,17 @@ async def binance_classify(req: ClassifyRequest, request: Request) -> dict:
 @app.get("/api/binance/positions")
 async def binance_positions(request: Request, refresh: bool = Query(False)) -> dict:
     return await _binance_run(request.app.state.binance.positions(refresh))
+
+
+@app.get("/api/binance/pnl-calendar")
+async def binance_pnl_calendar(request: Request,
+                               kind: str | None = Query(None, pattern="^(manual|bot|unknown)$"),
+                               tz_offset: int = Query(0, ge=-900, le=900)) -> dict:
+    """Realized PnL per calendar day (in the browser's time zone) from the fills imported so far; no Binance call."""
+    svc = request.app.state.binance
+    fills = svc.fills(kind=kind, limit=MAX_FILLS)
+    return {**daily_pnl(fills, tz_offset), "kind": kind, "fills": len(fills),
+            "last_import": (svc.last or {}).get("at")}
 
 
 @app.get("/api/holdings-watch")
@@ -1307,6 +1365,107 @@ async def market_scan_run(request: Request, interval: str = Query("4h"),
     except MarketDataError as exc:
         raise HTTPException(502, str(exc)) from exc
     return scanner.status(iv)
+# ------------------------------------------------------------------------------- agent desk --
+#   GET  /api/desk                       settings, coins, last and next runs, record, calibration, setups
+#   GET  /api/desk/calls?status=&symbol=&limit=&watched=   calls (or watched zones), newest first; status: active,
+#                                        closed, or one status
+#   PUT  /api/desk/settings              DeskSettings
+#   PUT  /api/desk/symbols               {symbols} the app's active watchlist, followed when follow_watchlist is on
+#   POST /api/desk/run?interval=1h       look at the latest closed candle now (whatever its age) → the new calls
+#   POST /api/desk/score                 bring the running calls up to date now
+#   GET  /api/desk/wallet                the desk's paper wallet
+#   POST /api/desk/wallet/reset          {start_cash}
+
+
+def _desk(request: Request) -> AgentDesk:
+    return request.app.state.desk
+
+
+@app.get("/api/desk")
+async def desk_status(request: Request) -> dict:
+    return _desk(request).status()
+
+
+@app.get("/api/desk/calls")
+async def desk_calls(request: Request, status: str | None = Query(None, max_length=20),
+                     symbol: str | None = Query(None), limit: int = Query(200, ge=1, le=2000),
+                     watched: bool = Query(False, description="The zones watched instead of called")) -> dict:
+    rows = _desk(request).calls(status, _norm_symbol(symbol) if symbol else None, limit, watched)
+    return {"calls": [c.model_dump() for c in rows]}
+
+
+@app.put("/api/desk/settings")
+async def desk_settings(new: DeskSettings, request: Request) -> dict:
+    return _desk(request).update_settings(new)
+
+
+@app.put("/api/desk/symbols")
+async def desk_symbols(request: Request, body: dict = Body(...)) -> dict:
+    raw = body.get("symbols")
+    if not isinstance(raw, list):
+        raise HTTPException(422, "Give symbols: a list of pairs")
+    return _desk(request).follow([s for s in raw if isinstance(s, str)])
+
+
+@app.post("/api/desk/run")
+async def desk_run(request: Request, interval: str = Query("1h")) -> dict:
+    desk = _desk(request)
+    try:
+        made = await desk.run_interval(interval, force=True)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    await desk.score()
+    return {"calls": [c.model_dump() for c in made], "status": desk.status()}
+
+
+@app.post("/api/desk/score")
+async def desk_score(request: Request) -> dict:
+    changed = await _desk(request).score()
+    return {"changed": [c.model_dump() for c in changed]}
+
+
+@app.get("/api/desk/wallet")
+async def desk_wallet(request: Request) -> dict:
+    return (await _desk(request).wallet()).model_dump()
+
+
+@app.post("/api/desk/wallet/reset")
+async def desk_wallet_reset(request: Request, body: dict | None = Body(None)) -> dict:
+    cash = (body or {}).get("start_cash", get_settings().agent_wallet_cash)
+    try:
+        _desk(request).reset_wallet(float(cash))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return (await _desk(request).wallet()).model_dump()
+
+
+# ----------------------------------------------------------------------- coaching and what changed --
+#   GET  /api/coach?refresh=      habits in your own imported trades and how they compare with the desk's zones
+#   POST /api/changes             {symbol, interval, since} → what changed on that chart since `since` (UNIX s)
+
+
+@app.get("/api/coach")
+async def coach_report(request: Request, refresh: bool = Query(False)) -> dict:
+    return await request.app.state.coach.report(refresh)
+
+
+@app.post("/api/changes")
+async def changes_since(request: Request, body: dict = Body(...)) -> dict:
+    st = request.app.state
+    try:
+        symbol = _norm_symbol(str(body.get("symbol", "")))
+        interval = _check_interval(str(body.get("interval", "4h")))
+        since = int(body.get("since", 0))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(422, "Give symbol, interval and since (UNIX seconds)") from exc
+    if since <= 0 or since > time.time():
+        raise HTTPException(422, "since must be a past time in UNIX seconds")
+    try:
+        return await chart_changes(st.market, symbol, interval, since, st.kimi, getattr(st, "desk", None), st.alerts)
+    except MarketDataError as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+
 # ------------------------------------------------------ session and period levels, order-book heatmap --
 #   GET /api/levels/sessions?symbol=BTCUSDT&interval=1h&or_minutes=30
 #       {source, price, sessions: [{key, name, label, which, open, close, live, high, low, high_taken_at,

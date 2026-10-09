@@ -160,9 +160,35 @@ export interface WalletBalance {
   active: boolean;
 }
 
+/** Coins in Simple Earn (flexible or locked): held, but not in the spot wallet. */
+export interface EarnPosition {
+  key: string;
+  product: "flexible" | "locked";
+  asset: string;
+  symbol: string;
+  qty: number;
+  /** Annual rate, in percent. */
+  apr_pct: number | null;
+  price: number | null;
+  value: number | null;
+  /** Flexible: rewards paid so far, in the coin. */
+  rewards_total?: number | null;
+  can_redeem?: boolean;
+  /** Locked: the term and when it ends (UNIX s). */
+  duration_days?: number | null;
+  redeem_at?: number | null;
+  auto_renew?: boolean;
+}
+
 /** GET /api/binance/positions: the user's own positions, and the bots' separately. */
 export interface AccountPositions {
-  manual: { spot: SpotHolding[]; futures: FuturesPosition[]; cash: { asset: string; qty: number }[] };
+  manual: {
+    spot: SpotHolding[];
+    futures: FuturesPosition[];
+    cash: { asset: string; qty: number }[];
+    /** Absent from servers older than the Simple Earn support. */
+    earn?: EarnPosition[];
+  };
   bots: {
     /** The "Trading Bots" wallet's total (Binance reports only the total, not the coins). */
     wallet: WalletBalance | null;
@@ -251,6 +277,38 @@ export async function classifyAccount(keys: string[], kind: FillKind | null, bot
 
 export function fetchAccountPositions(refresh = false, signal?: AbortSignal) {
   return apiRequest<AccountPositions>(`/api/binance/positions${refresh ? "?refresh=true" : ""}`, { signal, timeoutMs: 60_000 });
+}
+
+/** One calendar day of realized PnL (backend/app/pnl_calendar.py), in USD. */
+export interface PnlDay {
+  /** "2026-10-07", in the browser's time zone. */
+  date: string;
+  pnl: number;
+  spot: number;
+  futures: number;
+  /** Fills that closed (part of) a position that day. */
+  closes: number;
+}
+
+/** GET /api/binance/pnl-calendar: realized PnL per day from the imported fills. */
+export interface PnlCalendar {
+  days: PnlDay[];
+  total: number;
+  win_days: number;
+  loss_days: number;
+  best: PnlDay | null;
+  worst: PnlDay | null;
+  currency: "USD";
+  notes: string[];
+  kind: FillKind | null;
+  fills: number;
+  last_import: number | null;
+}
+
+export function fetchPnlCalendar(kind: FillKind | null, signal?: AbortSignal) {
+  const q = new URLSearchParams({ tz_offset: String(new Date().getTimezoneOffset()) });
+  if (kind) q.set("kind", kind);
+  return apiRequest<PnlCalendar>(`/api/binance/pnl-calendar?${q}`, { signal });
 }
 
 /** Holdings watch (backend/app/holdings_watch.py): sell-or-trim alerts kept on the coins you hold. */

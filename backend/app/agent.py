@@ -59,7 +59,7 @@ from .schemas import (
     is_custom_symbol,
 )
 from .ta_agent import (GREEN, ORANGE, TEAL, _fmt, analyze, describe, higher_timeframes, htf_readings, htf_zones,
-                       rgba)
+                       price_check, rgba)
 from .top_down import TopDownResult, describe_walk, walk, walk_facts
 from .trade_plan import build_plan, plan_overlays
 from .level_review import LevelLog
@@ -311,14 +311,22 @@ def holding_facts(pos: dict, symbol: str) -> dict | None:
     manual = pos.get("manual", {})
     spot = next((r for r in manual.get("spot", []) if r["asset"] == base and (r.get("value") or 0) >= 5), None)
     fut = [p for p in manual.get("futures", []) if p["symbol"] == symbol]
-    if not spot and not fut:
+    earn = [r for r in manual.get("earn", []) if r["asset"] == base]
+    if not spot and not fut and not earn:
         return None
     out: dict = {}
     if spot:
         out["spot"] = _spot_row(spot)
     if fut:
         out["futures"] = [_futures_row(p) for p in fut]
+    if earn:
+        out["earn"] = [_earn_row(r) for r in earn]
     return out
+
+
+def _earn_row(r: dict) -> dict:
+    """A Simple Earn position for the narrator: coins earning yield, not in the spot wallet."""
+    return {k: r.get(k) for k in ("asset", "product", "qty", "value", "apr_pct", "redeem_at") if r.get(k) is not None}
 
 
 def portfolio_facts(pos: dict) -> dict:
@@ -330,6 +338,10 @@ def portfolio_facts(pos: dict) -> dict:
                  "spot": [_spot_row(r) for r in spot[:20]]}
     if manual.get("futures"):
         out["futures"] = [_futures_row(p) for p in manual["futures"][:10]]
+    earn = [r for r in manual.get("earn", []) if (r.get("value") or 0) >= 1]
+    if earn:
+        out["earn_value_usd"] = round(sum(r["value"] for r in earn), 2)
+        out["earn"] = [_earn_row(r) for r in earn[:20]]
     return out
 
 
@@ -426,6 +438,34 @@ async def _confluence_frames(market: MarketData, symbol: str, tf: str, features:
 
 
 KIMI_WORDS = re.compile(r"\bkimi\b", re.I)
+# "What's working right now?" → the desk's setups over the last 30 days; "how am I trading?" → coaching.
+WORKING_WORDS = re.compile(r"\b(what(?:'s| is) working|working (?:right )?now|which setups?|best setups? (?:lately|now|"
+                           r"this (?:week|month))|desk(?:'s)? (?:record|results?|doing))\b", re.I)
+COACH_WORDS = re.compile(r"\b(coach|my (?:trading|trades|habits|mistakes)|how am i (?:trading|doing)|what am i doing "
+                         r"wrong|am i (?:selling|buying) too)\b", re.I)
+
+# A price in the question ("what's at 7.1561?", "is 25.4 support?"); not one followed by a timeframe, percent or
+# multiplier, and only within PRICE_RANGE of the last price so "top 10 coins" or "2025" isn't read as one.
+_PRICE = re.compile(r"(?<!\btop )(?<!\blast )(?<!\bnext )(?<![\w.])\$?(\d[\d,]*(?:\.\d+)?)(k?)"
+                    r"(?![\w.%]|\s*(?:x|%|m|h|d|w|min|mins|minutes?|hours?|days?|weeks?|months?|candles?|bars?|"
+                    r"coins?|pairs?|tokens?|setups?|trades?|times?)\b)", re.I)
+PRICE_RANGE = (0.5, 2.0)
+
+
+def asked_price(prompt: str, intent: AnalysisIntent, last: float) -> float | None:
+    """The price a question is about, when it asks about one rather than drawing a level or setting an alert there."""
+    if not last or intent.trade_plan or intent.scan_watchlist or intent.scan_market:
+        return None
+    given = {c.price for c in intent.custom_levels} | {c.price_low for c in intent.custom_levels} | \
+        {c.price_high for c in intent.custom_levels} | set(intent.alert_prices)
+    for num, k in _PRICE.findall(prompt):
+        try:
+            p = float(num.replace(",", "")) * (1000 if k else 1)
+        except ValueError:
+            continue
+        if PRICE_RANGE[0] * last <= p <= PRICE_RANGE[1] * last and p not in given:
+            return p
+    return None
 
 # Market-wide scans (market_scanner.py): results younger than one candle (5 to 30 minutes) are reused; a new scan
 # is waited for this long, then the answer says it is still running (it finishes in the background and is kept).
@@ -603,6 +643,8 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
                        metric_alerts: MetricAlertService | None = None,
                        level_log: LevelLog | None = None,
                        binance: Any = None,
+                       desk: Any = None,
+                       coach: Any = None,
                        on_result: Callable[[AnalyzeResponse], Awaitable[None]] | None = None,
                        on_delta: Callable[[str], Awaitable[None]] | None = None) -> AnalyzeResponse:
     """The agent's answer to one request. With `on_result` and `on_delta` (the streaming endpoint) the drawings,
@@ -799,6 +841,20 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
             facts["your_position"] = mine
         if HOLDINGS_WORDS.search(req.prompt):
             facts["your_holdings"] = portfolio_facts(positions)
+    if (asked := asked_price(req.prompt, intent, result.stats.last_price)) is not None:
+        facts["price_in_question"] = await asyncio.to_thread(price_check, df, asked, tf, htf_frames)
+    if desk is not None and not custom_chart and (dk := desk.facts_for(symbol)):
+        facts["agent_desk"] = dk  # the calls the desk made on its own on this coin (agent_desk.py)
+    if desk is not None and WORKING_WORDS.search(req.prompt):
+        summ = desk.summary()
+        facts["what_works_now"] = {"days": summ["recent_days"], "setups": summ["working_now"][:8],
+                                   "desk_record": {k: summ[k] for k in ("closed", "tp", "total_r")}}
+    if coach is not None and COACH_WORDS.search(req.prompt):
+        rep = await _guarded(coach.report(), "coaching", 30.0)
+        if rep is not None:
+            facts["your_trading"] = {"overview": rep["overview"], "note": rep.get("note"),
+                                     "habits": [{"title": f["title"], "detail": f["detail"], "tone": f["tone"]}
+                                                for f in rep["findings"]]}
     if req.previous_answer and (past := past_answer_facts(req.previous_answer, result.stats.last_price)):
         facts["last_time_you_asked"] = past
     if overview:
@@ -857,7 +913,7 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
     if actions:
         facts["actions"] = actions
     narrate_facts = {k: v for k, v in facts.items() if k != "last_bar_time"}
-    fallback = describe(narrate_facts, symbol)
+    fallback = describe(narrate_facts, symbol, req.detail, req.prompt)
     if want_grid:  # the grid plan leads the answer; the chart summary follows
         fallback = (describe_plan(grid) if grid else "Couldn't plan a grid bot for this coin right now.") + " " + \
             fallback

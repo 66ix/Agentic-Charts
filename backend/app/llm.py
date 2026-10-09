@@ -293,7 +293,12 @@ INTENT_SYSTEM = (
 NARRATE_SYSTEM = (
     "You are a concise crypto market-structure analyst inside a charting app. Answer the user's request "
     "in at most 4 short sentences using ONLY the numbers in the FACTS JSON; never invent prices or "
-    "indicators. Quote prices exactly as FACTS gives them (they are rounded to the coin's price step) and give ATR "
+    "indicators. Write the way an experienced trader talks to a friend: plain, connected sentences that answer the "
+    "question first and say what the numbers mean (\"sellers are in control\", \"that zone has held every test\"), "
+    "not a list of readings. Use only the facts the question needs; leave the rest out. "
+    "FACTS.price_in_question answers a question about one price: lead with it, saying what sits there (the zone, its "
+    "timeframe, any higher timeframe covering it), whether it acts as support or resistance now (role_now), how price "
+    "reacted on its visits (bounced vs crossed) and where price is likely to head if it breaks (if_breaks). Quote prices exactly as FACTS gives them (they are rounded to the coin's price step) and give ATR "
     "with its percent of price (atr_pct). Refer to zones by their price range. The levels are already drawn on the "
     "chart. "
     "If FACTS lists actions (levels you drew, overlays removed, alerts set, chart switched), confirm them briefly. "
@@ -309,6 +314,10 @@ NARRATE_SYSTEM = (
     "price reaches that level within the forecast window), its latest signals and its forecast when they answer "
     "the question; mention its chart_patterns (a watching pattern's break-out level and invalidation, a break-out's "
     "target) and harmonics (PRZ, TP1/TP2, invalidation) when it has any. "
+    "FACTS.kimi.kimi_plus_agent is your own learned correction to Kimi's forecast: when in_use is true the chart "
+    "shows Kimi + Agent's line (its end and headline), say so and why; when false, Kimi's own line stands and its "
+    "'why' says what the correction still has to prove. FACTS.kimi.agent_signal_filter on means each recent signal "
+    "carries agent: take or skip. "
     "FACTS.indicators has the latest value of every chart indicator whether or not the user has it on the chart "
     "(EMA 20/50 and their cross, MACD, Bollinger Bands with %b, Stoch RSI, VWAP, Parabolic SAR, ATR, and the chart "
     "timeframe's spot CVD); quote the ones the question asks about, and never say an indicator can't be read because "
@@ -320,10 +329,18 @@ NARRATE_SYSTEM = (
     "FACTS.volume.unusual means volume is well above normal: say so. FACTS.session_clock says which sessions are "
     "open and when the next ones open: with an entry or plan, warn when a session opens within the hour. "
     "FACTS.your_note_on_this_coin is the user's own note: remind them of it when it bears on the answer. "
-    "FACTS.your_position is what the user holds of this coin on Binance (spot qty, average entry, value, PnL; any "
+    "FACTS.your_position is what the user holds of this coin on Binance (spot qty, average entry, value, PnL; coins "
+    "in Simple Earn (earn) with their APR, which count as held too; any "
     "futures position with leverage and liquidation price): frame the answer around it, e.g. where the zones sit "
     "against their entry. FACTS.your_holdings lists everything they hold, biggest first: answer 'how are my "
     "holdings?' from it. "
+    "FACTS.agent_desk lists the buy calls you made on your own on this coin (running: waiting to buy or holding, "
+    "with buy zone, take-profit, invalidation and confidence; recent_results with their R): mention a running one "
+    "when it bears on the question. "
+    "FACTS.what_works_now lists the setups the desk tracked over the last days, best first, with hits against "
+    "random odds (lift; 1.0 = no edge): answer 'what's working now?' from it, naming the best and the worst. "
+    "FACTS.your_trading is coaching from the user's own imported trades: lead with the habits marked warn, each "
+    "with its numbers, and say what to try instead; be direct but kind. "
     "FACTS.last_time_you_asked is your previous answer on this coin: when it helps, say in one clause how that call "
     "has played out (change_since_pct). FACTS.market_overview is the header bar: total crypto market cap, 24h volume, "
     "liquidations, open interest, Fear & Greed and BTC dominance, with 24h changes; a name under unavailable "
@@ -899,8 +916,13 @@ def _context_block(history: list[ChatTurn], overlays: list, previous: AnalysisIn
 class LLMClient:
     def __init__(self, settings: Settings | None = None) -> None:
         self.s = settings or get_settings()
-        self._client = httpx.AsyncClient(timeout=httpx.Timeout(self.s.llm_timeout, connect=3.0))
+        self._client = httpx.AsyncClient(timeout=httpx.Timeout(self.s.llm_timeout, connect=3.0),
+                                         event_hooks={"response": [self._seen_response]})
         self._down_until = 0.0  # circuit breaker: skip the LLM briefly after a connection failure
+        # For the status panel: the last answer from the model and the last failure (HTTP error or no connection).
+        self.last_ok_at: float | None = None
+        self.last_error: str | None = None
+        self.last_error_at: float | None = None
         # Provider and model picked in the app's settings (model_choice.py); None = the .env ones.
         self.choice: tuple[str, str] | None = None
 
@@ -908,8 +930,22 @@ class LLMClient:
         return self.provider != "none" and time.monotonic() >= self._down_until
 
     def _trip(self, exc: Exception) -> None:
+        self.last_error, self.last_error_at = f"{type(exc).__name__}: {exc}"[:300], time.time()
         if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout)):
             self._down_until = time.monotonic() + 30
+
+    async def _seen_response(self, response: httpx.Response) -> None:
+        if response.status_code < 400:
+            self.last_ok_at = time.time()
+        else:
+            self.last_error, self.last_error_at = f"HTTP {response.status_code} from {response.url.host}", time.time()
+
+    def health(self) -> dict:
+        """What the status panel shows about the model: configured, paused after a connection failure, last answer
+        and last failure."""
+        return {"provider": self.provider, "model": self.model, "configured": self.provider != "none",
+                "paused": time.monotonic() < self._down_until, "last_ok_at": self.last_ok_at,
+                "last_error": self.last_error, "last_error_at": self.last_error_at}
 
     async def close(self) -> None:
         await self._client.aclose()

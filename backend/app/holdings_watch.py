@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 
 from .alerts import read_store, store_path, write_store
 from .config import Settings, get_settings
+from .jobs import jobs
 
 if TYPE_CHECKING:
     from .binance_import import BinanceImportService
@@ -60,6 +61,7 @@ class HoldingsWatch:
 
     def start(self) -> None:
         if self._task is None:
+            jobs.declare("holdings_watch", "Holdings watch", CHECK_EVERY, self.settings.enabled)
             self._task = asyncio.create_task(self._loop(), name="holdings-watch")
 
     async def close(self) -> None:
@@ -72,9 +74,13 @@ class HoldingsWatch:
     async def _loop(self) -> None:
         await asyncio.sleep(20)
         while True:
+            jobs.set_enabled("holdings_watch", self.settings.enabled)
             if self.settings.enabled:
-                with contextlib.suppress(Exception):
+                try:
                     await self.run()
+                    jobs.ok("holdings_watch")
+                except Exception as exc:
+                    jobs.fail("holdings_watch", exc)
             await asyncio.sleep(CHECK_EVERY)
 
     def status(self) -> dict:

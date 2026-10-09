@@ -5,6 +5,7 @@ import {
   Activity,
   Bell,
   BellRing,
+  Bot,
   Check,
   Crosshair,
   Eye,
@@ -1231,8 +1232,8 @@ function TriggerPreviewResult({ preview, onClose }: { preview: TriggerPreview; o
 
 // ---------------------------------------------------------------- history tab --
 
-const KIND_ICON = { price: BellRing, signal: Activity, brief: Newspaper, trade: Crosshair } as const;
-const KIND_COLOR = { price: "text-yellow-300", signal: "text-accent", brief: "text-mute", trade: "text-up" } as const;
+const KIND_ICON = { price: BellRing, signal: Activity, brief: Newspaper, trade: Crosshair, desk: Bot } as const;
+const KIND_COLOR = { price: "text-yellow-300", signal: "text-accent", brief: "text-mute", trade: "text-up", desk: "text-purple-300" } as const;
 
 function HistoryTab({ p, api }: { p: AlertsPanelProps; api: AlertsApi }) {
   const [confirm, setConfirm] = useState(false);
@@ -1250,6 +1251,7 @@ function HistoryTab({ p, api }: { p: AlertsPanelProps; api: AlertsApi }) {
             { value: "price", label: "Price" },
             { value: "signal", label: "Signals" },
             { value: "brief", label: "Briefs" },
+            { value: "desk", label: "Desk" },
           ]}
           onChange={(v) => setFilter(v as typeof filter)}
         />
@@ -1328,7 +1330,7 @@ const DEFAULT_BRIEF: BriefSettings = {
   timezone: "UTC",
   symbols: [],
   interval: "4h",
-  sections: { zones: true, kimi: true, derivatives: true, events: true, levels: true, market: true, holdings: true, notes: true },
+  sections: { zones: true, kimi: true, derivatives: true, events: true, levels: true, market: true, holdings: true, notes: true, desk: true },
   include_holdings: false,
   weekly_review: false,
   review_day: 6,

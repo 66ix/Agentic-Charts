@@ -72,7 +72,7 @@ def test_funding_question_reads_the_futures_context_and_news_question_the_headli
     FakeFutures.calls = 0
     res = _run("what is funding and long/short like?", futures=FakeFutures())
     assert FakeFutures.calls == 1
-    assert "funding 0.012%" in res.summary and "long/short 1.8" in res.summary
+    assert "funding is 0.012%" in res.summary and "long/short ratio is 1.8" in res.summary
     FakeFutures.calls = 0
     res = _run("show 4h support and resistance", futures=FakeFutures(), events=FakeEvents([]))
     assert FakeFutures.calls == 0  # not asked, not fetched

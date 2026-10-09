@@ -27,6 +27,7 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 from .alerts import AlertService, read_store, store_path, write_store
+from .jobs import jobs
 from .market_metrics import MarketMetricsService, fmt_usd
 from .schemas import MetricAlertSpec
 
@@ -96,6 +97,7 @@ class MetricAlertService:
 
     def start(self) -> None:
         if self._task is None:
+            jobs.declare("metric_alerts", "Market alerts", CHECK_SECONDS)
             self._task = asyncio.create_task(self._loop())
 
     async def close(self) -> None:
@@ -171,7 +173,9 @@ class MetricAlertService:
             await asyncio.sleep(CHECK_SECONDS)
             try:
                 await self.check()
-            except Exception:
+                jobs.ok("metric_alerts")
+            except Exception as exc:
+                jobs.fail("metric_alerts", exc)
                 log.exception("Market alert check failed")
 
     def _changed(self) -> None:
