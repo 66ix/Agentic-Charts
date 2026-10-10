@@ -42,7 +42,9 @@ from .alerts import AlertService, fmt_price, read_store, store_path, write_store
 from .config import Settings, get_settings
 from .indicators import rsi, rsi_divergence, structure_breaks
 from .jobs import jobs
+from .chart_render import snapshot
 from .kimi_service import closed_only
+from .notify import Notice, app_link
 from .market_data import INTERVAL_SECONDS, MarketData, candles_to_df
 from .patterns import liquidity_sweeps
 from .schemas import Interval, KimiSignal, TriggerZone, ZoneTriggerSpec, norm_symbol
@@ -750,14 +752,15 @@ class SignalAlertService:
                 continue
             if hit.key == current.last_key:
                 continue
-            fired.append(self._fire(current, hit, source))
+            fired.append(self._fire(current, hit, source, frame))
         if fired or moved:
             self._changed()
         if fired:
             await self._sync()
         return fired
 
-    def _fire(self, a: SignalAlert, hit: SignalHit | TriggerHit, source: str) -> SignalAlert:
+    def _fire(self, a: SignalAlert, hit: SignalHit | TriggerHit, source: str,
+              frame: Optional[Frame] = None) -> SignalAlert:
         text = f"{a.symbol} {a.interval}: {hit.text}" + (f" — {a.note}" if a.note else "")
         new = a.model_copy(update={
             "armed": a.repeat, "last_fired_at": int(time.time() * 1000), "fire_count": a.fire_count + 1,
@@ -768,10 +771,38 @@ class SignalAlertService:
         log.info("Signal alert fired: %s", text)
         self.alerts.broadcast({"type": "signal_fired", "alert": new.model_dump(), "text": text, "price": hit.price,
                                "time": hit.time})
-        self.alerts.record("signal", a.symbol, f"{TF_LABEL.get(a.interval, a.interval)} {SIGNALS[a.signal].name}",
-                           text, price=hit.price, alert_id=a.id)
-        self.alerts.notify(text + (" (synthetic demo data)" if source == "synthetic" else ""))
+        item = self.alerts.record("signal", a.symbol, f"{TF_LABEL.get(a.interval, a.interval)} {SIGNALS[a.signal].name}",
+                                  text, price=hit.price, alert_id=a.id)
+        self._spawn(self._card(new, hit, text, source, frame, item.get("id")))
         return new
+
+    async def _card(self, a: SignalAlert, hit: SignalHit | TriggerHit, text: str, source: str,
+                    frame: Optional[Frame], history_id: Optional[str] = None) -> None:
+        """The fire as a card (notify.Notice) with a chart of the candles the signal judged, the firing candle
+        marked and, for a trigger, its suggested stop."""
+        sell = a.signal in SHORT_SIGNALS
+        stop = getattr(hit, "stop", None)
+        image = None
+        if frame is not None and self.alerts.outbox.pending() <= 5:  # a burst goes out without pictures
+            lines = [(stop, (239, 68, 68), True, f"stop {fmt_price(stop)}")] if stop is not None else []
+            image = await snapshot(frame.df, lines=lines,
+                                   markers=[(hit.time, hit.price, "down" if sell else "up", (96, 165, 250))],
+                                   title=f"{a.symbol} {a.interval} · {SIGNALS[a.signal].name}",
+                                   demo=source == "synthetic")
+        fields = [("Close", fmt_price(hit.price), True)]
+        if stop is not None:
+            fields.append(("Suggested stop", fmt_price(stop), True))
+        if a.note:
+            fields.append(("Your note", a.note, False))
+        demo = source == "synthetic" and self.s.data_source != "synthetic"
+        if image is not None and history_id:
+            self.alerts.attach_image(history_id, image)  # the History tab shows it too
+        await self.alerts.send_notice(Notice(
+            kind="trigger" if a.trigger is not None else "signal", symbol=a.symbol, interval=a.interval,
+            title=f"{a.symbol} {TF_LABEL.get(a.interval, a.interval)}: {SIGNALS[a.signal].name}",
+            text=text + (" (synthetic demo data)" if source == "synthetic" else ""), description=hit.text,
+            side="sell" if sell else "buy", fields=fields, image=image, demo=demo,
+            url=app_link(self.s.public_app_url, a.symbol, a.interval, f"signal:{a.id}")))
 
     async def _frames(self, symbol: str, interval: str, bar_time: int) -> Optional[tuple[Frame, Frame, str]]:
         """The WINDOW closed candles ending at `bar_time`, and the same window one candle earlier. Retries while

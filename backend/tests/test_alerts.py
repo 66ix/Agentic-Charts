@@ -228,8 +228,12 @@ def test_notifiers_send_expected_payloads():
     tg, dc = by_host["api.telegram.org"], by_host["discord.com"]
     text = "INJUSDT: price entered 24.10–24.60 (H4 Demand) at 24.32"
     assert tg.method == "POST" and str(tg.url) == f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    assert json.loads(tg.content) == {"chat_id": "42", "text": text, "disable_web_page_preview": True}
-    assert str(dc.url) == WEBHOOK and json.loads(dc.content) == {"content": text, "allowed_mentions": {"parse": []}}
+    body = json.loads(tg.content)  # a card: a bold title, the text, the price
+    assert body["chat_id"] == "42" and body["parse_mode"] == "HTML"
+    assert body["text"].startswith("<b>INJUSDT price alert: H4 Demand</b>") and text in body["text"]
+    card = json.loads(dc.content)
+    assert str(dc.url) == WEBHOOK and card["allowed_mentions"] == {"parse": []}
+    assert card["embeds"][0]["description"] == text and card["embeds"][0]["color"] == 0x64748B
 
 
 def test_notifier_failures_are_logged_without_secrets(caplog):

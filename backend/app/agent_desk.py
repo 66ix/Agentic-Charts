@@ -46,7 +46,10 @@ from .desk_calls import (ACTIVE, CLOSED, DEFAULT_TIMEFRAMES, DESK_TIMEFRAMES, EN
                          call_text, candidates, expected_r, kelly, new_call, outcome_text, score_call, size_for)
 from .desk_learning import (RECENT_DAYS, bucket_table, calibration, estimate, learnable, take_profit, verdict,
                             working_now)
+from .chart_render import snapshot
 from .jobs import jobs
+from .notify import Notice, app_link
+from .pricefmt import _fmt as fmt_price
 from .kimi_service import closed_only
 from .market_data import INTERVAL_SECONDS, MarketData, candles_to_df
 from .paper import NewPaperOrder, PaperService
@@ -536,13 +539,51 @@ class AgentDesk:
             text = "[demo data] " + text
         if self.alerts is None:
             return
-        self.alerts.record("desk", c.symbol, title, text, price=c.fill_price or c.entry)
+        item = self.alerts.record("desk", c.symbol, title, text, price=c.fill_price or c.entry)
         self.alerts.broadcast({"type": "desk", "call": c.model_dump()})
         if want and self.alerts.channels:
             try:
-                await self.alerts.send_text(text)
+                image = await self._snapshot(c) if why == "new" else None
+                if image is not None and hasattr(self.alerts, "attach_image"):
+                    self.alerts.attach_image(item.get("id", ""), image)
+                await self.alerts.send_notice(self._notice(c, title, text, image))
             except Exception as exc:
                 log.info("Desk: notification failed: %s", exc)
+
+    def _notice(self, c: DeskCall, title: str, text: str, image: Optional[bytes]) -> Notice:
+        """A desk call or its result as a card: the buy zone, take-profit and invalidation with their distances,
+        the confidence (once filled) and the paper size."""
+        def pct(p: float) -> str:
+            return f"{fmt_price(p)} ({(p / c.entry - 1) * 100:+.1f}%)"
+
+        fields = [("Buy zone", f"{fmt_price(c.zone_low)}–{fmt_price(c.zone_high)}", True),
+                  ("Take-profit", pct(c.tp), True), ("Invalidation", pct(c.stop), True),
+                  ("Confidence if filled", f"{c.confidence * 100:.0f}% (random {100 / (1 + max(c.rr, 0.01)):.0f}%)", True),
+                  ("Expected", f"{c.expected_r:+.2f}R after fees", True)]
+        if c.notional:
+            fields.append(("Paper size", f"${c.notional:,.0f}", True))
+        if c.r is not None:
+            fields.insert(0, ("Result", f"{c.r:+.2f}R", True))
+        side = ("buy" if c.status in ("waiting", "open", "tp") else "sell" if c.status in ("invalidated", "timed_out")
+                else "info")
+        return Notice(kind="desk", title=f"{title}: {c.symbol}", text=text, symbol=c.symbol, interval=c.interval,
+                      description=c.setup, fields=fields, side=side, image=image, demo=c.data_source == "synthetic",
+                      url=app_link(self.s.public_app_url, c.symbol, c.interval, f"desk:{c.id}"))
+
+    async def _snapshot(self, c: DeskCall) -> Optional[bytes]:
+        """A chart of the call: the closed candles it was made on, its buy zone, take-profit and invalidation."""
+        try:
+            candles, source = await self.market.get_klines(c.symbol, c.interval, 200)
+        except Exception:
+            return None
+        df = candles_to_df([k for k in candles if k.time <= c.bar_time])
+        if len(df) < 20:
+            return None
+        return await snapshot(df, boxes=[(c.zone_low, c.zone_high, (167, 139, 250, 60), "Desk buy zone")],
+                              lines=[(c.tp, (34, 197, 94), True, f"TP {fmt_price(c.tp)}"),
+                                     (c.stop, (239, 68, 68), True, f"wrong below {fmt_price(c.stop)}")],
+                              title=f"{c.symbol} {TF_LABEL.get(c.interval, c.interval)} · desk call",
+                              demo=c.data_source == "synthetic")
 
     def brief_lines(self, now: Optional[float] = None) -> list[str]:
         """The desk's part of the brief: what it is running, what closed in the last day, its record."""

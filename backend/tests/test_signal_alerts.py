@@ -260,7 +260,9 @@ def test_fires_on_candle_close_once_and_notifies(tmp_path):
         assert await svc.on_bar_close("INJUSDT", "1h", t) == []  # judged once
         await _until(lambda: len(seen) == 1)
         await asyncio.sleep(0.05)
-        assert len(seen) == 1 and json.loads(seen[0].content)["text"] == fired["text"]
+        # A card with the chart: Telegram gets it as a photo whose caption carries the alert's text.
+        assert len(seen) == 1 and seen[0].url.path.endswith("/sendPhoto")
+        assert b"\x89PNG" in seen[0].content and b"INJUSDT" in seen[0].content
         assert svc.list()[0].fire_count == 1
 
         saved = json.loads((tmp_path / "s.json").read_text())["alerts"]

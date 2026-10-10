@@ -21,6 +21,7 @@ import { DEFAULT_INTERVAL, DEFAULT_SYMBOL } from "@/lib/config";
 import { isCustom } from "@/lib/customSymbols";
 import { fetchLiquidationLevels, liquidationOverlays } from "@/lib/marketdata";
 import { focusFrom } from "@/lib/focus";
+import { parseDeepLink } from "@/lib/deepLink";
 import { DESK_SELECT_KEY, deskChip, deskOverlays } from "@/lib/desk";
 import { useDeskCalls } from "@/hooks/useDeskCalls";
 import { CHAT_ID_KEY, CHATS_KEY, lastAnswerOn, toSession, upsertSession, worthKeeping, type ChatSession } from "@/lib/chatHistory";
@@ -904,6 +905,18 @@ export default function ChartWorkspace() {
   }, [openTab]);
   const openTabRef = useRef(openTab);
   openTabRef.current = openTab;
+
+  // Opened from an alert card's link (/?symbol=INJUSDT&tf=4h&focus=desk:<id>): that chart, and the tab the alert
+  // belongs to with the item in view; then the query leaves the address bar.
+  useEffect(() => {
+    const link = parseDeepLink(window.location.search);
+    if (!link) return;
+    setCell({ symbol: link.symbol, interval: link.interval ?? interval });
+    if (link.tab === "desk" && link.id) writeStored(DESK_SELECT_KEY, link.id);
+    if (link.tab) openTabRef.current(link.tab);
+    window.history.replaceState(null, "", window.location.pathname);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const closeDock = useCallback(() => (mobile ? setMobileTab(null) : setDock((d) => ({ ...d, open: false }))), [mobile, setDock]);
   const focusAgent = useCallback(() => {
     openTab("agent");

@@ -34,7 +34,7 @@ import httpx
 from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 
 from .agent import run_analysis
 from .agent_desk import AgentDesk, DeskSettings
@@ -247,6 +247,8 @@ async def status(request: Request) -> dict:
                    "streams": st.hub.stats(), "liquidation_stream": st.derivatives.stream_connected},
         "binance_key": {k: key.get(k) for k in ("configured", "ok", "masked", "problems", "error", "checked_at")},
         "channels": st.alerts.channel_status,
+        # Per channel: last delivered, last failure, sent and failed in the last 24 h (notify.Outbox).
+        "delivery": st.alerts.delivery_stats(),
         "database": {"path": st.db.path, "memory": st.db.memory},
         "jobs": jobs.status(),
     }
@@ -406,6 +408,14 @@ async def update_alert(alert_id: str, patch: AlertPatch, request: Request) -> di
 @app.get("/api/alerts/history")
 async def alert_history(request: Request, limit: int = Query(100, ge=1, le=500)) -> dict:
     return {"items": request.app.state.alerts.history.list(limit)}
+
+
+@app.get("/api/alerts/history/{item_id}/image")
+async def alert_history_image(request: Request, item_id: str) -> Response:
+    png = request.app.state.alerts.history_image(item_id)
+    if png is None:
+        raise HTTPException(404, "No chart for that alert")
+    return Response(png, media_type="image/png", headers={"Cache-Control": "max-age=86400"})
 
 
 @app.delete("/api/alerts/history")

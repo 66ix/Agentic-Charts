@@ -115,6 +115,8 @@ class Settings:
     # Alerts on the market header (metric_alerts.py). METRIC_ALERTS_STORE=memory keeps them in memory only.
     metric_alerts_store: str = field(default_factory=lambda: _env(
         "METRIC_ALERTS_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "metric_alerts.json")))
+    # Where the app is reachable from your phone (a LAN or Tailscale address): alert cards link back to the chart.
+    public_app_url: str = field(default_factory=lambda: _env("PUBLIC_APP_URL", "").rstrip("/"))
     telegram_bot_token: str = field(default_factory=lambda: _env("TELEGRAM_BOT_TOKEN", ""), repr=False)
     telegram_chat_id: str = field(default_factory=lambda: _env("TELEGRAM_CHAT_ID", ""))
     discord_webhook_url: str = field(default_factory=lambda: _env("DISCORD_WEBHOOK_URL", ""), repr=False)

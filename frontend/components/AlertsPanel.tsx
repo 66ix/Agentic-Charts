@@ -25,6 +25,9 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import MarketAlerts from "@/components/MarketAlerts";
 import { requestNotificationPermission, type AlertsApi, type ChannelTestResult } from "@/hooks/useAlerts";
 import { usePersistentState } from "@/hooks/usePersistentState";
+import { usePolled } from "@/hooks/usePolled";
+import { API_URL } from "@/lib/config";
+import { fetchStatus } from "@/lib/status";
 import {
   BRIEF_SECTION_NAMES,
   CONFIRM_OPTIONS,
@@ -271,6 +274,8 @@ function PriceTab({ p }: { p: AlertsPanelProps }) {
 function ChannelBar({ channels, onTest }: { channels: AlertChannels | null; onTest?: () => Promise<ChannelTestResult | null> }) {
   const [testing, setTesting] = useState(false);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
+  // How delivery has gone: the queue retries a rate limit, but a dead webhook or bot shows here.
+  const delivery = usePolled(channels ? "alerts:delivery" : null, (s) => fetchStatus(s), 60_000).data?.delivery;
   if (!channels) return null;
   const configured = (Object.keys(CHANNEL_NAMES) as (keyof AlertChannels)[]).filter((c) => channels[c]);
 
@@ -294,12 +299,20 @@ function ChannelBar({ channels, onTest }: { channels: AlertChannels | null; onTe
       {configured.length ? (
         <div className="flex items-center gap-1.5">
           <span className="text-mute">Notify</span>
-          {configured.map((c) => (
-            <span key={c} className="inline-flex items-center gap-1 rounded border border-line bg-panel2 px-1.5 py-0.5 text-ink">
-              <span className="h-1.5 w-1.5 rounded-full bg-up" />
-              {CHANNEL_NAMES[c]}
-            </span>
-          ))}
+          {configured.map((c) => {
+            const d = delivery?.[c];
+            const failing = !!d?.last_fail && (!d.last_ok || d.last_fail > d.last_ok);
+            const title = d
+              ? `${d.last_ok ? `Last delivered ${new Date(d.last_ok * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "Nothing delivered yet"} · ${d.sent_24h} sent, ${d.failed_24h} failed in 24 h${d.last_error ? ` · last error: ${d.last_error}` : ""}`
+              : undefined;
+            return (
+              <span key={c} title={title} className="inline-flex items-center gap-1 rounded border border-line bg-panel2 px-1.5 py-0.5 text-ink">
+                <span className={clsx("h-1.5 w-1.5 rounded-full", failing ? "bg-down" : d?.failed_24h ? "bg-yellow-400" : "bg-up")} />
+                {CHANNEL_NAMES[c]}
+                {d && d.failed_24h > 0 && <span className={failing ? "text-down" : "text-yellow-300"}>{d.failed_24h} failed</span>}
+              </span>
+            );
+          })}
           <div className="flex-1" />
           {onTest && (
             <button type="button" onClick={sendTest} disabled={testing} className="btn-ghost h-6 px-1.5 text-[11px] disabled:opacity-50">
@@ -1242,6 +1255,7 @@ const KIND_COLOR = { price: "text-yellow-300", signal: "text-accent", brief: "te
 function HistoryTab({ p, api }: { p: AlertsPanelProps; api: AlertsApi }) {
   const [confirm, setConfirm] = useState(false);
   const [open, setOpen] = useState<string | null>(null);
+  const [shot, setShot] = useState<string | null>(null);
   const [filter, setFilter] = useState<"all" | AlertHistoryItem["kind"]>("all");
   const items = filter === "all" ? api.history : api.history.filter((h) => h.kind === filter);
 
@@ -1316,6 +1330,17 @@ function HistoryTab({ p, api }: { p: AlertsPanelProps; api: AlertsApi }) {
               {long && (
                 <button type="button" onClick={() => setOpen(expanded ? null : h.id)} className="text-[11px] text-accent hover:underline">
                   {expanded ? "Show less" : "Show all"}
+                </button>
+              )}
+              {h.image && (
+                <button type="button" onClick={() => setShot(shot === h.id ? null : h.id)} className="mt-1 block" title="The chart sent with this alert">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={`${API_URL}/api/alerts/history/${h.id}/image`}
+                    alt={`${h.symbol} chart when it fired`}
+                    loading="lazy"
+                    className={clsx("rounded border border-line", shot === h.id ? "w-full" : "h-16 w-auto")}
+                  />
                 </button>
               )}
             </div>

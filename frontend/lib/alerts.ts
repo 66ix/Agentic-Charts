@@ -390,6 +390,8 @@ export interface AlertHistoryItem {
   text: string;
   price?: number;
   alert_id?: string;
+  /** A chart snapshot was kept (GET /api/alerts/history/{id}/image). */
+  image?: boolean;
 }
 
 export function fetchAlertHistory(limit = 200, signal?: AbortSignal) {

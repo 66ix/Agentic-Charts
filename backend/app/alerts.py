@@ -21,6 +21,7 @@ listener with `add_snapshot_provider`.
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 import contextlib
 import json
 import logging
@@ -35,6 +36,7 @@ from typing import TYPE_CHECKING, Literal, Optional
 import httpx
 from pydantic import BaseModel, Field
 
+from .notify import ChannelStats, Notice, Outbox, app_link
 from .config import Settings, get_settings
 from .jobs import jobs
 from .schemas import AlertSpec, PriceAlert
@@ -45,6 +47,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 INTERVAL = "1m"
+MAX_SNAPSHOTS = 50  # chart snapshots of fires kept for the History tab
 MAX_ALERTS = 200
 LISTENER_QUEUE_SIZE = 64
 REPEAT_COOLDOWN_MS = 5 * 60_000  # a repeating alert fires at most this often
@@ -375,6 +378,14 @@ class AlertHistory:
         write_store(self._path, {"items": self._items})
         return item
 
+    def mark_image(self, item_id: str) -> bool:
+        for it in reversed(self._items):
+            if it.get("id") == item_id:
+                it["image"] = True
+                write_store(self._path, {"items": self._items})
+                return True
+        return False
+
     def list(self, limit: int = 100) -> list[dict]:
         """Newest first."""
         return self._items[::-1][:max(0, limit)]
@@ -405,6 +416,10 @@ class AlertService:
         self._closed = False
         self.history = AlertHistory(self.s.alert_history_store)
         self.channels = build_channels(self.s)
+        self._outbox: Optional[Outbox] = None  # made on first send (it needs the running loop and the client)
+        self._images: "OrderedDict[str, bytes]" = OrderedDict()
+        hist = store_path(self.s.alert_history_store)
+        self._snap_dir = hist.parent / "snapshots" if hist is not None else None
         self._log_filter = _RedactFilter(self.channels)
         logging.getLogger("httpx").addFilter(self._log_filter)
         self._client = client or httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=3.0),
@@ -439,6 +454,8 @@ class AlertService:
             await self.hub.unsubscribe(sym, INTERVAL, queue)
         if self._tasks:  # let in-flight notifications finish briefly
             await asyncio.wait(set(self._tasks), timeout=3)
+        if self._outbox is not None:
+            await self._outbox.close()
         for t in list(self._tasks):
             t.cancel()
         await self._client.aclose()
@@ -543,15 +560,64 @@ class AlertService:
         return await send_all(self._client, self.channels,
                               "Agentic Charts: test notification. Price alerts from this backend will arrive here.")
 
+    @property
+    def outbox(self) -> Outbox:
+        if self._outbox is None:
+            self._outbox = Outbox(self._client, self.channels)
+        return self._outbox
+
     async def send_text(self, text: str) -> dict[str, bool]:
         """Send any text (a signal alert, the brief) to every configured channel, split to each channel's
-        message limit → {channel: delivered}. Empty when no channel is configured."""
-        return await send_long(self._client, self.channels, text) if self.channels else {}
+        message limit and queued in order (notify.Outbox) → {channel: delivered}. Empty when no channel is
+        configured."""
+        return await self.outbox.send(text) if self.channels else {}
+
+    async def send_notice(self, notice: Notice) -> dict[str, bool]:
+        """Send a card (notify.Notice) to every channel → {channel: delivered}."""
+        if not self.channels:
+            return {}
+        if not notice.url and notice.symbol:
+            notice.url = app_link(self.s.public_app_url, notice.symbol, notice.interval)
+        return await self.outbox.send(notice)
 
     def notify(self, text: str) -> None:
         """Fire-and-forget send_text, for use from stream callbacks."""
         if self.channels and not self._closed:
             self._spawn(self.send_text(text))
+
+    def notify_notice(self, notice: Notice) -> None:
+        """Fire-and-forget send_notice."""
+        if self.channels and not self._closed:
+            self._spawn(self.send_notice(notice))
+
+    def attach_image(self, history_id: str, png: bytes) -> None:
+        """Keep a fire's chart snapshot (the last MAX_SNAPSHOTS) for the History tab."""
+        if not self.history.mark_image(history_id):
+            return
+        self._images[history_id] = png
+        while len(self._images) > MAX_SNAPSHOTS:
+            old, _ = self._images.popitem(last=False)
+            if self._snap_dir is not None:
+                with contextlib.suppress(OSError):
+                    (self._snap_dir / f"{old}.png").unlink()
+        if self._snap_dir is not None:
+            with contextlib.suppress(OSError):
+                self._snap_dir.mkdir(parents=True, exist_ok=True)
+                (self._snap_dir / f"{history_id}.png").write_bytes(png)
+
+    def history_image(self, history_id: str) -> Optional[bytes]:
+        if history_id in self._images:
+            return self._images[history_id]
+        if self._snap_dir is not None and all(c.isalnum() for c in history_id):
+            path = self._snap_dir / f"{history_id}.png"
+            if path.exists():
+                return path.read_bytes()
+        return None
+
+    def delivery_stats(self) -> dict[str, dict]:
+        """Per channel: last delivered, last failure and its error, sent and failed in the last 24 h."""
+        return {c.name: (self._outbox.stats[c.name].snapshot() if self._outbox else ChannelStats().snapshot())
+                for c in self.channels}
 
     def record(self, kind: HistoryKind, symbol: str, title: str, text: str, price: Optional[float] = None,
                alert_id: Optional[str] = None, time_ms: Optional[int] = None) -> dict:
@@ -652,11 +718,14 @@ class AlertService:
             self.record("price", a.symbol, a.label or "Price alert", text, price=price, alert_id=a.id,
                         time_ms=a.triggered_at)
         self._changed()
-        if fired and self.channels:
-            lines = [describe_fire(a, price) for a in fired]
-            if source == "synthetic":
-                lines.append("(synthetic demo data)")
-            self._spawn(send_all(self._client, self.channels, "\n".join(lines)))
+        for a in fired if self.channels else []:
+            text = describe_fire(a, price)
+            self.notify_notice(Notice(
+                kind="price", title=f"{a.symbol} price alert" + (f": {a.label}" if a.label else ""),
+                text=text + (" (synthetic demo data)" if source == "synthetic" else ""), symbol=a.symbol,
+                interval=INTERVAL, description=text, side="info", demo=source == "synthetic",
+                url=app_link(self.s.public_app_url, a.symbol, "", f"alert:{a.id}"),
+                fields=[("Price", fmt_price(price), True)] + ([("Note", a.note, False)] if a.note else [])))
         if disarmed:
             self._spawn(self._sync())  # drop the subscription if nothing is armed on this symbol any more
         return fired

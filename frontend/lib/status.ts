@@ -38,6 +38,8 @@ export interface AppStatus {
   market: { data_source: string; binance_reachable: boolean; streams: Record<string, unknown>; liquidation_stream: boolean };
   binance_key: { configured: boolean; ok: boolean | null; masked: string | null; problems: string[]; error: string | null; checked_at: number | null };
   channels: { telegram: boolean; discord: boolean };
+  /** Per channel: when it last delivered, its last failure, and counts over the last 24 h. */
+  delivery?: Record<string, { last_ok: number | null; last_fail: number | null; last_error: string | null; sent_24h: number; failed_24h: number }>;
   database: { path: string; memory: boolean };
   jobs: JobStatus[];
 }

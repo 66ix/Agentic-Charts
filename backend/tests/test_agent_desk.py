@@ -188,6 +188,10 @@ class FakeAlerts:
         self.sent.append(text)
         return {"discord": True}
 
+    async def send_notice(self, notice):
+        self.sent.append(notice.text)
+        return {"discord": True}
+
     def record(self, kind, symbol, title, text, price=None, **kw):
         self.records.append((kind, symbol, title))
 
