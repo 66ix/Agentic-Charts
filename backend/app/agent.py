@@ -63,6 +63,7 @@ from .schemas import (
 )
 from .ta_agent import (GREEN, ORANGE, TEAL, ZONE_BARS, _fmt, analyze, atr, describe, find_swings, higher_timeframes,
                        htf_readings, htf_zones, price_check, rgba)
+from .exit_plan import describe_exit_plan, plan_from_market, take_profits
 from .focus import focus_line, plan_in_focus
 from .suggest import next_steps
 from .focus import usable as focus_usable
@@ -569,28 +570,6 @@ def grid_facts(res: MarketScanResult, n: int = 6) -> list[dict]:
 
 
 TP_COLOR = GREEN
-MAX_TAKE_PROFITS = 4
-
-
-def take_profits(levels: list, last: float, frames: dict, tfl: str) -> list[dict]:
-    """Where to sell coins held: resistance, supply and window highs above price on this timeframe and the next one
-    up, nearest first, one per price area."""
-    rows = [{"low": lv.low, "high": lv.high, "label": lv.label} for lv in levels
-            if lv.kind in ("resistance", "supply", "window_high") and lv.low > last * 1.002]
-    for tf, df in list(frames.items())[:1]:
-        for z in htf_zones(df):
-            if z.kind in ("resistance", "supply") and z.price_low > last * 1.002:
-                rows.append({"low": z.price_low, "high": z.price_high, "label": f"{tf.upper()} {z.kind}"})
-    rows.sort(key=lambda r: r["low"])
-    out: list[dict] = []
-    for r in rows:
-        if out and r["low"] <= out[-1]["high"]:  # overlaps the previous one: same area
-            out[-1]["label"] += f" + {r['label']}"
-            continue
-        out.append({**r, "gain_pct": round((r["low"] / last - 1) * 100, 2)})
-        if len(out) == MAX_TAKE_PROFITS:
-            break
-    return out
 
 
 def take_profit_overlays(rows: list[dict]) -> list:
@@ -886,9 +865,20 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
             for ov in plan_ovs:
                 ov.id = _new_id()
     tp_rows: list[dict] = []
+    exit_plan = None
     if intent.take_profit:
         tp_rows = take_profits(result.levels, result.stats.last_price, frames, tf)
         facts["take_profit"] = tp_rows
+        held = next((h for h in ((positions or {}).get("manual") or {}).get("holdings", [])
+                     if h["symbol"] == symbol and (h.get("value") or 0) >= 10), None) if not custom_chart else None
+        if held:  # a coin you hold: how much to sell where, sized from your holding (exit_plan.py)
+            try:
+                exit_plan = await plan_from_market(market, symbol, held["qty"],
+                                                   max(0.0, held["qty"] - held.get("locked_qty", 0.0)),
+                                                   held.get("avg_entry"))
+                facts["exit_plan"] = exit_plan.model_dump(exclude={"armed", "created_at"})
+            except Exception as exc:  # the plain take-profit levels still answer
+                log.info("Exit plan for %s skipped: %s", symbol, exc)
         plan_ovs = plan_ovs + take_profit_overlays(tp_rows)
     if ladder:
         facts["ladder"] = ladder_facts(ladder)
@@ -1022,7 +1012,7 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
     if want_ladder:
         lead.append(describe_ladder(ladder) if ladder else "Couldn't plan a dip-buy ladder for this coin right now.")
     if intent.take_profit:
-        lead.append(describe_take_profits(tp_rows, symbol))
+        lead.append(describe_exit_plan(exit_plan) if exit_plan is not None else describe_take_profits(tp_rows, symbol))
     if isinstance(mscan, MarketScanResult) and intent.scan_kind == "spot_buys":
         lead.append(describe_spot(mscan))
     if isinstance(mscan, MarketScanResult) and intent.scan_kind == "grid_coins":

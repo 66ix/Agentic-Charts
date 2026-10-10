@@ -42,11 +42,14 @@ from pydantic import BaseModel, Field, field_validator
 
 from .config import Settings, get_settings
 from .db import Database
-from .desk_calls import (ACTIVE, CLOSED, DESK_TIMEFRAMES, ENTRY_BARS, MIN_EXPECTED_R, SCORE_RES, Candidate, DeskCall,
+from .desk_calls import (ACTIVE, CLOSED, DEFAULT_TIMEFRAMES, DESK_TIMEFRAMES, ENTRY_BARS, MIN_EXPECTED_R, SCORE_RES, Candidate, DeskCall,
                          call_text, candidates, expected_r, kelly, new_call, outcome_text, score_call, size_for)
 from .desk_learning import (RECENT_DAYS, bucket_table, calibration, estimate, learnable, take_profit, verdict,
                             working_now)
+from .chart_render import snapshot
 from .jobs import jobs
+from .notify import Notice, app_link
+from .pricefmt import _fmt as fmt_price
 from .kimi_service import closed_only
 from .market_data import INTERVAL_SECONDS, MarketData, candles_to_df
 from .paper import NewPaperOrder, PaperService
@@ -96,11 +99,16 @@ class DeskSettings(BaseModel):
     """Mirrors DeskSettings in frontend/lib/desk.ts."""
 
     enabled: bool = True
-    timeframes: list[Literal["1h", "4h", "1d"]] = Field(default_factory=lambda: list(DESK_TIMEFRAMES))
+    timeframes: list[Literal["15m", "30m", "1h", "4h", "1d", "1w"]] = Field(
+        default_factory=lambda: list(DEFAULT_TIMEFRAMES))
     follow_watchlist: bool = Field(True, description="The app keeps `symbols` in step with your active watchlist")
     symbols: list[str] = Field(default_factory=list, max_length=MAX_SYMBOLS, description="Empty = the default list")
     min_confidence: float = Field(0.25, ge=0.1, le=0.9, description="Calls whose take-profit is less likely aren't made")
-    max_active: int = Field(30, ge=1, le=200, description="Calls running at once, across coins and timeframes")
+    min_expected_r: float = Field(MIN_EXPECTED_R, ge=0.0, le=2.0,
+                                  description="Calls must expect at least this much R after fees")
+    max_active: int = Field(30, ge=1, le=200, description="Calls running at once, across coins and timeframes "
+                                                          "(watched zones are not limited)")
+    arm_triggers: bool = Field(True, description="Each new call arms a lower-timeframe confirmation alert in its zone")
     notify_new: bool = True
     notify_fills: bool = True
     notify_results: bool = True
@@ -128,7 +136,7 @@ def due_bars(timeframes: list[str], done: dict[str, int], now: float, delay: flo
     out = []
     for tf in timeframes:
         step = INTERVAL_SECONDS[tf]
-        current = int(now // step * step)
+        current = bar_open(tf, now)
         if now - current < delay:
             current -= step  # the newest close is too fresh: Binance may not have the final bar yet
         closed = current - step
@@ -137,9 +145,27 @@ def due_bars(timeframes: list[str], done: dict[str, int], now: float, delay: flo
     return out
 
 
+WEEK_OFFSET = 4 * 86400  # UNIX time 0 was a Thursday; Binance's weekly candles open on Monday 00:00 UTC
+
+
+def bar_open(tf: str, t: float) -> int:
+    """Open time of the `tf` candle containing `t` (weekly candles open on Mondays, not on epoch Thursdays)."""
+    step = INTERVAL_SECONDS[tf]
+    off = WEEK_OFFSET if tf == "1w" else 0
+    return int((t - off) // step * step + off)
+
+
 def stale(tf: str, bar_time: int, now: float) -> bool:
     step = INTERVAL_SECONDS[tf]
     return now - (bar_time + step) > max(STALE_FRACTION * step, 4 * CLOSE_DELAY)
+
+
+# The lower timeframe whose confirmation candle a call's zone trigger waits for.
+TRIGGER_TF = {"15m": "5m", "30m": "5m", "1h": "5m", "4h": "15m", "1d": "15m", "1w": "15m"}
+
+
+def trigger_owner(call_id: str) -> str:
+    return f"desk:{call_id}"
 
 
 @dataclass
@@ -180,6 +206,7 @@ class AgentDesk:
         self._scored_at = 0.0
         self._pruned_at = 0.0
         self.last_run: dict[str, dict] = (self._kv("last_run") or {})
+        self.signals = None  # SignalAlertService, set by attach_signals: zone triggers for calls
 
     # ------------------------------------------------------------------ storage
     def _kv(self, key: str):
@@ -244,7 +271,7 @@ class AgentDesk:
         nxt = {}
         for tf in self.settings.timeframes:
             step = INTERVAL_SECONDS[tf]
-            nxt[tf] = int(now // step * step + step + CLOSE_DELAY)
+            nxt[tf] = bar_open(tf, now) + step + int(CLOSE_DELAY)
         return {"settings": self.settings.model_dump(), "symbols": self.symbols(), "enabled_by_server": self.s.agent_desk,
                 "running": self._lock.locked(), "last_run": self.last_run, "next_run": nxt,
                 "summary": self.summary(now), "channels": self.alerts.channel_status if self.alerts else {}}
@@ -273,7 +300,7 @@ class AgentDesk:
         async with self._lock:
             now = time.time() if now is None else now
             step = INTERVAL_SECONDS[interval]
-            bar = bar_time if bar_time is not None else int(now // step * step) - step
+            bar = bar_time if bar_time is not None else bar_open(interval, now) - step
             self._done[interval] = max(self._done.get(interval, -1), bar)
             self._set_kv("done", self._done)
             if not force and stale(interval, bar, now):
@@ -300,7 +327,49 @@ class AgentDesk:
             self._set_kv("last_run", self.last_run)
         for c in made:
             await self._notify(c, "new")
+            await self._arm_trigger(c)
+        if made and self.alerts is not None:
+            self.alerts.broadcast({"type": "desk_scored", "changed": [c.id for c in made]})
         return made
+
+    # ---------------------------------------------------------- zone triggers
+    def attach_signals(self, signals) -> None:
+        """Calls arm a confirmation trigger in their zone through `signals` (SignalAlertService)."""
+        self.signals = signals
+        signals.register_context("desk:", self._trigger_context)
+
+    async def _arm_trigger(self, c: DeskCall) -> None:
+        """A lower-timeframe confirmation inside the call's buy zone: the second ping, when price actually reacts
+        there. It stays through waiting and open and goes when the call ends (score)."""
+        if self.signals is None or c.shadow or not self.settings.arm_triggers:
+            return
+        from .schemas import TriggerZone, ZoneTriggerSpec
+
+        tf = TF_LABEL.get(c.interval, c.interval)
+        spec = ZoneTriggerSpec(symbol=c.symbol, interval=TRIGGER_TF.get(c.interval, "15m"), confirm="any",
+                               zone=TriggerZone(source="fixed", price_low=c.zone_low, price_high=c.zone_high,
+                                                direction="long", timeframe=c.interval, label=f"Desk {tf} buy zone"),
+                               cooldown_min=60, repeat=False)
+        try:
+            await self.signals.add_trigger(spec, owner=trigger_owner(c.id))
+        except ValueError as exc:  # e.g. the alert limit: the call stands without it
+            log.info("Desk: no zone trigger for %s: %s", c.symbol, exc)
+
+    async def _disarm_trigger(self, c: DeskCall) -> None:
+        if self.signals is not None:
+            await self.signals.remove_owned(trigger_owner(c.id))
+
+    def _trigger_context(self, alert) -> str:
+        """Where the call stands, for its trigger's fire text. Never the desk's odds: they were measured for the
+        limit at the zone top, not for an entry on this confirmation."""
+        c = self._calls.get((alert.owner or "").removeprefix("desk:"))
+        if c is None:
+            return ""
+        tf = TF_LABEL.get(c.interval, c.interval)
+        where = (f"filled at {fmt_price(c.fill_price or c.entry)}" if c.status == "open"
+                 else f"still waiting at {fmt_price(c.entry)}" if c.status == "waiting" else c.status.replace("_", " "))
+        return (f"Inside the desk's {tf} buy zone {fmt_price(c.zone_low)}–{fmt_price(c.zone_high)}; desk limit {where}, "
+                f"take-profit {fmt_price(c.tp)}, wrong below {fmt_price(c.stop)}")
 
     async def _coin(self, symbol: str, interval: str, bar: int, now: float) -> "CoinResult":
         """One coin on one candle: the call worth making (if any) and the other new zones, watched."""
@@ -338,7 +407,7 @@ class AgentDesk:
             return CoinResult()
         history = learnable(self._calls.values(), self.demo_ok)
         tracks: dict[str, Optional[TrackRecord]] = {}
-        scored: list[tuple[float, bool, Candidate, float, str, float, float]] = []
+        scored: list[tuple[float, bool, Candidate, float, str, float, float, str]] = []
         for c in cands:
             if c.zone.kind not in tracks:
                 tracks[c.zone.kind] = await self._track(symbol, interval, c)
@@ -350,8 +419,11 @@ class AgentDesk:
                              history, now)
             rr = (tp.price - c.plan.entry) / risk if risk > 0 else 0.0
             er = expected_r(tp.p, rr, c.plan.risk_pct)
-            ok = tp.p >= self.settings.min_confidence and er >= MIN_EXPECTED_R and kelly(tp.p, rr, c.plan.risk_pct) > 0 and rr >= 1.0
-            scored.append((er, ok, c, tp.p, est.basis + (f" {tp.note}" if tp.note else ""), tp.price, tp.fraction))
+            why = ("confidence" if tp.p < self.settings.min_confidence else
+                   "expected R" if er < self.settings.min_expected_r or kelly(tp.p, rr, c.plan.risk_pct) <= 0 else
+                   "reward:risk" if rr < 1.0 else "")
+            scored.append((er, not why, c, tp.p, est.basis + (f" {tp.note}" if tp.note else ""), tp.price,
+                           tp.fraction, why))
         scored.sort(key=lambda x: -x[0])
 
         def room() -> tuple[bool, bool]:
@@ -364,7 +436,7 @@ class AgentDesk:
         out = CoinResult(zones=len(scored), best={"symbol": symbol, "interval": interval, "setup": scored[0][2].setup,
                                                   "expected_r": round(scored[0][0], 3)})
         saved: list[DeskCall] = []
-        for er, ok, cand, p, basis, tp_price, fraction in scored:
+        for er, ok, cand, p, basis, tp_price, fraction, why in scored:
             can_call, full = room()
             shadow = not (ok and can_call and out.call is None)
             was = next((r for r in recent if promotable(r) and overlaps(cand, r)), None)
@@ -373,7 +445,7 @@ class AgentDesk:
             call = new_call(cand, symbol, interval, bar, int(now), source, p, basis, tp_price, fraction, shadow)
             call.features["live_price"] = live
             if shadow:
-                call.skip_reason = ("confidence" if not ok else "one call per run" if out.call is not None
+                call.skip_reason = (why if not ok else "one call per run" if out.call is not None
                                     else "capacity" if full else "running call")
                 out.watched += 1
             else:
@@ -491,6 +563,10 @@ class AgentDesk:
             self._scored_at = now
         for before, after in changed:
             await self._notify(after, "update")
+            if after.status not in ACTIVE:
+                await self._disarm_trigger(after)
+        if changed and self.alerts is not None:  # open apps refresh their desk view and chart (no toast)
+            self.alerts.broadcast({"type": "desk_scored", "changed": [a.id for _, a in changed]})
         return [a for _, a in changed]
 
     # ------------------------------------------------------------- messages
@@ -515,13 +591,51 @@ class AgentDesk:
             text = "[demo data] " + text
         if self.alerts is None:
             return
-        self.alerts.record("desk", c.symbol, title, text, price=c.fill_price or c.entry)
+        item = self.alerts.record("desk", c.symbol, title, text, price=c.fill_price or c.entry)
         self.alerts.broadcast({"type": "desk", "call": c.model_dump()})
         if want and self.alerts.channels:
             try:
-                await self.alerts.send_text(text)
+                image = await self._snapshot(c) if why == "new" else None
+                if image is not None and hasattr(self.alerts, "attach_image"):
+                    self.alerts.attach_image(item.get("id", ""), image)
+                await self.alerts.send_notice(self._notice(c, title, text, image))
             except Exception as exc:
                 log.info("Desk: notification failed: %s", exc)
+
+    def _notice(self, c: DeskCall, title: str, text: str, image: Optional[bytes]) -> Notice:
+        """A desk call or its result as a card: the buy zone, take-profit and invalidation with their distances,
+        the confidence (once filled) and the paper size."""
+        def pct(p: float) -> str:
+            return f"{fmt_price(p)} ({(p / c.entry - 1) * 100:+.1f}%)"
+
+        fields = [("Buy zone", f"{fmt_price(c.zone_low)}–{fmt_price(c.zone_high)}", True),
+                  ("Take-profit", pct(c.tp), True), ("Invalidation", pct(c.stop), True),
+                  ("Confidence if filled", f"{c.confidence * 100:.0f}% (random {100 / (1 + max(c.rr, 0.01)):.0f}%)", True),
+                  ("Expected", f"{c.expected_r:+.2f}R after fees", True)]
+        if c.notional:
+            fields.append(("Paper size", f"${c.notional:,.0f}", True))
+        if c.r is not None:
+            fields.insert(0, ("Result", f"{c.r:+.2f}R", True))
+        side = ("buy" if c.status in ("waiting", "open", "tp") else "sell" if c.status in ("invalidated", "timed_out")
+                else "info")
+        return Notice(kind="desk", title=f"{title}: {c.symbol}", text=text, symbol=c.symbol, interval=c.interval,
+                      description=c.setup, fields=fields, side=side, image=image, demo=c.data_source == "synthetic",
+                      url=app_link(self.s.public_app_url, c.symbol, c.interval, f"desk:{c.id}"))
+
+    async def _snapshot(self, c: DeskCall) -> Optional[bytes]:
+        """A chart of the call: the closed candles it was made on, its buy zone, take-profit and invalidation."""
+        try:
+            candles, source = await self.market.get_klines(c.symbol, c.interval, 200)
+        except Exception:
+            return None
+        df = candles_to_df([k for k in candles if k.time <= c.bar_time])
+        if len(df) < 20:
+            return None
+        return await snapshot(df, boxes=[(c.zone_low, c.zone_high, (167, 139, 250, 60), "Desk buy zone")],
+                              lines=[(c.tp, (34, 197, 94), True, f"TP {fmt_price(c.tp)}"),
+                                     (c.stop, (239, 68, 68), True, f"wrong below {fmt_price(c.stop)}")],
+                              title=f"{c.symbol} {TF_LABEL.get(c.interval, c.interval)} · desk call",
+                              demo=c.data_source == "synthetic")
 
     def brief_lines(self, now: Optional[float] = None) -> list[str]:
         """The desk's part of the brief: what it is running, what closed in the last day, its record."""

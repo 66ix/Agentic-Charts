@@ -108,9 +108,20 @@ export interface KimiVisibility {
 
 const ALL_KIMI: KimiVisibility = { sr: true, fib: true, forecast: true, signals: true, patterns: true, harmonics: true };
 
+/** A chip on the chart that isn't the chart's own (a desk call): clickable, unlike the status chips. */
+export interface ChartChip {
+  key: string;
+  text: string;
+  tone: "demo" | "up" | "mute";
+  title?: string;
+  onClick?(): void;
+}
+
 interface Props {
   symbol: string;
   interval: Interval;
+  /** Chips from the rest of the app (desk calls on this coin). */
+  extraChips?: ChartChip[];
   tool: ToolId;
   magnet: boolean;
   locked: boolean;
@@ -1626,7 +1637,7 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
           {cvdError && <span className="text-yellow-300">{cvdError}</span>}
         </PaneLabel>
       )}
-      {chips.length > 0 && (
+      {(chips.length > 0 || (props.extraChips?.length ?? 0) > 0) && (
         <div className={`pointer-events-none absolute left-3 z-10 flex flex-wrap gap-1 ${kimiOn ? "top-12" : "top-7"}`}>
           {chips.map((c) => (
             <span
@@ -1635,6 +1646,19 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
             >
               {c.text}
             </span>
+          ))}
+          {props.extraChips?.map((c) => (
+            <button
+              key={c.key}
+              type="button"
+              title={c.title}
+              onClick={c.onClick}
+              className={`pointer-events-auto rounded border border-dashed px-1.5 py-0.5 text-[10px] font-semibold ${
+                c.tone === "demo" ? "border-yellow-400/50 bg-yellow-400/15 text-yellow-300" : c.tone === "up" ? "border-violet-400/50 bg-panel/80 text-up" : "border-violet-400/50 bg-panel/80 text-violet-300"
+              }`}
+            >
+              {c.text}
+            </button>
           ))}
         </div>
       )}

@@ -31,7 +31,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from functools import cached_property
-from typing import TYPE_CHECKING, Literal, Optional, get_args
+from typing import TYPE_CHECKING, Callable, Literal, Optional, get_args
 
 import numpy as np
 import pandas as pd
@@ -42,7 +42,9 @@ from .alerts import AlertService, fmt_price, read_store, store_path, write_store
 from .config import Settings, get_settings
 from .indicators import rsi, rsi_divergence, structure_breaks
 from .jobs import jobs
+from .chart_render import snapshot
 from .kimi_service import closed_only
+from .notify import Notice, app_link
 from .market_data import INTERVAL_SECONDS, MarketData, candles_to_df
 from .patterns import liquidity_sweeps
 from .schemas import Interval, KimiSignal, TriggerZone, ZoneTriggerSpec, norm_symbol
@@ -58,7 +60,7 @@ log = logging.getLogger(__name__)
 
 SignalId = Literal["kimi_buy", "kimi_sell", "kimi_any", "rsi_bull_div", "rsi_bear_div", "sweep_low", "sweep_high",
                    "new_demand", "new_supply", "bos_bull", "bos_bear", "rsi_overbought", "rsi_oversold",
-                   "lost_support", "at_resistance", "zone_trigger"]
+                   "lost_support", "at_resistance", "zone_trigger", "level_close"]
 SIGNAL_IDS: tuple[str, ...] = get_args(SignalId)
 
 
@@ -94,6 +96,8 @@ SIGNALS: dict[str, SignalInfo] = {
                                 "the zone"),
     "zone_trigger": SignalInfo("Zone trigger", "A lower timeframe (1m/5m/15m) confirms inside a higher-timeframe zone: "
                                                "a CHoCH / BOS, a liquidity sweep or an engulfing close"),
+    "level_close": SignalInfo("Close beyond a level", "A candle closes above or below a price (or inside a zone), "
+                                                      "N closes in a row: no wick fires it"),
 }
 KIMI_SIGNALS = frozenset({"kimi_buy", "kimi_sell", "kimi_any"})
 SELL_SIGNALS = frozenset({"lost_support", "at_resistance"})  # sell_check.py's checks, for spot holders
@@ -118,6 +122,36 @@ ZONE_RETRY = 30.0     # seconds before looking up a detected zone again when the
 # ----------------------------------------------------------------- models --
 
 
+class LevelClose(BaseModel):
+    """A level_close alert's level: a line (low == high) or a zone, which side the close must be on, and how many
+    closes in a row."""
+
+    price_low: float = Field(..., gt=0)
+    price_high: float = Field(..., gt=0)
+    side: Literal["above", "below", "inside"]
+    closes: int = Field(1, ge=1, le=3)
+    label: str = Field("", max_length=120)
+
+
+def level_close_hit(level: LevelClose, closes: list[float], t: int) -> Optional[SignalHit]:
+    """Did the last `level.closes` closes land on the level's side, with the close before them not? (pure)"""
+    n = level.closes
+    if len(closes) < n + 1:
+        return None
+
+    def beyond(c: float) -> bool:
+        return (c > level.price_high if level.side == "above" else c < level.price_low if level.side == "below"
+                else level.price_low <= c <= level.price_high)
+
+    if not all(beyond(c) for c in closes[-n:]) or beyond(closes[-n - 1]):
+        return None
+    where = (f"{fmt_price(level.price_low)}–{fmt_price(level.price_high)}" if level.price_high > level.price_low
+             else fmt_price(level.price_low))
+    text = (f"closed {level.side} {where}" + (f" ({level.label})" if level.label else "")
+            + f": close {fmt_price(closes[-1])}" + (f", {n} closes in a row" if n > 1 else ""))
+    return SignalHit(t, closes[-1], text, f"level:{t}")
+
+
 class SignalAlert(BaseModel):
     """A stored signal alert. Mirrors SignalAlert in frontend/lib/alerts.ts."""
 
@@ -137,6 +171,7 @@ class SignalAlert(BaseModel):
     last_key: Optional[str] = Field(None, description="The event it last fired on, so it never fires twice")
     trigger: Optional[ZoneTrigger] = Field(None, description="Signal zone_trigger: the zone and the confirmation")
     last_stop: Optional[float] = Field(None, description="Zone triggers: the suggested stop of the last fire")
+    level: Optional[LevelClose] = Field(None, description="Signal level_close: the level and the close rule")
     owner: Optional[str] = Field(None, description="Set when the app manages it (\"holdings\": the holdings "
                                                    "watch adds and removes it as coins are bought and sold)")
 
@@ -216,8 +251,8 @@ def detect(signal: str, frame: Frame, prev: Optional[Frame] = None,
     chart (needed for the kimi_* signals)."""
     if signal in KIMI_SIGNALS:
         return _kimi_hit(signal, frame.time, kimi or [])
-    if signal == "zone_trigger":
-        return None  # each trigger alert has its own zone: SignalAlertService._trigger_hit
+    if signal in ("zone_trigger", "level_close"):
+        return None  # each of these alerts has its own zone or level: SignalAlertService
     if frame.n < MIN_BARS:
         return None
     t, close, n = frame.time, frame.close, frame.n
@@ -340,6 +375,7 @@ class SignalAlertService:
         self.retry_delay = retry_delay
         self._path = store_path(self.s.signal_alerts_store)
         self._alerts: dict[str, SignalAlert] = {}
+        self._context: dict[str, Callable[[SignalAlert], str]] = {}
         self._watches: dict[tuple[str, str], tuple[asyncio.Queue, asyncio.Task]] = {}
         self._seen: dict[tuple[str, str], int] = {}       # newest open time seen per stream
         self._scheduled: dict[tuple[str, str], int] = {}  # newest closed candle queued for a check per stream
@@ -435,6 +471,21 @@ class SignalAlertService:
         await self._sync()
         return True
 
+    async def remove_owned(self, owner: str) -> int:
+        """Deletes the alerts `owner` (e.g. "desk:<call id>") made → how many."""
+        gone = [k for k, a in self._alerts.items() if a.owner == owner]
+        for k in gone:
+            del self._alerts[k]
+        if gone:
+            self._changed()
+            await self._sync()
+        return len(gone)
+
+    def register_context(self, prefix: str, fn: Callable[[SignalAlert], str]) -> None:
+        """`fn(alert)` adds a line to the fire text of alerts whose owner starts with `prefix` (the desk says where
+        its call stands)."""
+        self._context[prefix] = fn
+
     async def sync_owned(self, owner: str, symbols: list[str], interval: str, signals: list[str],
                          note: str = "") -> dict:
         """Makes `owner`'s alerts exactly `signals` on `interval` for `symbols`: adds the missing ones and removes
@@ -495,7 +546,7 @@ class SignalAlertService:
         return out
 
     # ---------------------------------------------------- trigger alerts
-    async def add_trigger(self, spec: ZoneTriggerSpec) -> SignalAlert:
+    async def add_trigger(self, spec: ZoneTriggerSpec, owner: Optional[str] = None) -> SignalAlert:
         """A zone trigger alert (zone_triggers.py). The same coin, timeframe, zone and confirmation again re-arms
         the existing alert with the new cooldown, repeat and note instead of adding a duplicate. A fixed zone
         without a direction takes it from where price is (below price = long). Raises ValueError for bad input."""
@@ -524,7 +575,29 @@ class SignalAlertService:
                                         "trigger": kept.model_copy(update={"cooldown_min": spec.cooldown_min})})
         else:
             a = SignalAlert(id=uuid.uuid4().hex[:10], symbol=sym, interval=spec.interval, signal="zone_trigger",
-                            repeat=spec.repeat, note=note, created_at=int(time.time() * 1000), trigger=trig)
+                            repeat=spec.repeat, note=note, created_at=int(time.time() * 1000), trigger=trig,
+                            owner=owner)
+        self._alerts[a.id] = a
+        self._changed()
+        await self._sync()
+        return a
+
+    async def add_level(self, symbol: str, interval: str, level: LevelClose, repeat: bool = False, note: str = "",
+                        owner: Optional[str] = None) -> SignalAlert:
+        """A close-confirmed alert: fires when `level.closes` candles of `interval` close on its side. The same coin,
+        timeframe and level again replaces the old one."""
+        if not (symbol.isalnum() and 5 <= len(symbol) <= 20):
+            raise ValueError(f"Invalid symbol {symbol!r}")
+        if level.price_high < level.price_low:
+            raise ValueError("price_high must be at least price_low")
+        same = next((a for a in self._alerts.values() if a.level is not None and a.symbol == symbol
+                     and a.interval == interval and a.level == level), None)
+        if same is None and len(self._alerts) >= MAX_SIGNAL_ALERTS:
+            raise ValueError(f"At most {MAX_SIGNAL_ALERTS} signal alerts; delete some first")
+        a = (same.model_copy(update={"armed": True, "repeat": repeat, "note": note[:500]}) if same else
+             SignalAlert(id=uuid.uuid4().hex[:10], symbol=symbol, interval=interval, signal="level_close",
+                         repeat=repeat, note=note[:500], created_at=int(time.time() * 1000), level=level,
+                         owner=owner))
         self._alerts[a.id] = a
         self._changed()
         await self._sync()
@@ -738,7 +811,10 @@ class SignalAlertService:
             if a.signal in KIMI_SIGNALS and kimi is None:
                 continue
             hit: Optional[SignalHit | TriggerHit]
-            if a.trigger is not None:
+            if a.level is not None:
+                hit = level_close_hit(a.level, [float(x) for x in frame.df["close"].tail(a.level.closes + 1)],
+                                      frame.time)
+            elif a.trigger is not None:
                 hit, zone_moved = await self._trigger_hit(a, frame)
                 moved = moved or zone_moved
             else:
@@ -750,15 +826,25 @@ class SignalAlertService:
                 continue
             if hit.key == current.last_key:
                 continue
-            fired.append(self._fire(current, hit, source))
+            fired.append(self._fire(current, hit, source, frame))
         if fired or moved:
             self._changed()
         if fired:
             await self._sync()
         return fired
 
-    def _fire(self, a: SignalAlert, hit: SignalHit | TriggerHit, source: str) -> SignalAlert:
+    def _fire(self, a: SignalAlert, hit: SignalHit | TriggerHit, source: str,
+              frame: Optional[Frame] = None) -> SignalAlert:
         text = f"{a.symbol} {a.interval}: {hit.text}" + (f" — {a.note}" if a.note else "")
+        for prefix, fn in self._context.items():
+            if a.owner and a.owner.startswith(prefix):
+                try:
+                    extra = fn(a)
+                except Exception as exc:  # a context line must never stop the alert
+                    log.info("Signal alert context for %s failed: %s", a.owner, exc)
+                    extra = ""
+                if extra:
+                    text += f". {extra}"
         new = a.model_copy(update={
             "armed": a.repeat, "last_fired_at": int(time.time() * 1000), "fire_count": a.fire_count + 1,
             "last_bar": hit.time, "last_key": hit.key, "last_text": text, "last_price": hit.price,
@@ -768,10 +854,38 @@ class SignalAlertService:
         log.info("Signal alert fired: %s", text)
         self.alerts.broadcast({"type": "signal_fired", "alert": new.model_dump(), "text": text, "price": hit.price,
                                "time": hit.time})
-        self.alerts.record("signal", a.symbol, f"{TF_LABEL.get(a.interval, a.interval)} {SIGNALS[a.signal].name}",
-                           text, price=hit.price, alert_id=a.id)
-        self.alerts.notify(text + (" (synthetic demo data)" if source == "synthetic" else ""))
+        item = self.alerts.record("signal", a.symbol, f"{TF_LABEL.get(a.interval, a.interval)} {SIGNALS[a.signal].name}",
+                                  text, price=hit.price, alert_id=a.id)
+        self._spawn(self._card(new, hit, text, source, frame, item.get("id")))
         return new
+
+    async def _card(self, a: SignalAlert, hit: SignalHit | TriggerHit, text: str, source: str,
+                    frame: Optional[Frame], history_id: Optional[str] = None) -> None:
+        """The fire as a card (notify.Notice) with a chart of the candles the signal judged, the firing candle
+        marked and, for a trigger, its suggested stop."""
+        sell = a.signal in SHORT_SIGNALS
+        stop = getattr(hit, "stop", None)
+        image = None
+        if frame is not None and self.alerts.outbox.pending() <= 5:  # a burst goes out without pictures
+            lines = [(stop, (239, 68, 68), True, f"stop {fmt_price(stop)}")] if stop is not None else []
+            image = await snapshot(frame.df, lines=lines,
+                                   markers=[(hit.time, hit.price, "down" if sell else "up", (96, 165, 250))],
+                                   title=f"{a.symbol} {a.interval} · {SIGNALS[a.signal].name}",
+                                   demo=source == "synthetic")
+        fields = [("Close", fmt_price(hit.price), True)]
+        if stop is not None:
+            fields.append(("Suggested stop", fmt_price(stop), True))
+        if a.note:
+            fields.append(("Your note", a.note, False))
+        demo = source == "synthetic" and self.s.data_source != "synthetic"
+        if image is not None and history_id:
+            self.alerts.attach_image(history_id, image)  # the History tab shows it too
+        await self.alerts.send_notice(Notice(
+            kind="trigger" if a.trigger is not None else "signal", symbol=a.symbol, interval=a.interval,
+            title=f"{a.symbol} {TF_LABEL.get(a.interval, a.interval)}: {SIGNALS[a.signal].name}",
+            text=text + (" (synthetic demo data)" if source == "synthetic" else ""), description=hit.text,
+            side="sell" if sell else "buy", fields=fields, image=image, demo=demo,
+            url=app_link(self.s.public_app_url, a.symbol, a.interval, f"signal:{a.id}")))
 
     async def _frames(self, symbol: str, interval: str, bar_time: int) -> Optional[tuple[Frame, Frame, str]]:
         """The WINDOW closed candles ending at `bar_time`, and the same window one candle earlier. Retries while

@@ -39,6 +39,7 @@ from .config import Settings, get_settings
 from .indicators import structure_breaks
 from .jobs import jobs
 from .kimi_service import closed_only
+from .notify import Notice
 from .market_data import INTERVAL_SECONDS, MarketData, MarketDataError, candles_to_df
 from .schemas import INTERVALS, norm_symbol
 from .ta_agent import atr, find_swings
@@ -438,7 +439,20 @@ class TradeManager:
         text = describe(t, a)
         self.alerts.record("trade", t.symbol, f"{t.symbol} {t.direction}: {a.kind}", text, price=a.price)
         self.alerts.broadcast({"type": "trade_advice", "trade_id": t.id, "advice": a.model_dump(), "text": text})
-        self.alerts.notify(text)
+        if hasattr(self.alerts, "notify_notice"):
+            fields = [("Price", fmt_price(a.price), True), ("Stop", fmt_price(t.stop), True)]
+            if a.suggested_stop is not None:
+                fields.append(("Move stop to", fmt_price(a.suggested_stop), True))
+            if a.take_pct:
+                fields.append(("Take off", f"{a.take_pct:g}%", True))
+            fields.append(("R now", f"{r_multiple(t, a.price):+.2f}R", True))
+            self.alerts.notify_notice(Notice(
+                kind="trade", title=f"{t.symbol} {t.direction}: {a.kind.replace('_', ' ')}", text=text,
+                symbol=t.symbol, interval=t.interval, description=a.text, fields=fields,
+                side="sell" if a.kind in ("stop", "structure") else "buy" if a.kind == "target" else "info",
+                demo=t.data_source == "synthetic"))
+        else:
+            self.alerts.notify(text)
 
     async def _loop(self) -> None:
         while True:

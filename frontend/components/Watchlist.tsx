@@ -7,6 +7,10 @@ import { useEffect, useRef, useState } from "react";
 import { fetchKlines, fetchTickers, fetchWatchlistScan } from "@/lib/api";
 import { displaySymbol, formatPct, formatPrice } from "@/lib/format";
 import type { Interval, ScanResult, Ticker } from "@/lib/types";
+import { readStored, writeStored } from "@/hooks/usePersistentState";
+
+const TICKERS_CACHE = "ac:cache:tickers";
+const SCAN_CACHE = "ac:cache:watchlist-scan";
 
 const TICKER_MS = 10_000;
 const SCAN_MS = 120_000;
@@ -30,6 +34,8 @@ const SORTS: { v: WatchlistSort; label: string }[] = [
 ];
 
 interface Props {
+  /** The list in the order shown (after the sort), so [ and ] step through it as you see it. */
+  onOrder?(symbols: string[]): void;
   lists: WatchlistList[];
   activeList: string;
   onLists(next: WatchlistList[]): void;
@@ -75,8 +81,21 @@ const uid = () => Math.random().toString(36).slice(2, 8);
 export default function Watchlist(p: Props) {
   const list = p.lists.find((l) => l.id === p.activeList) ?? p.lists[0];
   const symbols = list?.symbols ?? [];
+  // Last prices and scan rows are kept in storage, so the list shows them at once on load while it refreshes.
   const [tickers, setTickers] = useState<Record<string, Ticker>>({});
   const [scan, setScan] = useState<Record<string, ScanResult>>({});
+  useEffect(() => {
+    setTickers((t) => ({ ...readStored<Record<string, Ticker>>(TICKERS_CACHE, {}), ...t }));
+    setScan((s) => ({ ...readStored<Record<string, ScanResult>>(SCAN_CACHE, {}), ...s }));
+  }, []);
+  useEffect(() => {
+    const id = window.setTimeout(() => writeStored(TICKERS_CACHE, tickers), 2000);
+    return () => window.clearTimeout(id);
+  }, [tickers]);
+  useEffect(() => {
+    const id = window.setTimeout(() => writeStored(SCAN_CACHE, scan), 2000);
+    return () => window.clearTimeout(id);
+  }, [scan]);
   const [sparks, setSparks] = useState<Record<string, number[]>>({});
   const [menu, setMenu] = useState<{ symbol: string; x: number; y: number } | null>(null);
   const [listMenu, setListMenu] = useState(false);
@@ -158,6 +177,14 @@ export default function Watchlist(p: Props) {
   if (p.sort === "zone") ordered.sort((a, b) => Math.abs(scan[a]?.distance_pct ?? 1e9) - Math.abs(scan[b]?.distance_pct ?? 1e9));
   if (p.sort === "volume") ordered.sort((a, b) => (scan[b]?.volume_ratio ?? 0) - (scan[a]?.volume_ratio ?? 0));
   if (p.sort === "name") ordered.sort();
+  const orderKey = ordered.join(",");
+  const onOrder = useRef(p.onOrder);
+  useEffect(() => {
+    onOrder.current = p.onOrder;
+  });
+  useEffect(() => {
+    onOrder.current?.(orderKey ? orderKey.split(",") : []);
+  }, [orderKey]);
 
   return (
     <div className="flex h-full min-h-0 flex-col">

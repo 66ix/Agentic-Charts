@@ -48,23 +48,33 @@ export default function SinceLastLooked({ symbol, interval }: { symbol: string; 
 
   useEffect(() => {
     const key = seenKey(symbol, interval);
-    const prev = readSeen(key);
-    writeSeen(key);
-    setData(null);
     const ctrl = new AbortController();
-    const now = Math.floor(Date.now() / 1000);
-    if (prev && now - prev >= MIN_AWAY_S) {
+    // What changed since `prev`, if that was long enough ago; then this chart is seen as of now.
+    const check = () => {
+      const prev = readSeen(key);
+      writeSeen(key);
+      const now = Math.floor(Date.now() / 1000);
+      if (!prev || now - prev < MIN_AWAY_S) return;
       apiRequest<Changes>("/api/changes", { method: "POST", body: JSON.stringify({ symbol, interval, since: prev }), signal: ctrl.signal, timeoutMs: 45_000 })
         .then((c) => {
           if (!c.quiet && c.lines.length) setData(c);
         })
         .catch(() => undefined);
-    }
-    const id = setInterval(() => writeSeen(key), SEEN_EVERY_MS);
+    };
+    setData(null);
+    if (!document.hidden) check(); // opened in a background tab: it isn't seen until you look at it
+    // Seen only while the tab is visible, so a tab left in the background shows the card when you come back to it.
+    const id = setInterval(() => !document.hidden && writeSeen(key), SEEN_EVERY_MS);
+    const onVisibility = () => {
+      if (document.hidden) writeSeen(key);
+      else check();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
       ctrl.abort();
       clearInterval(id);
-      writeSeen(key);
+      document.removeEventListener("visibilitychange", onVisibility);
+      if (!document.hidden) writeSeen(key);
     };
   }, [symbol, interval]);
 

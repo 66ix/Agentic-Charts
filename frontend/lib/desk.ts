@@ -5,8 +5,13 @@ import { apiRequest } from "./api";
 import type { PaperWallet } from "./paper";
 import type { BoxOverlay, HorizontalLineOverlay, Overlay } from "./types";
 
-export type DeskTimeframe = "1h" | "4h" | "1d";
-export const DESK_TIMEFRAMES: DeskTimeframe[] = ["1h", "4h", "1d"];
+/** Window event: the desk changed a call (from the alerts socket). */
+export const DESK_CHANGED = "ac:desk-changed";
+/** Stored id of the call a chart chip asked the Desk tab to open. */
+export const DESK_SELECT_KEY = "ac:desk-select";
+
+export type DeskTimeframe = "15m" | "30m" | "1h" | "4h" | "1d" | "1w";
+export const DESK_TIMEFRAMES: DeskTimeframe[] = ["15m", "30m", "1h", "4h", "1d", "1w"];
 export type DeskStatus = "waiting" | "expired" | "open" | "tp" | "invalidated" | "timed_out" | "cancelled";
 
 /** Mirrors DeskCall in backend/app/desk_calls.py. */
@@ -73,7 +78,12 @@ export interface DeskSettings {
   follow_watchlist: boolean;
   symbols: string[];
   min_confidence: number;
+  /** Calls must expect at least this much R after fees. */
+  min_expected_r?: number;
+  /** Calls running at once; watched zones are not limited. */
   max_active: number;
+  /** Each new call arms a lower-timeframe confirmation trigger in its zone, removed when the call ends. */
+  arm_triggers: boolean;
   notify_new: boolean;
   notify_fills: boolean;
   notify_results: boolean;
@@ -208,16 +218,17 @@ export const STATUS_LABEL: Record<DeskStatus, string> = {
 /** A call on the chart: its buy zone, take-profit and invalidation. */
 export function deskOverlays(c: DeskCall): Overlay[] {
   const tf = c.interval.toUpperCase();
+  const demo = c.data_source === "synthetic" ? " (demo)" : "";
   const from = c.created_at - (c.created_at % 60);
   const zone: BoxOverlay = {
     type: "box",
     id: `desk-zone-${c.id}`,
     kind: "desk_zone",
-    label: `Desk ${tf} buy zone (${Math.round(c.confidence * 100)}%)`,
+    label: `Desk ${tf} buy zone (${Math.round(c.confidence * 100)}% if filled)${demo}`,
     price_low: c.zone_low,
     price_high: c.zone_high,
-    color: "rgba(167, 139, 250, 0.16)",
-    border_color: "rgba(167, 139, 250, 0.8)",
+    color: demo ? "rgba(250, 204, 21, 0.12)" : "rgba(167, 139, 250, 0.16)",
+    border_color: demo ? "rgba(250, 204, 21, 0.8)" : "rgba(167, 139, 250, 0.8)",
     time_start: from,
   };
   const line = (id: string, label: string, price: number, color: string, style: "solid" | "dashed"): HorizontalLineOverlay => ({
@@ -233,8 +244,22 @@ export function deskOverlays(c: DeskCall): Overlay[] {
   });
   return [
     zone,
-    line("tp", `Desk take-profit (${c.rr}R)`, c.tp, "#22c55e", "dashed"),
-    line("stop", "Desk invalidation", c.stop, "#ef4444", "dashed"),
-    ...(c.fill_price ? [line("fill", "Desk bought", c.fill_price, "#a78bfa", "solid")] : []),
+    line("tp", `Desk ${tf} take-profit (${c.rr}R)`, c.tp, "#22c55e", "dashed"),
+    line("stop", `Desk ${tf} invalidation`, c.stop, "#ef4444", "dashed"),
+    ...(c.fill_price ? [line("fill", `Desk ${tf} bought`, c.fill_price, "#a78bfa", "solid")] : []),
   ];
+}
+
+/** The chip a running call puts on its coin's chart. Confidence is the chance of the take-profit once bought, so it
+ *  says "if filled" and next to it the odds a random walk would give; "uncalibrated" until the desk has enough
+ *  finished zones to check its numbers. */
+export function deskChip(c: DeskCall, calibrated: boolean): { text: string; tone: "demo" | "up" | "mute"; title: string } {
+  const tf = c.interval.toUpperCase();
+  const random = Math.round(100 / (1 + Math.max(c.rr, 0.01)));
+  const state = c.status === "open" ? "holding" : "waiting to buy";
+  return {
+    text: `Desk ${tf} · ${state} · ${Math.round(c.confidence * 100)}% if filled (random ${random}%)${calibrated ? "" : " · uncalibrated"}`,
+    tone: c.data_source === "synthetic" ? "demo" : c.status === "open" ? "up" : "mute",
+    title: `${c.setup}\nBuy ${c.zone_low}–${c.zone_high}, take-profit ${c.tp}, wrong below ${c.stop}. Click to open it in the Desk tab.`,
+  };
 }

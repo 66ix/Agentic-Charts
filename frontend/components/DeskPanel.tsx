@@ -6,6 +6,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 
 import { usePersistentState } from "@/hooks/usePersistentState";
 import {
+  DESK_CHANGED,
+  DESK_SELECT_KEY,
   DESK_TIMEFRAMES,
   STATUS_LABEL,
   deskOverlays,
@@ -124,7 +126,10 @@ function CallRow({ c, selected, onSelect }: { c: DeskCall; selected: boolean; on
           </span>
           {c.data_source === "synthetic" && <span className="text-[10px] text-yellow-300">demo</span>}
           <span className="flex-1" />
-          <span className={clsx("font-mono text-[11px]", tone(r))}>{c.status === "waiting" || c.status === "expired" ? `${Math.round(c.confidence * 100)}%` : rText(r)}</span>
+          <span className={clsx("font-mono text-[11px]", tone(r))} title={c.status === "waiting" ? `Expected ${rText(c.expected_r)} after fees` : undefined}>
+            {c.status === "waiting" || c.status === "expired" ? `${Math.round(c.confidence * 100)}%` : rText(r)}
+            {c.shadow && c.status === "waiting" && <span className={clsx("ml-1", tone(c.expected_r))}>{rText(c.expected_r)}</span>}
+          </span>
         </div>
         <div className="mt-0.5 flex flex-wrap gap-x-2 font-mono text-[11px] text-mute">
           <span>
@@ -206,7 +211,8 @@ function Record({ d, wallet }: { d: DeskState; wallet: PaperWallet | null }) {
     <div className="space-y-4 px-3 py-2">
       <Section title="What it learns from">
         <p className="text-[12px] leading-snug text-ink">
-          {s.tracked} buy zone{s.tracked === 1 ? "" : "s"} tracked ({s.calls} called, {s.tracked - s.calls} watched); {s.learned_from} finished, {s.level_hits} reached their level.
+          {s.tracked} buy zone{s.tracked === 1 ? "" : "s"} tracked ({s.calls} called, {s.tracked - s.calls} watched); {s.level_hits} of the {s.learned_from} whose level was decided reached it.
+          {s.calls === 0 && " The record below is from watched zones: none was traded."}
         </p>
         <p className="text-[10px] leading-snug text-mute">
           Each setup&apos;s edge is its hits against what random odds would give (1.0x = none), starting from the coin&apos;s backtest and moving with every finished zone. Older results count less.
@@ -225,12 +231,12 @@ function Record({ d, wallet }: { d: DeskState; wallet: PaperWallet | null }) {
                   <div className="absolute inset-y-0 left-0 rounded bg-accent/40" style={{ width: `${b.actual * 100}%` }} />
                   <div className="absolute inset-y-0 w-0.5 bg-ink" style={{ left: `${b.predicted * 100}%` }} title={`Said ${Math.round(b.predicted * 100)}%`} />
                 </div>
-                <span className="text-right text-ink" title={`${b.calls} calls`}>
+                <span className="text-right text-ink" title={`${b.calls} zones`}>
                   {Math.round(b.actual * 100)}%
                 </span>
               </div>
             ))}
-            <p className="text-[10px] text-mute">Bar: how often calls in each range reached the take-profit. Line: what they said.</p>
+            <p className="text-[10px] text-mute">Bar: how often zones (called and watched) in each range reached the take-profit. Line: what they said.</p>
           </div>
         )}
       </Section>
@@ -249,7 +255,7 @@ function Record({ d, wallet }: { d: DeskState; wallet: PaperWallet | null }) {
         ))}
       </Section>
       <Section title="By setup">
-        {s.setups.length === 0 && <p className="text-[11px] text-mute">No closed calls yet. Results appear here as calls finish.</p>}
+        {s.setups.length === 0 && <p className="text-[11px] text-mute">No finished zones yet. Results appear here as zones finish.</p>}
         {s.setups.length > 0 && (
           <table className="w-full text-[11px]">
             <thead>
@@ -324,12 +330,22 @@ function Settings({ d, onSaved }: { d: DeskState; onSaved(d: DeskState): void })
   const [msg, setMsg] = useState<string | null>(null);
   const [cash, setCash] = useState("1000");
   const [confirmReset, setConfirmReset] = useState(false);
-  const s = d.settings;
+  // Sliders show their value while dragged and save once on release.
+  const [draft, setDraft] = useState<Partial<DeskSettings>>({});
+  const s = { ...d.settings, ...draft };
+  // Patches merge onto the latest settings, so two quick clicks don't lose the first.
+  const latest = useRef(d.settings);
+  useEffect(() => {
+    latest.current = d.settings;
+  }, [d.settings]);
 
   const save = async (patch: Partial<DeskSettings>) => {
     setBusy("save");
+    const next = { ...latest.current, ...patch };
+    latest.current = next;
     try {
-      onSaved(await saveDeskSettings({ ...s, ...patch }));
+      onSaved(await saveDeskSettings(next));
+      setDraft((x) => Object.fromEntries(Object.entries(x).filter(([k]) => !(k in patch))));
       setMsg(null);
     } catch (err) {
       setMsg((err as Error).message);
@@ -381,13 +397,32 @@ function Settings({ d, onSaved }: { d: DeskState; onSaved(d: DeskState): void })
               max={80}
               step={5}
               value={Math.round(s.min_confidence * 100)}
-              onChange={(e) => void save({ min_confidence: Number(e.target.value) / 100 })}
+              onChange={(e) => setDraft((x) => ({ ...x, min_confidence: Number(e.target.value) / 100 }))}
+              onPointerUp={() => draft.min_confidence != null && void save({ min_confidence: draft.min_confidence })}
+              onKeyUp={() => draft.min_confidence != null && void save({ min_confidence: draft.min_confidence })}
               className="w-28 accent-blue-500"
             />
             {Math.round(s.min_confidence * 100)}%
           </span>
         </label>
-        <label className="flex items-center justify-between gap-2 py-1 text-[12px]">
+        <label className="flex items-center justify-between gap-2 py-1 text-[12px]" title="Expected R after fees: confidence × reward − (1 − confidence) − fees. Lower it to let the desk call more.">
+          <span>Least expected gain</span>
+          <span className="flex items-center gap-1 font-mono">
+            <input
+              type="range"
+              min={0}
+              max={50}
+              step={5}
+              value={Math.round((s.min_expected_r ?? 0.1) * 100)}
+              onChange={(e) => setDraft((x) => ({ ...x, min_expected_r: Number(e.target.value) / 100 }))}
+              onPointerUp={() => draft.min_expected_r != null && void save({ min_expected_r: draft.min_expected_r })}
+              onKeyUp={() => draft.min_expected_r != null && void save({ min_expected_r: draft.min_expected_r })}
+              className="w-28 accent-blue-500"
+            />
+            {(s.min_expected_r ?? 0.1).toFixed(2)}R
+          </span>
+        </label>
+        <label className="flex items-center justify-between gap-2 py-1 text-[12px]" title="Calls only: the desk watches any number of zones">
           <span>Calls running at most</span>
           <input
             type="number"
@@ -408,6 +443,11 @@ function Settings({ d, onSaved }: { d: DeskState; onSaved(d: DeskState): void })
         <Check checked={s.notify_fills} onChange={(v) => void save({ notify_fills: v })} label="When a buy fills" />
         <Check checked={s.notify_results} onChange={(v) => void save({ notify_results: v })} label="Results (take-profit, invalidated, timed out)" />
         <Check checked={s.notify_expired} onChange={(v) => void save({ notify_expired: v })} label="Calls that expire unfilled" />
+        <Check
+          checked={s.arm_triggers}
+          onChange={(v) => void save({ arm_triggers: v })}
+          label="Ping again when a 5m/15m candle confirms inside a call's zone (listed under Alerts → Triggers)"
+        />
       </Section>
       <Section title="Run now">
         <p className="text-[11px] text-mute">Look at the latest closed candle now instead of waiting for the next close.</p>
@@ -501,7 +541,14 @@ export default function DeskPanel(props: DockPanelProps) {
     };
   }, [load]);
 
-  // The selected call on its coin's charts; cleared when another is picked or the panel closes.
+  // The desk changed a call (alerts socket): refresh now rather than on the next poll.
+  useEffect(() => {
+    const now = () => void load();
+    window.addEventListener(DESK_CHANGED, now);
+    return () => window.removeEventListener(DESK_CHANGED, now);
+  }, [load]);
+
+    // The selected call on its coin's charts; cleared when another is picked or the panel closes.
   const drawn = useRef<string | null>(null);
   const draw = useRef(onChartOverlays);
   useEffect(() => {
@@ -510,6 +557,19 @@ export default function DeskPanel(props: DockPanelProps) {
   useEffect(() => () => {
     if (drawn.current) draw.current("desk:selected", drawn.current, []);
   }, []);
+
+  // A chart chip asked for this call: open the list with it selected (works on first mount too).
+  const [asked, setAsked] = usePersistentState<string>(DESK_SELECT_KEY, "");
+  useEffect(() => {
+    if (!asked) return;
+    const c = [...calls, ...watched].find((x) => x.id === asked);
+    if (!c) return;
+    setAsked("");
+    setTab("calls");
+    setFilter(c.status === "waiting" || c.status === "open" ? "active" : "closed");
+    if (selected !== c.id) select(c);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [asked, calls, watched]);
 
   const select = (c: DeskCall) => {
     if (selected === c.id) {
@@ -529,7 +589,9 @@ export default function DeskPanel(props: DockPanelProps) {
     () =>
       filter === "watched"
         ? watched
-        : calls.filter((c) => (filter === "all" ? true : filter === "active" ? c.status === "waiting" || c.status === "open" : c.status !== "waiting" && c.status !== "open")),
+        : filter === "all"
+          ? [...calls, ...watched].sort((a, b) => b.created_at - a.created_at)
+          : calls.filter((c) => (filter === "active" ? c.status === "waiting" || c.status === "open" : c.status !== "waiting" && c.status !== "open")),
     [calls, watched, filter],
   );
   const s = d?.summary;
@@ -593,7 +655,9 @@ export default function DeskPanel(props: DockPanelProps) {
                     ? `No calls running. The desk looks at ${d.symbols.length} coins on ${d.settings.timeframes.map((t) => t.toUpperCase()).join(", ") || "no timeframes"} at every candle close and calls a buy zone only when its edge, after fees, is worth it.`
                     : filter === "watched"
                       ? "No zones being watched right now."
-                      : "No finished calls yet."}
+                      : filter === "all"
+                        ? "No calls or watched zones yet."
+                        : "No finished calls yet."}
                 </p>
                 {filter === "active" && <LastRuns runs={d.last_run} />}
               </div>

@@ -156,24 +156,50 @@ class WatchlistCache:
         return ordered
 
 
+TICKER_FRESH = 3.0       # seconds a ticker answer is reused (several panels ask at once)
+TICKER_KEEP = 15 * 60.0  # how long the last real price stands in for Binance when a refresh fails
+_last_tickers: dict[str, tuple[float, dict]] = {}
+
+
 async def tickers(market: MarketData, symbols: list[str]) -> list[dict]:
-    """Last price and 24h change per symbol: one Binance call, or synthetic data as a fallback."""
+    """Last price and 24h change per symbol: one Binance call, or synthetic data as a fallback.
+
+    Pairs Binance doesn't list (from its pair list, or rejected before) are left out of the call, since one unknown
+    symbol makes Binance refuse the whole batch. Answers are reused for TICKER_FRESH seconds, and when a refresh
+    fails the last real price (up to TICKER_KEEP old, marked stale) is served before any demo candles."""
     symbols = symbols[:40]
-    if market.binance_usable():
+    now = time.monotonic()
+    listed = getattr(market, "usd_pairs", frozenset())
+    rejected = getattr(market, "_rejected", {})
+    unknown = {s for s in symbols if (listed and s not in listed) or rejected.get(s, 0) > now}
+    ask = [s for s in symbols if s not in unknown]
+    order = {s: i for i, s in enumerate(symbols)}
+    fresh = {s: row for s in ask if (hit := _last_tickers.get(s)) and now - hit[0] < TICKER_FRESH
+             for row in [hit[1]]}
+    out: list[dict] = list(fresh.values())
+    todo = [s for s in ask if s not in fresh]
+    if todo and market.binance_usable():
         try:
             resp = await market.client.get(f"{market.rest_url}/api/v3/ticker/24hr",
-                                           params={"symbols": json.dumps(symbols, separators=(",", ":")),
+                                           params={"symbols": json.dumps(todo, separators=(",", ":")),
                                                    "type": "MINI"})
             if resp.status_code == 200:
-                out = []
                 for t in resp.json():
                     last, open_ = float(t["lastPrice"]), float(t["openPrice"])
-                    out.append({"symbol": t["symbol"], "price": last, "source": "binance",
-                                "change_pct": round((last / open_ - 1) * 100, 2) if open_ else None})
-                order = {s: i for i, s in enumerate(symbols)}
-                return sorted(out, key=lambda t: order.get(t["symbol"], 99))
+                    row = {"symbol": t["symbol"], "price": last, "source": "binance",
+                           "change_pct": round((last / open_ - 1) * 100, 2) if open_ else None}
+                    _last_tickers[t["symbol"]] = (now, row)
+                    out.append(row)
+                todo = []
+            else:
+                log.warning("Tickers answered %s; using the last prices or candles", resp.status_code)
         except Exception as exc:
-            log.warning("Tickers failed (%s); using candles", exc)
+            log.warning("Tickers failed (%s); using the last prices or candles", exc)
+    stale = [s for s in todo if (hit := _last_tickers.get(s)) and now - hit[0] < TICKER_KEEP]
+    out += [{**_last_tickers[s][1], "stale": True} for s in stale]
+    todo = [s for s in todo if s not in stale]
+    if len(_last_tickers) > 2000:
+        _last_tickers.clear()
 
     async def from_candles(sym: str) -> dict | None:
         try:
@@ -183,4 +209,5 @@ async def tickers(market: MarketData, symbols: list[str]) -> list[dict]:
         df = candles_to_df(candles)
         return {"symbol": sym, "price": float(df["close"].iloc[-1]), "change_pct": change_24h(df), "source": source}
 
-    return [t for t in await asyncio.gather(*(from_candles(s) for s in symbols)) if t]
+    out += [t for t in await asyncio.gather(*(from_candles(s) for s in todo)) if t]
+    return sorted(out, key=lambda t: order.get(t["symbol"], 99))

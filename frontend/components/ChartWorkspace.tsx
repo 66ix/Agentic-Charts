@@ -10,7 +10,9 @@ import { useHigherTfOverlays } from "@/hooks/useHigherTfOverlays";
 import { useIsMobile } from "@/hooks/useMediaQuery";
 import { pruneStorage, readStored, STORAGE_FULL_EVENT, usePersistentState, writeStored } from "@/hooks/usePersistentState";
 import { useUndo } from "@/hooks/useUndo";
-import { alertFromDrawing, alertOverlays, chartZones, saveBriefNotes, SELL_SIGNALS } from "@/lib/alerts";
+import { alertFromDrawing, alertOverlays, chartZones, saveBriefNotes, SELL_SIGNALS, type AlertHistoryItem } from "@/lib/alerts";
+import { setFaviconDot } from "@/lib/favicon";
+import { tabTitle, toastFromHistory } from "@/lib/notifyClient";
 import { fetchAccountPositions, fetchBinanceKey, positionOverlays } from "@/lib/binance";
 import { analyzeStream } from "@/lib/api";
 import { imageToDataUrl, readScreenshot } from "@/lib/screenshot";
@@ -21,6 +23,9 @@ import { DEFAULT_INTERVAL, DEFAULT_SYMBOL } from "@/lib/config";
 import { isCustom } from "@/lib/customSymbols";
 import { fetchLiquidationLevels, liquidationOverlays } from "@/lib/marketdata";
 import { focusFrom } from "@/lib/focus";
+import { parseDeepLink } from "@/lib/deepLink";
+import { DESK_SELECT_KEY, deskChip, deskOverlays } from "@/lib/desk";
+import { useDeskCalls } from "@/hooks/useDeskCalls";
 import { CHAT_ID_KEY, CHATS_KEY, lastAnswerOn, toSession, upsertSession, worthKeeping, type ChatSession } from "@/lib/chatHistory";
 import { createJournalEntry, planToJournalEntry } from "@/lib/journal";
 import { DEFAULT_SIZING, sizePlan, type SizingSettings } from "@/lib/sizing";
@@ -63,9 +68,9 @@ import type {
 import { CURRENT_WORKSPACE_KEY, saveWorkspace, WORKSPACES_KEY, type SavedWorkspace } from "@/lib/workspaces";
 
 import AgentPanel, { placeholderFor, type AgentMessage, type AgentPanelHandle } from "./AgentPanel";
-import { type AgenticChartHandle, type CompareLine, type FeedInfo, type KimiVisibility } from "./AgenticChart";
+import { type AgenticChartHandle, type ChartChip, type CompareLine, type FeedInfo, type KimiVisibility } from "./AgenticChart";
 import AlertsPanel from "./AlertsPanel";
-import AlertToasts, { signalToast, type Toast } from "./AlertToasts";
+import AlertToasts, { signalToast, type Toast, type ToastTarget } from "./AlertToasts";
 import ChartCell from "./ChartCell";
 import ChartHeader, { COMPARE_COLORS } from "./ChartHeader";
 import Dock, { type DockTab } from "./Dock";
@@ -372,6 +377,32 @@ export default function ChartWorkspace() {
   );
   const pinnedSet = useMemo(() => new Set(pinIndex), [pinIndex]);
 
+  // The desk's running calls on every chart showing their coin, live (refetched, so not kept in the saved panels).
+  const desk = useDeskCalls();
+  const livePanels = useMemo<PanelOverlays>(() => {
+    if (!desk.calls.length) return panels;
+    const out: PanelOverlays = { ...panels };
+    for (const c of desk.calls) {
+      const key = `desk:active:${c.symbol}`;
+      out[key] = { symbol: c.symbol, overlays: [...(out[key]?.overlays ?? []), ...deskOverlays(c)] };
+    }
+    return out;
+  }, [panels, desk.calls]);
+  const deskChipsFor = useCallback(
+    (sym: string): ChartChip[] =>
+      desk.calls
+        .filter((c) => c.symbol === sym)
+        .map((c) => ({
+          key: c.id,
+          ...deskChip(c, desk.calibrated),
+          onClick: () => {
+            writeStored(DESK_SELECT_KEY, c.id);
+            openTabRef.current("desk");
+          },
+        })),
+    [desk.calls, desk.calibrated],
+  );
+
   const onChartOverlays = useCallback(
     (key: string, sym: string, ovs: Overlay[]) =>
       setPanels((prev) => {
@@ -428,11 +459,35 @@ export default function ChartWorkspace() {
 
   // ------------------------------------------------------------------ alerts
   const [toasts, setToasts] = useState<Toast[]>([]);
-  const onAlertsFired = useCallback((fired: FiredAlert[]) => {
-    setToasts((t) => [...t, ...fired.map((f) => ({ id: uid(), alert: f.alert, price: f.price }))].slice(-4));
+  const shownOrder = useRef<string[]>([]);
+  const setShownOrder = useCallback((symbols: string[]) => {
+    shownOrder.current = symbols;
   }, []);
-  const onSignalFired = useCallback((f: SignalFired) => setToasts((t) => [...t, signalToast(uid(), f)].slice(-4)), []);
-  const alertsApi = useAlerts(onAlertsFired, onSignalFired);
+  // Events that arrive while the browser tab is hidden, counted in its title until you come back.
+  const [unread, setUnread] = useState(0);
+  const pushToasts = useCallback((add: Toast[]) => {
+    if (!add.length) return;
+    setToasts((t) => [...t.filter((x) => !add.some((a) => a.id === x.id)), ...add].slice(-4));
+    if (document.hidden) setUnread((n) => n + add.length);
+  }, []);
+  const onAlertsFired = useCallback(
+    (fired: FiredAlert[]) => pushToasts(fired.map((f) => ({ id: uid(), alert: f.alert, price: f.price }))),
+    [pushToasts],
+  );
+  const onSignalFired = useCallback((f: SignalFired) => pushToasts([signalToast(uid(), f)]), [pushToasts]);
+  const onAlertEvent = useCallback(
+    (item: AlertHistoryItem) => {
+      const t = toastFromHistory(item);
+      if (t) pushToasts([t]);
+    },
+    [pushToasts],
+  );
+  useEffect(() => {
+    const onVisible = () => !document.hidden && setUnread(0);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, []);
+  const alertsApi = useAlerts(onAlertsFired, onSignalFired, onAlertEvent);
   const { alerts, add: addAlerts, update: updateAlert, addTrigger, addSignal } = alertsApi;
   const armedAlerts = alerts.filter((a) => a.armed).length;
   // Problems worth a badge on the Status tab: the AI model not answering, Binance down, failing or stalled jobs.
@@ -441,8 +496,8 @@ export default function ChartWorkspace() {
 
   const htf = useHigherTfOverlays(symbol, interval);
   const composed = useMemo(
-    () => composeOverlays({ symbol, overlays, pins, panels, alerts: alertOverlaysFor(symbol), visibility, htf }),
-    [symbol, overlays, pins, panels, alertOverlaysFor, visibility, htf],
+    () => composeOverlays({ symbol, overlays, pins, panels: livePanels, alerts: alertOverlaysFor(symbol), visibility, htf }),
+    [symbol, overlays, pins, livePanels, alertOverlaysFor, visibility, htf],
   );
   const layerCounts = useMemo(() => {
     const kimi = indicators.kimi && !isCustom(symbol) ? 1 : 0;
@@ -876,6 +931,18 @@ export default function ChartWorkspace() {
   }, [openTab]);
   const openTabRef = useRef(openTab);
   openTabRef.current = openTab;
+
+  // Opened from an alert card's link (/?symbol=INJUSDT&tf=4h&focus=desk:<id>): that chart, and the tab the alert
+  // belongs to with the item in view; then the query leaves the address bar.
+  useEffect(() => {
+    const link = parseDeepLink(window.location.search);
+    if (!link) return;
+    setCell({ symbol: link.symbol, interval: link.interval ?? interval });
+    if (link.tab === "desk" && link.id) writeStored(DESK_SELECT_KEY, link.id);
+    if (link.tab) openTabRef.current(link.tab);
+    window.history.replaceState(null, "", window.location.pathname);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const closeDock = useCallback(() => (mobile ? setMobileTab(null) : setDock((d) => ({ ...d, open: false }))), [mobile, setDock]);
   const focusAgent = useCallback(() => {
     openTab("agent");
@@ -905,9 +972,12 @@ export default function ChartWorkspace() {
 
   // ------------------------------------------------------------------ keyboard shortcuts
   const stepWatchlist = (dir: 1 | -1) => {
-    if (!watchlist.length) return;
-    const i = watchlist.indexOf(symbol);
-    setSymbol(watchlist[dir === 1 ? (i + 1) % watchlist.length : (i <= 0 ? watchlist.length : i) - 1]);
+    // The order the Watchlist tab shows (its sort), or the list's own order before that tab has been opened.
+    const shown = shownOrder.current;
+    const list = shown.length === watchlist.length && watchlist.every((s) => shown.includes(s)) ? shown : watchlist;
+    if (!list.length) return;
+    const i = list.indexOf(symbol);
+    setSymbol(list[dir === 1 ? (i + 1) % list.length : (i <= 0 ? list.length : i) - 1]);
   };
   const keyHandler = useRef<(e: KeyboardEvent) => void>(() => undefined);
   keyHandler.current = (e: KeyboardEvent) => {
@@ -1020,6 +1090,21 @@ export default function ChartWorkspace() {
 
   const change24 = feed.open24 && Number.isFinite(feed.price) ? ((feed.price - feed.open24) / feed.open24) * 100 : null;
   const price = Number.isFinite(feed.price) ? feed.price : null;
+  // The browser tab reads "(2) INJ 24.31 ▲1.2% · 4H"; its icon gets a dot while events wait unseen.
+  useEffect(() => {
+    document.title = tabTitle({ symbol, interval, price, change24, unread });
+  }, [symbol, interval, price, change24, unread]);
+  useEffect(() => setFaviconDot(unread > 0), [unread]);
+  const openToast = useCallback(
+    (to: ToastTarget) => {
+      if (to.symbol && to.symbol !== "MARKET") {
+        const tf = TIMEFRAMES.find((t) => t.value === to.interval)?.value;
+        pickSymbol(to.symbol, tf);
+      }
+      if (to.tab) openTabRef.current(to.tab);
+    },
+    [pickSymbol],
+  );
 
   // ------------------------------------------------------------------ side-panel tabs
   /** "Log trade" on a plan card: track it in the journal, sized with the user's position-sizing settings. */
@@ -1135,6 +1220,7 @@ export default function ChartWorkspace() {
       icon: List,
       render: () => (
         <Watchlist
+          onOrder={setShownOrder}
           lists={lists}
           activeList={currentList.id}
           onLists={setLists}
@@ -1283,7 +1369,8 @@ export default function ChartWorkspace() {
                   layout={layout}
                   visibility={visibility}
                   kimiParts={kimiParts}
-                  panels={panels}
+                  panels={livePanels}
+                  chipsFor={deskChipsFor}
                   alertOverlays={alertOverlaysFor}
                   compare={compareFor(c.symbol)}
                   onActivate={() => setActive(i)}
@@ -1443,7 +1530,7 @@ export default function ChartWorkspace() {
         onClose={() => setDialog(null)}
       />
       <ShortcutsDialog open={dialog === "shortcuts"} onClose={() => setDialog(null)} />
-      <AlertToasts toasts={toasts} onDismiss={(id) => setToasts((t) => t.filter((x) => x.id !== id))} />
+      <AlertToasts toasts={toasts} onDismiss={(id) => setToasts((t) => t.filter((x) => x.id !== id))} onOpen={openToast} />
     </div>
   );
 }

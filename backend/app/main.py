@@ -34,7 +34,7 @@ import httpx
 from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 
 from .agent import run_analysis
 from .agent_desk import AgentDesk, DeskSettings
@@ -65,6 +65,7 @@ from .jobs import jobs
 from .kimi_service import KimiService
 from .llm import LLMClient
 from .postmortem import PostMortemService, ReviewSettings
+from .exit_plan import ExitPlanService
 from .market_data import INTERVAL_SECONDS, MarketData, MarketDataError, candles_to_df
 from .market_index import MarketIndexService
 from .market_metrics import MarketMetricsService
@@ -85,7 +86,7 @@ from .schemas import (INTERVALS, AnalyzeRequest, AnalyzeResponse, CreateAlertsRe
                       ScanResult, ZoneTriggerSpec)
 from .level_review import LevelLog
 from .metric_alerts import CreateMetricAlertsRequest, MetricAlertService
-from .signal_alerts import SIGNALS, CreateSignalAlertsRequest, SignalAlertPatch, SignalAlertService
+from .signal_alerts import SIGNALS, CreateSignalAlertsRequest, LevelClose, SignalAlertPatch, SignalAlertService
 from .stream_hub import StreamHub
 from .trade_manager import NewManagedTrade, TradeManager, TradePatch, from_journal
 from .track_record import TrackRecordService
@@ -150,7 +151,10 @@ async def lifespan(app: FastAPI):
     app.state.market_scanner = MarketScanner(market, TrackRecordService(market), app.state.alerts)
     app.state.market_scanner.start()
     # The agent desk (agent_desk.py): its own calls at 1h/4h/1d closes, scored, paper-traded and learned from.
+    app.state.exit_plans = ExitPlanService(market, app.state.db, app.state.alerts, app.state.binance,
+                                          app.state.signal_alerts)
     app.state.desk = AgentDesk(market, app.state.db, app.state.alerts, app.state.market_scanner.track)
+    app.state.desk.attach_signals(app.state.signal_alerts)
     app.state.desk.start()
     app.state.brief.desk_lines = app.state.desk.brief_lines
     # Coaching from your own imported trades (coach.py).
@@ -245,6 +249,8 @@ async def status(request: Request) -> dict:
                    "streams": st.hub.stats(), "liquidation_stream": st.derivatives.stream_connected},
         "binance_key": {k: key.get(k) for k in ("configured", "ok", "masked", "problems", "error", "checked_at")},
         "channels": st.alerts.channel_status,
+        # Per channel: last delivered, last failure, sent and failed in the last 24 h (notify.Outbox).
+        "delivery": st.alerts.delivery_stats(),
         "database": {"path": st.db.path, "memory": st.db.memory},
         "jobs": jobs.status(),
     }
@@ -406,6 +412,14 @@ async def alert_history(request: Request, limit: int = Query(100, ge=1, le=500))
     return {"items": request.app.state.alerts.history.list(limit)}
 
 
+@app.get("/api/alerts/history/{item_id}/image")
+async def alert_history_image(request: Request, item_id: str) -> Response:
+    png = request.app.state.alerts.history_image(item_id)
+    if png is None:
+        raise HTTPException(404, "No chart for that alert")
+    return Response(png, media_type="image/png", headers={"Cache-Control": "max-age=86400"})
+
+
 @app.delete("/api/alerts/history")
 async def clear_alert_history(request: Request) -> dict:
     return {"removed": request.app.state.alerts.history.clear()}
@@ -487,6 +501,26 @@ async def preview_zone_trigger(spec: ZoneTriggerSpec, request: Request,
         raise HTTPException(502, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+class LevelAlertRequest(LevelClose):
+    symbol: str
+    interval: str = "4h"
+    repeat: bool = False
+    note: str = ""
+
+
+@app.post("/api/level-alerts")
+async def create_level_alert(req: LevelAlertRequest, request: Request) -> dict:
+    """A close-confirmed level alert: fires when `closes` candles close above, below or inside the level."""
+    level = LevelClose(**req.model_dump(include=set(LevelClose.model_fields)))
+    try:
+        alert = await request.app.state.signal_alerts.add_level(_norm_symbol(req.symbol),
+                                                                _check_interval(req.interval), level,
+                                                                req.repeat, req.note)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"alert": alert.model_dump()}
 
 
 @app.patch("/api/signal-alerts/{alert_id}")
@@ -696,6 +730,43 @@ async def trades_delete(trade_id: str, request: Request) -> dict:
 
 
 # ------------------------------------------------------------------ AI model (Settings → AI model)
+
+
+@app.post("/api/exit-plan")
+async def exit_plan_build(request: Request, body: dict = Body(...)) -> dict:
+    """{symbol, profile?, qty?, avg_entry?} → the exit plan for a coin you hold (saved). qty / avg_entry work without a
+    Binance key."""
+    profile = body.get("profile") or "quarters"
+    if profile not in ("quarters", "thirds", "cost_out"):
+        raise HTTPException(422, "profile must be quarters, thirds or cost_out")
+    try:
+        plan = await request.app.state.exit_plans.build(_norm_symbol(str(body.get("symbol", ""))), profile,
+                                                        body.get("qty"), body.get("avg_entry"))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except MarketDataError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    return plan.model_dump()
+
+
+@app.get("/api/exit-plans")
+async def exit_plans_list(request: Request) -> dict:
+    return {"plans": [p.model_dump() for p in request.app.state.exit_plans.list()]}
+
+
+@app.delete("/api/exit-plans/{symbol}")
+async def exit_plan_delete(request: Request, symbol: str) -> dict:
+    if not await request.app.state.exit_plans.delete(_norm_symbol(symbol)):
+        raise HTTPException(404, "No exit plan for that coin")
+    return {"ok": True}
+
+
+@app.post("/api/exit-plans/{symbol}/arm")
+async def exit_plan_arm(request: Request, symbol: str) -> dict:
+    try:
+        return (await request.app.state.exit_plans.arm(_norm_symbol(symbol))).model_dump()
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @app.get("/api/llm/models")

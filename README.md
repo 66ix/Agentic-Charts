@@ -161,6 +161,15 @@ ANTHROPIC_API_KEY=sk-ant-...
 ANTHROPIC_MODEL=claude-sonnet-5-5
 ```
 
+**Cloud, Google AI Studio (Gemini)**, through Google's OpenAI-compatible endpoint (a key from
+[aistudio.google.com/apikey](https://aistudio.google.com/apikey)):
+
+```bash
+LLM_PROVIDER=google
+GOOGLE_API_KEY=AIza...
+GOOGLE_MODEL=gemini-2.5-flash
+```
+
 By default (`AGENT_MODE=tools`) the model gets up to `AGENT_MAX_STEPS` tool calls to look at other
 timeframes or coins, scan the watchlist or check funding and open interest before it decides what to
 draw; the agent panel lists those steps. Anthropic and OpenAI models force a tool call; Ollama models
@@ -202,7 +211,8 @@ scores are kept in `LLM_CHOICE_STORE` (default `.cache/llm_choice.json`). The sa
 | `KIMI_BARS` | `5000` | Closed candles Kimi Cooked runs on (300–5000; `3h` is capped at about 1,600) |
 | `ALERTS_STORE` | `backend/.cache/alerts.json` | Where price alerts are saved; `memory` = not saved |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | empty | Send fired alerts to Telegram (see [Alerts](#alerts)) |
-| `DISCORD_WEBHOOK_URL` | empty | Send fired alerts to a Discord channel |
+| `DISCORD_WEBHOOK_URL` | empty | Send fired alerts to a Discord channel. Alerts go out as cards (Discord embeds, Telegram HTML) coloured by side, signal and desk cards with a chart snapshot; each channel has its own queue that waits out rate limits, and Alerts → Notify shows failures |
+| `PUBLIC_APP_URL` | empty | Where your phone reaches the app (LAN or Tailscale); alert cards then link to that chart and alert |
 | `ALERT_HISTORY_STORE` / `SIGNAL_ALERTS_STORE` / `BRIEF_STORE` | `backend/.cache/*.json` | Alert history, signal alerts and brief settings; `memory` = not saved |
 | `GRIDBOTS_STORE` | `backend/.cache/gridbots.json` | Saved grid bots; `memory` = not saved |
 | `JOURNAL_STORE` | `backend/.cache/journal.json` | Trade journal; `memory` = not saved |

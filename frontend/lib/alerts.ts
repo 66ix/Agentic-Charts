@@ -132,7 +132,8 @@ export type SignalId =
   | "rsi_oversold"
   | "lost_support"
   | "at_resistance"
-  | "zone_trigger";
+  | "zone_trigger"
+  | "level_close";
 
 /** Plain-English names, in the order the picker lists them. Mirrors SIGNALS in backend/app/signal_alerts.py. */
 export const SIGNAL_OPTIONS: { id: SignalId; name: string; hint: string }[] = [
@@ -166,7 +167,7 @@ export const SELL_SIGNALS: SignalId[] = ["lost_support", "at_resistance"];
 
 /** Which way a signal points, for drawing it; kimi_any takes each hit's own direction. Mirrors SHORT_SIGNALS in
  * backend/app/signal_alerts.py. */
-export const SIGNAL_SIDE: Record<Exclude<SignalId, "kimi_any" | "zone_trigger">, "long" | "short"> = {
+export const SIGNAL_SIDE: Record<Exclude<SignalId, "kimi_any" | "zone_trigger" | "level_close">, "long" | "short"> = {
   kimi_buy: "long",
   kimi_sell: "short",
   rsi_bull_div: "long",
@@ -185,6 +186,7 @@ export const SIGNAL_SIDE: Record<Exclude<SignalId, "kimi_any" | "zone_trigger">,
 
 export function signalName(id: string): string {
   if (id === "zone_trigger") return "Zone trigger";
+  if (id === "level_close") return "Close beyond a level";
   return SIGNAL_OPTIONS.find((s) => s.id === id)?.name ?? id;
 }
 
@@ -207,6 +209,8 @@ export interface SignalAlert {
   last_price: number | null;
   /** Signal "zone_trigger" only: the zone and the confirmation. */
   trigger?: ZoneTrigger | null;
+  /** Signal "level_close" only: the level and how many closes beyond it. */
+  level?: LevelClose | null;
   /** Zone triggers: the suggested stop of the last fire. */
   last_stop?: number | null;
   /** "holdings": added and removed by the holdings watch as coins are bought and sold. */
@@ -309,6 +313,29 @@ export interface TriggerPreview {
   note?: string;
 }
 
+/** A close-confirmed level: fires when `closes` candles in a row close on `side` of it (a wick doesn't count).
+ * Mirrors LevelClose in backend/app/signal_alerts.py. */
+export interface LevelClose {
+  price_low: number;
+  price_high: number;
+  side: "above" | "below" | "inside";
+  closes: number;
+  label: string;
+}
+
+/** Creates (or re-arms the same) close-confirmed level alert. */
+export function createLevelAlert(req: LevelClose & { symbol: string; interval: Interval; repeat: boolean; note: string }) {
+  return apiRequest<{ alert: SignalAlert }>("/api/level-alerts", { method: "POST", body: JSON.stringify(req) });
+}
+
+/** "4H close below 7.95 (2 closes)" for an alert row. */
+export function describeLevel(a: SignalAlert, tf: string): string {
+  const l = a.level;
+  if (!l) return signalName(a.signal);
+  const where = l.price_high > l.price_low ? `${formatPrice(l.price_low)}–${formatPrice(l.price_high)}` : formatPrice(l.price_low);
+  return `${tf} close ${l.side} ${where}${l.closes > 1 ? ` (${l.closes} closes)` : ""}`;
+}
+
 /** Creates (or re-arms the same) zone trigger alert. */
 export function createZoneTrigger(spec: ZoneTriggerSpec) {
   return apiRequest<{ alert: SignalAlert }>("/api/zone-triggers", { method: "POST", body: JSON.stringify(spec) });
@@ -390,6 +417,8 @@ export interface AlertHistoryItem {
   text: string;
   price?: number;
   alert_id?: string;
+  /** A chart snapshot was kept (GET /api/alerts/history/{id}/image). */
+  image?: boolean;
 }
 
 export function fetchAlertHistory(limit = 200, signal?: AbortSignal) {

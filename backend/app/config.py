@@ -65,6 +65,11 @@ class Settings:
     openai_api_key: str = field(default_factory=lambda: _env("OPENAI_API_KEY", ""))
     openai_base_url: str = field(default_factory=lambda: _env("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/"))
     openai_model: str = field(default_factory=lambda: _env("OPENAI_MODEL", "gpt-4o-mini"))
+    # Google AI Studio (Gemini), through its OpenAI-compatible endpoint: a key from aistudio.google.com.
+    google_api_key: str = field(default_factory=lambda: _env("GOOGLE_API_KEY", "") or _env("GEMINI_API_KEY", ""))
+    google_model: str = field(default_factory=lambda: _env("GOOGLE_MODEL", "gemini-2.5-flash"))
+    google_base_url: str = field(default_factory=lambda: _env(
+        "GOOGLE_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai").rstrip("/"))
     anthropic_api_key: str = field(default_factory=lambda: _env("ANTHROPIC_API_KEY", ""))
     anthropic_model: str = field(default_factory=lambda: _env("ANTHROPIC_MODEL", "claude-sonnet-5-5"))
     # General questions ("what did the FOMC decide?") may search the web where the provider offers it: Anthropic's
@@ -110,6 +115,8 @@ class Settings:
     # Alerts on the market header (metric_alerts.py). METRIC_ALERTS_STORE=memory keeps them in memory only.
     metric_alerts_store: str = field(default_factory=lambda: _env(
         "METRIC_ALERTS_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "metric_alerts.json")))
+    # Where the app is reachable from your phone (a LAN or Tailscale address): alert cards link back to the chart.
+    public_app_url: str = field(default_factory=lambda: _env("PUBLIC_APP_URL", "").rstrip("/"))
     telegram_bot_token: str = field(default_factory=lambda: _env("TELEGRAM_BOT_TOKEN", ""), repr=False)
     telegram_chat_id: str = field(default_factory=lambda: _env("TELEGRAM_CHAT_ID", ""))
     discord_webhook_url: str = field(default_factory=lambda: _env("DISCORD_WEBHOOK_URL", ""), repr=False)

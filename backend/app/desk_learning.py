@@ -251,18 +251,20 @@ def calibration(calls: list[DeskCall], demo_ok: bool = False) -> dict:
 
 
 def verdict(cal: dict) -> str:
-    """One line on whether the confidence numbers can be trusted yet."""
-    if not cal["calls"]:
-        return "No closed calls yet."
+    """One line on whether the confidence numbers can be trusted yet. They are judged on every finished zone, the
+    ones called and the ones only watched, so the wording says zones."""
+    n = cal["calls"]
+    if not n:
+        return "No finished zones yet."
     if not cal["enough"]:
-        return f"{cal['calls']} closed call{'s' if cal['calls'] != 1 else ''}: too few to judge the confidence yet."
+        return f"{n} finished zone{'s' if n != 1 else ''} (called or watched): too few to judge the confidence yet."
     gap = (cal["mean_confidence"] - cal["hit_rate"]) * 100
     skill = cal["brier_base"] - cal["brier"]
     side = ("about right" if abs(gap) < 5 else f"{abs(gap):.0f} points too {'high' if gap > 0 else 'low'}")
-    return (f"On {cal['calls']} closed calls the confidence averaged {cal['mean_confidence'] * 100:.0f}% and "
-            f"{cal['hit_rate'] * 100:.0f}% reached the take-profit: {side}. "
-            + ("It sorts good calls from bad better than a flat guess." if skill > 0.002 else
-               "It doesn't yet sort good calls from bad better than a flat guess."))
+    return (f"On {n} finished zones (called or watched) the confidence averaged {cal['mean_confidence'] * 100:.0f}% "
+            f"and {cal['hit_rate'] * 100:.0f}% reached the take-profit: {side}. "
+            + ("It sorts good zones from bad better than a flat guess." if skill > 0.002 else
+               "It doesn't yet sort good zones from bad better than a flat guess."))
 
 
 # ------------------------------------------------------------------------ summary --

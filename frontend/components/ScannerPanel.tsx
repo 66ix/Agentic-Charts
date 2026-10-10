@@ -92,7 +92,7 @@ function clock(ms: number): string {
 }
 
 /** Setups as two-line rows: coin, side, R:R, distance, agreement and track record; entry, stop and T1 below. */
-export function SetupList({ rows, selected, onPick }: { rows: MarketSetup[]; selected?: string | null; onPick(s: MarketSetup): void }) {
+export function SetupList({ rows, selected, onPick, spot }: { rows: MarketSetup[]; selected?: string | null; onPick(s: MarketSetup): void; spot?: boolean }) {
   return (
     <div className="overflow-hidden rounded border border-line">
       <div className="flex items-center gap-2 border-b border-line bg-panel2/60 px-2 py-0.5 text-[10px] uppercase tracking-wide text-mute">
@@ -118,7 +118,7 @@ export function SetupList({ rows, selected, onPick }: { rows: MarketSetup[]; sel
           >
             <div className="flex items-center gap-2">
               <span className="flex min-w-0 flex-1 items-center gap-1.5">
-                <span className={clsx("w-9 shrink-0 font-semibold", long ? "text-up" : "text-down")}>{long ? "Long" : "Short"}</span>
+                <span className={clsx("w-9 shrink-0 font-semibold", long ? "text-up" : "text-down")}>{long ? (spot ? "Buy" : "Long") : "Short"}</span>
                 <span className="truncate font-medium text-ink">{displaySymbol(s.symbol)}</span>
               </span>
               <span className="w-10 text-right font-mono text-ink">{s.rr.toFixed(1)}R</span>
@@ -325,7 +325,7 @@ export default function ScannerPanel(p: DockPanelProps) {
             {pr.side === "spot" ? "No longs at higher-timeframe demand right now." : "No setups with at least 1R to T1 right now."}
           </p>
         )}
-        {rows.length > 0 && <SetupList rows={rows} selected={selected} onPick={pick} />}
+        {rows.length > 0 && <SetupList rows={rows} selected={selected} onPick={pick} spot={spotOnly} />}
         {gridRows.length > 0 && <GridCoinList rows={gridRows} selected={selected} onPick={pickGrid} />}
         {pickedGrid && (
           <div className="rounded border border-line bg-base/60 p-2 text-[11px]">

@@ -228,8 +228,12 @@ def test_notifiers_send_expected_payloads():
     tg, dc = by_host["api.telegram.org"], by_host["discord.com"]
     text = "INJUSDT: price entered 24.10–24.60 (H4 Demand) at 24.32"
     assert tg.method == "POST" and str(tg.url) == f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    assert json.loads(tg.content) == {"chat_id": "42", "text": text, "disable_web_page_preview": True}
-    assert str(dc.url) == WEBHOOK and json.loads(dc.content) == {"content": text, "allowed_mentions": {"parse": []}}
+    body = json.loads(tg.content)  # a card: a bold title, the text, the price
+    assert body["chat_id"] == "42" and body["parse_mode"] == "HTML"
+    assert body["text"].startswith("<b>INJUSDT price alert: H4 Demand</b>") and text in body["text"]
+    card = json.loads(dc.content)
+    assert str(dc.url) == WEBHOOK and card["allowed_mentions"] == {"parse": []}
+    assert card["embeds"][0]["description"] == text and card["embeds"][0]["color"] == 0x64748B
 
 
 def test_notifier_failures_are_logged_without_secrets(caplog):
@@ -336,6 +340,16 @@ def test_repeat_stays_armed_with_a_cooldown():
     assert not fired and a.last_side == "above"
     a, fired = evaluate(a, 9.0, now_ms=1_700_000)  # cooldown over
     assert fired and a.armed and a.fire_count == 2 and a.last_side == "below"
+
+
+def test_repeat_cross_ignores_hovering_on_the_level():
+    a = _cross(last_side="below", repeat=True)  # level 10
+    a, fired = evaluate(a, 10.01, now_ms=1_000_000)
+    assert fired
+    a, fired = evaluate(a, 9.99, now_ms=2_000_000)  # past the cooldown but within 0.3% of the level
+    assert not fired and a.last_side == "above"
+    a, fired = evaluate(a, 9.9, now_ms=2_100_000)  # clearly below now
+    assert fired and a.fire_count == 2
 
 
 def test_expiry_disarms_without_firing():

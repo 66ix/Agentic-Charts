@@ -25,7 +25,7 @@ from .llm import LLMClient
 
 log = logging.getLogger(__name__)
 
-Provider = Literal["ollama", "openai", "anthropic"]
+Provider = Literal["ollama", "openai", "anthropic", "google"]
 MAX_HISTORY = 50
 
 # Local models worth trying on an 8-12 GB GPU, with the tag to `ollama pull`. Sizes are the Q4 downloads.
@@ -95,10 +95,11 @@ class ModelChooser:
             "model": self.llm.model,
             "custom": self.llm.choice is not None,
             "default": {"provider": s.llm_provider, "model": {"ollama": s.ollama_model, "openai": s.openai_model,
+                                                             "google": s.google_model,
                                                              "anthropic": s.anthropic_model}.get(s.llm_provider, "")},
             # Which providers have what they need (a key, or a URL) to be picked.
             "providers": {"ollama": True, "openai": bool(s.openai_api_key) or "api.openai.com" not in s.openai_base_url,
-                          "anthropic": bool(s.anthropic_api_key)},
+                          "anthropic": bool(s.anthropic_api_key), "google": bool(s.google_api_key)},
             # Who plans requests: the rules when they are sure ("rules_first") or the model every time.
             "router": self.llm.router, "router_default": s.agent_router,
         }

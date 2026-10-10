@@ -38,14 +38,16 @@ from .schemas import AnalysisIntent, TradePlan
 from .ta_agent import TF_LABEL, analyze, atr, ema
 from .trade_plan import RESIST_KINDS, Level, build_plan
 
-DESK_TIMEFRAMES = ("1h", "4h", "1d")
-ENTRY_BARS = {"1h": 24, "4h": 18, "1d": 10}    # the limit buy waits this many candles
-HOLD_BARS = {"1h": 72, "4h": 60, "1d": 45}     # then the position has this many to reach a level
-SCORE_RES = {"1h": "5m", "4h": "15m", "1d": "1h"}
+DESK_TIMEFRAMES = ("15m", "30m", "1h", "4h", "1d", "1w")
+DEFAULT_TIMEFRAMES = ("1h", "4h", "1d")
+ENTRY_BARS = {"15m": 32, "30m": 24, "1h": 24, "4h": 18, "1d": 10, "1w": 6}   # the limit buy waits this many candles
+HOLD_BARS = {"15m": 96, "30m": 96, "1h": 72, "4h": 60, "1d": 45, "1w": 26}  # then the position has this many to reach a level
+SCORE_RES = {"15m": "1m", "30m": "1m", "1h": "5m", "4h": "15m", "1d": "1h", "1w": "4h"}
 FEE_PCT = 0.1           # per side, Binance spot without BNB
 MAX_DIST_ATR = 4.0      # buy zones further below price than this aren't called
 MIN_RR = 1.0            # take-profit at least 1R away
-MIN_EXPECTED_R = 0.1    # a call needs this much expected R after fees
+MIN_EXPECTED_R = 0.1    # a call needs this much expected R after fees (the desk's setting; this is its default)
+MAX_FEE_R = 0.25        # a stop so tight that both fees cost more than this much of the risk is widened
 SIZE_SCALE = 0.025      # paper risk = net Kelly x this, as a share of the wallet (a net Kelly of 0.4 risks 1%) ...
 MAX_RISK_PCT = 1.0      # ... at most this much of the wallet lost at the invalidation
 MAX_POSITION_PCT = 15.0  # and the position at most this share of the wallet
@@ -198,6 +200,8 @@ def candidates(symbol: str, interval: str, df: pd.DataFrame, frames: dict[str, p
             continue
         plan = build_plan("long", last, atr_v, res.stats.trend, [zone] + resist, res.swing_lows, res.swing_highs,
                           res.bias)
+        if plan is not None:
+            plan = widen_for_fees(plan)
         if plan is None or plan.zone_kind != zone.kind or not plan.targets or plan.targets[0].rr < MIN_RR:
             continue
         fresh = None if zone.tests is None else zone.tests == 0
@@ -215,6 +219,21 @@ def candidates(symbol: str, interval: str, df: pd.DataFrame, frames: dict[str, p
 
 
 # ---------------------------------------------------------------------- sizing --
+
+
+def widen_for_fees(plan: TradePlan) -> TradePlan:
+    """A stop so close to the entry that the fees eat the trade (0.25 ATR under a 1h zone on BTC is ~0.3%, and both
+    fees are 0.2%) is moved down until the fees cost at most MAX_FEE_R of the risk; the targets' R:R follow."""
+    min_risk_pct = 2 * FEE_PCT / MAX_FEE_R
+    if plan.risk_pct >= min_risk_pct or plan.entry <= 0:
+        return plan
+    stop = plan.entry * (1 - min_risk_pct / 100)
+    risk = plan.entry - stop
+    targets = [t.model_copy(update={"rr": round((t.price - plan.entry) / risk, 2)}) for t in plan.targets]
+    note = (f"Stop widened to {min_risk_pct:g}% below the entry: a tighter one loses more than "
+            f"{MAX_FEE_R:g}R to fees.")
+    return plan.model_copy(update={"stop": stop, "risk_pct": round(min_risk_pct, 3), "targets": targets,
+                                   "notes": [*plan.notes, note]})
 
 
 def fee_r(risk_pct: float) -> float:

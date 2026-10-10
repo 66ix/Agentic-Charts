@@ -118,7 +118,7 @@ class HoldingsWatch:
             held = list(by.values())
         for r in held:
             value = r.get("value")
-            if r.get("qty", 0) <= 0 or (value is not None and value < min_value):
+            if r.get("qty", 0) <= 0 or (value is not None and value < min_value) or r.get("tradable") is False:
                 continue
             rows[r["symbol"]] = {"symbol": r["symbol"], "value": value, "source": "+".join(r.get("sources") or [])}
         if include_bots:

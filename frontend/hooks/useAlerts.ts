@@ -1,5 +1,6 @@
 "use client";
 
+import { DESK_CHANGED } from "@/lib/desk";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
@@ -148,7 +149,12 @@ interface WsMessage {
  * shows a desktop notification and calls `onFire` / `onSignal` for the toast, and each new history item. The
  * last snapshots are cached in localStorage for display while offline.
  */
-export function useAlerts(onFire: (fired: FiredAlert[]) => void, onSignal?: (fired: SignalFired) => void) {
+/** `onEvent` gets each history item as it happens (desk calls, trade advice, market alerts…), for toasts. */
+export function useAlerts(
+  onFire: (fired: FiredAlert[]) => void,
+  onSignal?: (fired: SignalFired) => void,
+  onEvent?: (item: AlertHistoryItem) => void,
+) {
   const [alerts, setAlerts] = usePersistentState<PriceAlert[]>(CACHE_KEY, []);
   const [signalAlerts, setSignalAlerts] = usePersistentState<SignalAlert[]>(SIGNAL_CACHE_KEY, []);
   const [history, setHistory] = useState<AlertHistoryItem[]>([]);
@@ -159,6 +165,8 @@ export function useAlerts(onFire: (fired: FiredAlert[]) => void, onSignal?: (fir
   onFireRef.current = onFire;
   const onSignalRef = useRef(onSignal);
   onSignalRef.current = onSignal;
+  const onEventRef = useRef(onEvent);
+  onEventRef.current = onEvent;
 
   const addHistory = useCallback((items: AlertHistoryItem[]) => {
     setHistory((h) => {
@@ -241,6 +249,10 @@ export function useAlerts(onFire: (fired: FiredAlert[]) => void, onSignal?: (fir
           notify("Live trade", String(msg.text), `trade-${msg.trade_id}`);
         } else if (msg.type === "history" && msg.item) {
           addHistory([msg.item]);
+          onEventRef.current?.(msg.item);
+        } else if (msg.type === "desk" || msg.type === "desk_scored") {
+          // The desk made, filled or closed a call: its tab and the charts refresh now, not on their next poll.
+          window.dispatchEvent(new CustomEvent(DESK_CHANGED));
         }
       };
       ws.onclose = () => {
