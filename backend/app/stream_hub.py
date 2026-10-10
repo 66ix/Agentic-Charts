@@ -4,7 +4,8 @@ One upstream Binance WebSocket per (symbol, interval) is shared by every browser
 connected to that stream; it opens with the first subscriber and closes with the
 last. Derived intervals (3h) subscribe to the base interval and aggregate.
 When Binance is unreachable and DATA_SOURCE allows it, the stream switches to a
-synthetic tick generator and tells clients via a `status` message.
+synthetic tick generator and tells clients via a `status` message, and goes back to
+Binance once it answers again.
 """
 
 from __future__ import annotations
@@ -25,6 +26,9 @@ from .schemas import Candle
 log = logging.getLogger(__name__)
 
 QUEUE_SIZE = 256
+SYNTHETIC_RECHECK = 30.0   # seconds between looks at whether Binance is back while streaming synthetic candles
+CONNECT_FAILS = 3          # failed connects in a row before a stream that never connected streams synthetic
+WS_DOWN_FOR = 60.0         # how long such a stream stays synthetic before trying Binance again
 
 
 @dataclass
@@ -34,6 +38,7 @@ class _Stream:
     subscribers: set[asyncio.Queue] = field(default_factory=set)
     task: asyncio.Task | None = None
     source: str = "connecting"
+    ws_retry_at: float = 0.0  # a stream whose WebSocket won't connect stays synthetic until then
 
 
 def parse_ws_kline(k: dict) -> tuple[Candle, bool]:
@@ -113,23 +118,31 @@ class StreamHub:
     async def _run(self, stream: _Stream) -> None:
         try:
             backoff = 1.0
+            fails = 0
             while True:
-                if not self.market.binance_usable():
+                if not self.market.binance_usable() or time.monotonic() < stream.ws_retry_at:
                     self._set_source(stream, "synthetic", "Binance unreachable; streaming synthetic data")
-                    await self._run_synthetic(stream)
-                    return
+                    await self._run_synthetic(stream)  # returns once Binance looks usable again
+                    continue
                 try:
                     await self._run_binance(stream)
-                    backoff = 1.0
+                    backoff, fails = 1.0, 0
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
                     log.warning("Binance stream %s %s failed: %s", stream.symbol, stream.interval, exc)
-                    if self.market.settings.data_source == "auto" and stream.source in ("connecting", "synthetic"):
-                        # Never connected: treat Binance as down and fail over immediately.
-                        self.market.mark_binance_down()
+                    if stream.source == "binance":
+                        fails = 0
+                    fails += 1
+                    # A WebSocket that won't connect says nothing about REST: never demote Binance for every caller
+                    # here. A stream that never connected streams synthetic for a while after a few tries.
+                    if (self.market.settings.data_source == "auto" and stream.source in ("connecting", "synthetic")
+                            and fails >= CONNECT_FAILS):
+                        stream.ws_retry_at = time.monotonic() + WS_DOWN_FOR
+                        fails = 0
                         continue
-                    self._set_source(stream, "reconnecting", str(exc)[:200])
+                    if stream.source == "binance":
+                        self._set_source(stream, "reconnecting", str(exc)[:200])
                     await asyncio.sleep(backoff)
                     backoff = min(backoff * 2, 30.0)
         except asyncio.CancelledError:
@@ -163,15 +176,24 @@ class StreamHub:
                     closed = closed and len(bars) == factor
                 self._publish(stream, self._kline_msg(stream, c, closed, "binance"))
 
+    def _binance_back(self, stream: _Stream) -> bool:
+        return self.market.binance_usable() and time.monotonic() >= stream.ws_retry_at
+
     async def _run_synthetic(self, stream: _Stream) -> None:
+        """Synthetic ticks every second until Binance looks usable again (checked every SYNTHETIC_RECHECK s)."""
         candles, _ = await self.market.get_klines(stream.symbol, stream.interval, 200)
         step = INTERVAL_SECONDS[stream.interval]
         last = candles[-1]
         rng = np.random.default_rng()
         # Per-tick volatility: a bar's typical range spread over ~60 one-second ticks.
         rel = np.median([(c.high - c.low) / c.close for c in candles[-50:]]) / 8 or 1e-4
+        checked = time.monotonic()
         while True:
             await asyncio.sleep(1.0)
+            if time.monotonic() - checked >= SYNTHETIC_RECHECK:
+                checked = time.monotonic()
+                if self._binance_back(stream):
+                    return
             now = int(time.time())
             bar_open = now - now % step
             price = last.close * float(np.exp(rng.normal(0, rel)))

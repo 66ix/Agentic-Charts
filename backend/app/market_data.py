@@ -14,6 +14,7 @@ import asyncio
 import hashlib
 import logging
 import math
+import random
 import time
 from dataclasses import dataclass
 
@@ -60,6 +61,11 @@ FALLBACK_SYMBOLS = [
     "NEARUSDT", "TIAUSDT", "SEIUSDT", "LTCUSDT",
 ]
 
+RETRY_JITTER = (0.2, 0.8)  # seconds before retrying a request that hit a network error or a 5xx
+DEMOTE_AFTER = 3           # failed requests in a row before Binance is treated as down (sooner if ping fails too)
+SYMBOLS_TTL = 3600.0
+SYMBOLS_RETRY = 60.0       # a failed symbol-list lookup is tried again this soon
+
 # Rough anchor prices so synthetic charts look plausible per symbol.
 _SYNTH_ANCHORS = {"BTC": 65000.0, "ETH": 3200.0, "SOL": 150.0, "BNB": 580.0, "XRP": 0.6, "INJ": 7.8, "DOGE": 0.15}
 
@@ -70,6 +76,10 @@ class MarketDataError(RuntimeError):
 
 class BinanceRejected(MarketDataError):
     """Binance answered 400 (e.g. an unknown or delisted symbol): Binance is up, only this request is bad."""
+
+
+class BinanceRateLimited(MarketDataError):
+    """Binance answered 429/418: it is up but wants us to wait. Not a reason to serve demo candles."""
 
 
 @dataclass
@@ -87,7 +97,10 @@ class MarketData:
         self._client: httpx.AsyncClient | None = None
         self._cache: dict[tuple[str, str, int], _Cached] = {}
         self._binance_down_until = 0.0
+        self._paused_until = 0.0  # Retry-After of the last 429/418
+        self._fails = 0           # failed Binance requests in a row
         self._symbols: tuple[float, list[str]] | None = None
+        self._good_symbols: list[str] | None = None
         # Switched to the fallback endpoints once the primary answers 451/403 (geo-block).
         self.rest_url = self.settings.binance_rest_url
         self.ws_url = self.settings.binance_ws_url
@@ -130,6 +143,25 @@ class MarketData:
     def mark_binance_down(self, seconds: float = 60.0) -> None:
         if self.settings.data_source == "auto":
             self._binance_down_until = time.monotonic() + seconds
+        self._fails = 0
+
+    async def _failed(self, exc: Exception) -> None:
+        """One Binance request failed. Rejections and rate limits say Binance is up; anything else demotes it
+        when /ping fails too, or after DEMOTE_AFTER failures in a row: one blip must not send every chart to demo
+        data for a minute."""
+        if isinstance(exc, (BinanceRejected, BinanceRateLimited)):
+            return
+        self._fails += 1
+        if self._fails >= DEMOTE_AFTER:
+            self.mark_binance_down()
+            return
+        try:
+            resp = await self.client.get(f"{self.rest_url}/api/v3/ping", timeout=3.0)
+            up = resp.status_code == 200
+        except Exception:
+            up = False
+        if not up:
+            self.mark_binance_down()
 
     async def get_klines(self, symbol: str, interval: str, limit: int = 500) -> tuple[list[Candle], str]:
         """Return (candles oldest→newest, source) where source is 'binance' or 'synthetic'."""
@@ -148,12 +180,14 @@ class MarketData:
             try:
                 candles = await self._binance_klines(symbol, interval, limit)
                 source = "binance"
+                self._fails = 0
+            except BinanceRateLimited:
+                raise
             except Exception as exc:  # network, HTTP 4xx/5xx, bad payload
                 if self.settings.data_source == "binance":
                     raise MarketDataError(f"Binance klines failed: {exc}") from exc
-                log.warning("Binance unavailable (%s); serving synthetic data", exc)
-                if not isinstance(exc, BinanceRejected):  # one bad symbol must not demote every chart
-                    self.mark_binance_down()
+                log.warning("Binance request failed (%s); serving synthetic data", exc)
+                await self._failed(exc)
         if candles is None:
             candles = synthetic_klines(symbol, interval, limit)
 
@@ -181,13 +215,16 @@ class MarketData:
             raise MarketDataError(f"Range too long: {bars:,} {interval} bars (at most {MAX_RANGE_BARS:,})")
         if self.binance_usable():
             try:
-                return _rows_df(await self._binance_range(symbol, interval, start, end)), "binance"
+                df = _rows_df(await self._binance_range(symbol, interval, start, end))
+                self._fails = 0
+                return df, "binance"
+            except BinanceRateLimited:
+                raise
             except Exception as exc:
                 if self.settings.data_source == "binance":
                     raise MarketDataError(f"Binance klines failed: {exc}") from exc
-                log.warning("Binance unavailable for a range (%s); serving synthetic data", exc)
-                if not isinstance(exc, BinanceRejected):  # one bad symbol must not demote every chart
-                    self.mark_binance_down()
+                log.warning("Binance request failed for a range (%s); serving synthetic data", exc)
+                await self._failed(exc)
         candles = synthetic_klines(symbol, interval, (now - start) // step + 1, end=now)
         df = candles_to_df(candles)
         return df[(df["time"] >= start) & (df["time"] <= end)].reset_index(drop=True), "synthetic"
@@ -239,9 +276,10 @@ class MarketData:
         return out
 
     async def list_symbols(self) -> list[str]:
+        """Every USDT spot pair trading on Binance, cached for an hour. When the lookup fails: the last good list
+        (or the built-in one), looked up again in a minute."""
         if self._symbols and self._symbols[0] > time.monotonic():
             return self._symbols[1]
-        symbols = FALLBACK_SYMBOLS
         if self.binance_usable():
             try:
                 resp = await self._binance_get("/api/v3/exchangeInfo", params={"permissions": "SPOT"})
@@ -250,15 +288,40 @@ class MarketData:
                     s["symbol"] for s in resp.json()["symbols"]
                     if s.get("status") == "TRADING" and s.get("quoteAsset") == "USDT"
                 )
+                self._good_symbols = symbols
+                self._symbols = (time.monotonic() + SYMBOLS_TTL, symbols)
+                return symbols
             except Exception as exc:
-                log.warning("exchangeInfo failed (%s); using fallback symbol list", exc)
-                self.mark_binance_down()
-        self._symbols = (time.monotonic() + 3600, symbols)
+                log.warning("exchangeInfo failed (%s); using the %s symbol list", exc,
+                            "last good" if self._good_symbols else "built-in")
+                await self._failed(exc)
+        symbols = self._good_symbols or FALLBACK_SYMBOLS
+        self._symbols = (time.monotonic() + SYMBOLS_RETRY, symbols)
         return symbols
 
     # ------------------------------------------------------------ binance
     async def _binance_get(self, path: str, params: dict | None = None) -> httpx.Response:
-        resp = await self.client.get(f"{self.rest_url}{path}", params=params)
+        """GET from Binance: one retry after a network error or a 5xx; a 429/418 pauses every request for its
+        Retry-After and raises BinanceRateLimited."""
+        wait = self._paused_until - time.monotonic()
+        if wait > 0:
+            raise BinanceRateLimited(f"Binance rate limit: paused for another {math.ceil(wait)}s")
+        try:
+            resp = await self.client.get(f"{self.rest_url}{path}", params=params)
+            retry = resp.status_code >= 500
+        except httpx.TransportError:
+            retry = True
+        if retry:
+            await asyncio.sleep(random.uniform(*RETRY_JITTER))
+            resp = await self.client.get(f"{self.rest_url}{path}", params=params)
+        if resp.status_code in (418, 429):
+            try:
+                pause = float(resp.headers.get("Retry-After", 60))
+            except ValueError:
+                pause = 60.0
+            self._paused_until = time.monotonic() + max(1.0, pause)
+            log.warning("Binance rate limit (%s); pausing requests for %.0fs", resp.status_code, pause)
+            raise BinanceRateLimited(f"Binance rate limit: paused for {pause:.0f}s")
         fallback = self.settings.binance_fallback_rest_url
         if resp.status_code in (403, 451) and fallback and self.rest_url != fallback:
             log.warning("Binance %s returned %s (region block); switching to %s", self.rest_url,

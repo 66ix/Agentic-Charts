@@ -1,8 +1,16 @@
 # Upgrade plan (fresh-eyes review, October 2026)
 
-Produced by eight parallel readers (agent brain, TA engine, learning, Kimi, market data, alerts and automation, portfolio, frontend UX), a synthesis pass and two adversarial critics (feasibility and duplication; trader value and correctness) that checked every item against the code. Nothing here is built yet. Each item carries the critics' verdicts; where a critic said *modify*, its change applies on top of the design. `upgrade-plan.json` has the same content plus every reader's raw findings.
+Produced by eight parallel readers (agent brain, TA engine, learning, Kimi, market data, alerts and automation, portfolio, frontend UX), a synthesis pass and two adversarial critics (feasibility and duplication; trader value and correctness) that checked every item against the code. Each item carries the critics' verdicts; where a critic said *modify*, its change applies on top of the design. `upgrade-plan.json` has the same content plus every reader's raw findings.
 
-## Vision
+## Progress
+
+Built in chunks on `claude/optimistic-ride-crkkd7`, each tested before it is pushed.
+
+| Chunk | Fixes | State |
+| --- | --- | --- |
+| Feeds | 1–3: a synthetic stream goes back to Binance; a failed stream connect no longer demotes REST; one failed request is retried, Binance is demoted only after 3 failures in a row (or a failed ping); a 429 pauses for its Retry-After instead of serving demo candles; the symbol list keeps its last good copy; a signal check that hits demo candles (or Kimi on demo data) is retried, reported on Status when it gives up, and re-queued on the next live tick; a watched stream off Binance for 5 min shows on Status | done |
+| Agent | 4, 5, 8, 9, 10: chat turns clipped to 2000 chars; question-only follow-ups keep the plan on screen; amounts like `500usdt` are not coins and unlisted pairs are skipped; the tool planner normalises symbols and catches tool errors; the narrator is told the coin and when the data is demo | done |
+
 
 Agentic Charts should work like one trader's desk, not 16 separate tabs. The local qwen agent should keep track of the conversation: "what invalidates this?" should be answered about the plan on screen and leave that plan drawn. It should never print a price the chart doesn't have, and easy requests should go through the rules so the drawings appear in about a second. Trick's holdings become central. Coins in Simple Earn stay watched, average entries are correct, one account total has a curve and allocation, and every coin held gets a scale-out exit ladder armed as alerts. The desk's learned odds and Kimi's factors and reach odds appear where buy decisions are made (the plan card, the chart, the crosshair). Discord pings become cards with a chart image, a link back into the app, and quiet hours. The chart gains a level card, editable anchors, a spot position tool, a command palette and a watchlist that knows what Trick holds.
 
