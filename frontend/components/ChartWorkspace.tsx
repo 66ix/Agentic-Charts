@@ -459,6 +459,10 @@ export default function ChartWorkspace() {
 
   // ------------------------------------------------------------------ alerts
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const shownOrder = useRef<string[]>([]);
+  const setShownOrder = useCallback((symbols: string[]) => {
+    shownOrder.current = symbols;
+  }, []);
   // Events that arrive while the browser tab is hidden, counted in its title until you come back.
   const [unread, setUnread] = useState(0);
   const pushToasts = useCallback((add: Toast[]) => {
@@ -968,9 +972,12 @@ export default function ChartWorkspace() {
 
   // ------------------------------------------------------------------ keyboard shortcuts
   const stepWatchlist = (dir: 1 | -1) => {
-    if (!watchlist.length) return;
-    const i = watchlist.indexOf(symbol);
-    setSymbol(watchlist[dir === 1 ? (i + 1) % watchlist.length : (i <= 0 ? watchlist.length : i) - 1]);
+    // The order the Watchlist tab shows (its sort), or the list's own order before that tab has been opened.
+    const shown = shownOrder.current;
+    const list = shown.length === watchlist.length && watchlist.every((s) => shown.includes(s)) ? shown : watchlist;
+    if (!list.length) return;
+    const i = list.indexOf(symbol);
+    setSymbol(list[dir === 1 ? (i + 1) % list.length : (i <= 0 ? list.length : i) - 1]);
   };
   const keyHandler = useRef<(e: KeyboardEvent) => void>(() => undefined);
   keyHandler.current = (e: KeyboardEvent) => {
@@ -1213,6 +1220,7 @@ export default function ChartWorkspace() {
       icon: List,
       render: () => (
         <Watchlist
+          onOrder={setShownOrder}
           lists={lists}
           activeList={currentList.id}
           onLists={setLists}

@@ -34,6 +34,8 @@ const SORTS: { v: WatchlistSort; label: string }[] = [
 ];
 
 interface Props {
+  /** The list in the order shown (after the sort), so [ and ] step through it as you see it. */
+  onOrder?(symbols: string[]): void;
   lists: WatchlistList[];
   activeList: string;
   onLists(next: WatchlistList[]): void;
@@ -175,6 +177,14 @@ export default function Watchlist(p: Props) {
   if (p.sort === "zone") ordered.sort((a, b) => Math.abs(scan[a]?.distance_pct ?? 1e9) - Math.abs(scan[b]?.distance_pct ?? 1e9));
   if (p.sort === "volume") ordered.sort((a, b) => (scan[b]?.volume_ratio ?? 0) - (scan[a]?.volume_ratio ?? 0));
   if (p.sort === "name") ordered.sort();
+  const orderKey = ordered.join(",");
+  const onOrder = useRef(p.onOrder);
+  useEffect(() => {
+    onOrder.current = p.onOrder;
+  });
+  useEffect(() => {
+    onOrder.current?.(orderKey ? orderKey.split(",") : []);
+  }, [orderKey]);
 
   return (
     <div className="flex h-full min-h-0 flex-col">
