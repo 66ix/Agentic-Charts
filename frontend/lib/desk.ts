@@ -5,8 +5,8 @@ import { apiRequest } from "./api";
 import type { PaperWallet } from "./paper";
 import type { BoxOverlay, HorizontalLineOverlay, Overlay } from "./types";
 
-export type DeskTimeframe = "1h" | "4h" | "1d";
-export const DESK_TIMEFRAMES: DeskTimeframe[] = ["1h", "4h", "1d"];
+export type DeskTimeframe = "15m" | "30m" | "1h" | "4h" | "1d" | "1w";
+export const DESK_TIMEFRAMES: DeskTimeframe[] = ["15m", "30m", "1h", "4h", "1d", "1w"];
 export type DeskStatus = "waiting" | "expired" | "open" | "tp" | "invalidated" | "timed_out" | "cancelled";
 
 /** Mirrors DeskCall in backend/app/desk_calls.py. */
@@ -73,6 +73,9 @@ export interface DeskSettings {
   follow_watchlist: boolean;
   symbols: string[];
   min_confidence: number;
+  /** Calls must expect at least this much R after fees. */
+  min_expected_r?: number;
+  /** Calls running at once; watched zones are not limited. */
   max_active: number;
   notify_new: boolean;
   notify_fills: boolean;

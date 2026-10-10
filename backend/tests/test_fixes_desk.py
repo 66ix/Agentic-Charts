@@ -66,3 +66,36 @@ def test_flat_forecasts_are_not_scored_for_direction():
     assert fix.kimi_called is not None and 0.4 < fix.kimi_called < 0.6
     # Kimi calls up on every non-flat forecast; real is up 2/3 of the time.
     assert fix.kimi_dir is not None and 0.55 < fix.kimi_dir < 0.8
+
+
+def test_a_stop_too_tight_for_the_fees_is_widened():
+    from app.desk_calls import MAX_FEE_R, fee_r, widen_for_fees
+    from app.schemas import PlanTarget, TradePlan
+
+    tight = TradePlan(direction="long", entry=2499.0, stop=2492.0, risk_pct=0.28,
+                      targets=[PlanTarget(price=2550.0, label="T1", rr=7.3)])
+    wide = widen_for_fees(tight)
+    assert fee_r(wide.risk_pct) <= MAX_FEE_R + 1e-9 and wide.stop < tight.stop
+    assert wide.targets[0].rr < tight.targets[0].rr and any("fees" in n for n in wide.notes)
+    roomy = tight.model_copy(update={"stop": 2400.0, "risk_pct": 3.96})
+    assert widen_for_fees(roomy) is roomy
+
+
+def test_weekly_candles_open_on_monday():
+    import datetime
+
+    from app.agent_desk import bar_open, due_bars
+
+    t = bar_open("1w", 1_760_100_000)
+    assert datetime.datetime.fromtimestamp(t, datetime.UTC).weekday() == 0
+    [(tf, closed)] = due_bars(["1w"], {}, 1_760_100_000)
+    assert tf == "1w" and closed == t - 7 * 86400
+
+
+def test_watched_zones_say_why_they_were_not_called():
+    end = T0 + 30
+    desk = _desk(FakeMarket(end))
+    desk.settings = desk.settings.model_copy(update={"min_confidence": 0.9})
+    asyncio.run(desk.run_interval("4h", now=end + 60, force=True))
+    watched = desk.calls(watched=True)
+    assert watched and all(w.skip_reason in ("confidence", "expected R", "reward:risk") for w in watched)

@@ -42,7 +42,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from .config import Settings, get_settings
 from .db import Database
-from .desk_calls import (ACTIVE, CLOSED, DESK_TIMEFRAMES, ENTRY_BARS, MIN_EXPECTED_R, SCORE_RES, Candidate, DeskCall,
+from .desk_calls import (ACTIVE, CLOSED, DEFAULT_TIMEFRAMES, DESK_TIMEFRAMES, ENTRY_BARS, MIN_EXPECTED_R, SCORE_RES, Candidate, DeskCall,
                          call_text, candidates, expected_r, kelly, new_call, outcome_text, score_call, size_for)
 from .desk_learning import (RECENT_DAYS, bucket_table, calibration, estimate, learnable, take_profit, verdict,
                             working_now)
@@ -96,11 +96,15 @@ class DeskSettings(BaseModel):
     """Mirrors DeskSettings in frontend/lib/desk.ts."""
 
     enabled: bool = True
-    timeframes: list[Literal["1h", "4h", "1d"]] = Field(default_factory=lambda: list(DESK_TIMEFRAMES))
+    timeframes: list[Literal["15m", "30m", "1h", "4h", "1d", "1w"]] = Field(
+        default_factory=lambda: list(DEFAULT_TIMEFRAMES))
     follow_watchlist: bool = Field(True, description="The app keeps `symbols` in step with your active watchlist")
     symbols: list[str] = Field(default_factory=list, max_length=MAX_SYMBOLS, description="Empty = the default list")
     min_confidence: float = Field(0.25, ge=0.1, le=0.9, description="Calls whose take-profit is less likely aren't made")
-    max_active: int = Field(30, ge=1, le=200, description="Calls running at once, across coins and timeframes")
+    min_expected_r: float = Field(MIN_EXPECTED_R, ge=0.0, le=2.0,
+                                  description="Calls must expect at least this much R after fees")
+    max_active: int = Field(30, ge=1, le=200, description="Calls running at once, across coins and timeframes "
+                                                          "(watched zones are not limited)")
     notify_new: bool = True
     notify_fills: bool = True
     notify_results: bool = True
@@ -128,13 +132,23 @@ def due_bars(timeframes: list[str], done: dict[str, int], now: float, delay: flo
     out = []
     for tf in timeframes:
         step = INTERVAL_SECONDS[tf]
-        current = int(now // step * step)
+        current = bar_open(tf, now)
         if now - current < delay:
             current -= step  # the newest close is too fresh: Binance may not have the final bar yet
         closed = current - step
         if done.get(tf, -1) < closed:
             out.append((tf, closed))
     return out
+
+
+WEEK_OFFSET = 4 * 86400  # UNIX time 0 was a Thursday; Binance's weekly candles open on Monday 00:00 UTC
+
+
+def bar_open(tf: str, t: float) -> int:
+    """Open time of the `tf` candle containing `t` (weekly candles open on Mondays, not on epoch Thursdays)."""
+    step = INTERVAL_SECONDS[tf]
+    off = WEEK_OFFSET if tf == "1w" else 0
+    return int((t - off) // step * step + off)
 
 
 def stale(tf: str, bar_time: int, now: float) -> bool:
@@ -244,7 +258,7 @@ class AgentDesk:
         nxt = {}
         for tf in self.settings.timeframes:
             step = INTERVAL_SECONDS[tf]
-            nxt[tf] = int(now // step * step + step + CLOSE_DELAY)
+            nxt[tf] = bar_open(tf, now) + step + int(CLOSE_DELAY)
         return {"settings": self.settings.model_dump(), "symbols": self.symbols(), "enabled_by_server": self.s.agent_desk,
                 "running": self._lock.locked(), "last_run": self.last_run, "next_run": nxt,
                 "summary": self.summary(now), "channels": self.alerts.channel_status if self.alerts else {}}
@@ -273,7 +287,7 @@ class AgentDesk:
         async with self._lock:
             now = time.time() if now is None else now
             step = INTERVAL_SECONDS[interval]
-            bar = bar_time if bar_time is not None else int(now // step * step) - step
+            bar = bar_time if bar_time is not None else bar_open(interval, now) - step
             self._done[interval] = max(self._done.get(interval, -1), bar)
             self._set_kv("done", self._done)
             if not force and stale(interval, bar, now):
@@ -338,7 +352,7 @@ class AgentDesk:
             return CoinResult()
         history = learnable(self._calls.values(), self.demo_ok)
         tracks: dict[str, Optional[TrackRecord]] = {}
-        scored: list[tuple[float, bool, Candidate, float, str, float, float]] = []
+        scored: list[tuple[float, bool, Candidate, float, str, float, float, str]] = []
         for c in cands:
             if c.zone.kind not in tracks:
                 tracks[c.zone.kind] = await self._track(symbol, interval, c)
@@ -350,8 +364,11 @@ class AgentDesk:
                              history, now)
             rr = (tp.price - c.plan.entry) / risk if risk > 0 else 0.0
             er = expected_r(tp.p, rr, c.plan.risk_pct)
-            ok = tp.p >= self.settings.min_confidence and er >= MIN_EXPECTED_R and kelly(tp.p, rr, c.plan.risk_pct) > 0 and rr >= 1.0
-            scored.append((er, ok, c, tp.p, est.basis + (f" {tp.note}" if tp.note else ""), tp.price, tp.fraction))
+            why = ("confidence" if tp.p < self.settings.min_confidence else
+                   "expected R" if er < self.settings.min_expected_r or kelly(tp.p, rr, c.plan.risk_pct) <= 0 else
+                   "reward:risk" if rr < 1.0 else "")
+            scored.append((er, not why, c, tp.p, est.basis + (f" {tp.note}" if tp.note else ""), tp.price,
+                           tp.fraction, why))
         scored.sort(key=lambda x: -x[0])
 
         def room() -> tuple[bool, bool]:
@@ -364,7 +381,7 @@ class AgentDesk:
         out = CoinResult(zones=len(scored), best={"symbol": symbol, "interval": interval, "setup": scored[0][2].setup,
                                                   "expected_r": round(scored[0][0], 3)})
         saved: list[DeskCall] = []
-        for er, ok, cand, p, basis, tp_price, fraction in scored:
+        for er, ok, cand, p, basis, tp_price, fraction, why in scored:
             can_call, full = room()
             shadow = not (ok and can_call and out.call is None)
             was = next((r for r in recent if promotable(r) and overlaps(cand, r)), None)
@@ -373,7 +390,7 @@ class AgentDesk:
             call = new_call(cand, symbol, interval, bar, int(now), source, p, basis, tp_price, fraction, shadow)
             call.features["live_price"] = live
             if shadow:
-                call.skip_reason = ("confidence" if not ok else "one call per run" if out.call is not None
+                call.skip_reason = (why if not ok else "one call per run" if out.call is not None
                                     else "capacity" if full else "running call")
                 out.watched += 1
             else:

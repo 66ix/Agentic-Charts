@@ -124,7 +124,10 @@ function CallRow({ c, selected, onSelect }: { c: DeskCall; selected: boolean; on
           </span>
           {c.data_source === "synthetic" && <span className="text-[10px] text-yellow-300">demo</span>}
           <span className="flex-1" />
-          <span className={clsx("font-mono text-[11px]", tone(r))}>{c.status === "waiting" || c.status === "expired" ? `${Math.round(c.confidence * 100)}%` : rText(r)}</span>
+          <span className={clsx("font-mono text-[11px]", tone(r))} title={c.status === "waiting" ? `Expected ${rText(c.expected_r)} after fees` : undefined}>
+            {c.status === "waiting" || c.status === "expired" ? `${Math.round(c.confidence * 100)}%` : rText(r)}
+            {c.shadow && c.status === "waiting" && <span className={clsx("ml-1", tone(c.expected_r))}>{rText(c.expected_r)}</span>}
+          </span>
         </div>
         <div className="mt-0.5 flex flex-wrap gap-x-2 font-mono text-[11px] text-mute">
           <span>
@@ -206,7 +209,8 @@ function Record({ d, wallet }: { d: DeskState; wallet: PaperWallet | null }) {
     <div className="space-y-4 px-3 py-2">
       <Section title="What it learns from">
         <p className="text-[12px] leading-snug text-ink">
-          {s.tracked} buy zone{s.tracked === 1 ? "" : "s"} tracked ({s.calls} called, {s.tracked - s.calls} watched); {s.learned_from} finished, {s.level_hits} reached their level.
+          {s.tracked} buy zone{s.tracked === 1 ? "" : "s"} tracked ({s.calls} called, {s.tracked - s.calls} watched); {s.level_hits} of the {s.learned_from} whose level was decided reached it.
+          {s.calls === 0 && " The record below is from watched zones: none was traded."}
         </p>
         <p className="text-[10px] leading-snug text-mute">
           Each setup&apos;s edge is its hits against what random odds would give (1.0x = none), starting from the coin&apos;s backtest and moving with every finished zone. Older results count less.
@@ -225,12 +229,12 @@ function Record({ d, wallet }: { d: DeskState; wallet: PaperWallet | null }) {
                   <div className="absolute inset-y-0 left-0 rounded bg-accent/40" style={{ width: `${b.actual * 100}%` }} />
                   <div className="absolute inset-y-0 w-0.5 bg-ink" style={{ left: `${b.predicted * 100}%` }} title={`Said ${Math.round(b.predicted * 100)}%`} />
                 </div>
-                <span className="text-right text-ink" title={`${b.calls} calls`}>
+                <span className="text-right text-ink" title={`${b.calls} zones`}>
                   {Math.round(b.actual * 100)}%
                 </span>
               </div>
             ))}
-            <p className="text-[10px] text-mute">Bar: how often calls in each range reached the take-profit. Line: what they said.</p>
+            <p className="text-[10px] text-mute">Bar: how often zones (called and watched) in each range reached the take-profit. Line: what they said.</p>
           </div>
         )}
       </Section>
@@ -249,7 +253,7 @@ function Record({ d, wallet }: { d: DeskState; wallet: PaperWallet | null }) {
         ))}
       </Section>
       <Section title="By setup">
-        {s.setups.length === 0 && <p className="text-[11px] text-mute">No closed calls yet. Results appear here as calls finish.</p>}
+        {s.setups.length === 0 && <p className="text-[11px] text-mute">No finished zones yet. Results appear here as zones finish.</p>}
         {s.setups.length > 0 && (
           <table className="w-full text-[11px]">
             <thead>
@@ -387,7 +391,22 @@ function Settings({ d, onSaved }: { d: DeskState; onSaved(d: DeskState): void })
             {Math.round(s.min_confidence * 100)}%
           </span>
         </label>
-        <label className="flex items-center justify-between gap-2 py-1 text-[12px]">
+        <label className="flex items-center justify-between gap-2 py-1 text-[12px]" title="Expected R after fees: confidence × reward − (1 − confidence) − fees. Lower it to let the desk call more.">
+          <span>Least expected gain</span>
+          <span className="flex items-center gap-1 font-mono">
+            <input
+              type="range"
+              min={0}
+              max={50}
+              step={5}
+              value={Math.round((s.min_expected_r ?? 0.1) * 100)}
+              onChange={(e) => void save({ min_expected_r: Number(e.target.value) / 100 })}
+              className="w-28 accent-blue-500"
+            />
+            {(s.min_expected_r ?? 0.1).toFixed(2)}R
+          </span>
+        </label>
+        <label className="flex items-center justify-between gap-2 py-1 text-[12px]" title="Calls only: the desk watches any number of zones">
           <span>Calls running at most</span>
           <input
             type="number"
@@ -529,7 +548,9 @@ export default function DeskPanel(props: DockPanelProps) {
     () =>
       filter === "watched"
         ? watched
-        : calls.filter((c) => (filter === "all" ? true : filter === "active" ? c.status === "waiting" || c.status === "open" : c.status !== "waiting" && c.status !== "open")),
+        : filter === "all"
+          ? [...calls, ...watched].sort((a, b) => b.created_at - a.created_at)
+          : calls.filter((c) => (filter === "active" ? c.status === "waiting" || c.status === "open" : c.status !== "waiting" && c.status !== "open")),
     [calls, watched, filter],
   );
   const s = d?.summary;
@@ -593,7 +614,9 @@ export default function DeskPanel(props: DockPanelProps) {
                     ? `No calls running. The desk looks at ${d.symbols.length} coins on ${d.settings.timeframes.map((t) => t.toUpperCase()).join(", ") || "no timeframes"} at every candle close and calls a buy zone only when its edge, after fees, is worth it.`
                     : filter === "watched"
                       ? "No zones being watched right now."
-                      : "No finished calls yet."}
+                      : filter === "all"
+                        ? "No calls or watched zones yet."
+                        : "No finished calls yet."}
                 </p>
                 {filter === "active" && <LastRuns runs={d.last_run} />}
               </div>

@@ -308,7 +308,7 @@ def test_api():
         assert client.put("/api/desk/symbols", json={"symbols": ["BTCUSDT"]}).json()["symbols"] == ["INJUSDT",
                                                                                                     "ETHUSDT"]
         assert off["settings"]["follow_watchlist"] is False
-        assert client.post("/api/desk/run", params={"interval": "15m"}).status_code == 422
+        assert client.post("/api/desk/run", params={"interval": "5m"}).status_code == 422
         ran = client.post("/api/desk/run", params={"interval": "4h"}).json()
         assert "calls" in ran and ran["status"]["last_run"]["4h"]["coins"] >= 0
         w = client.get("/api/desk/wallet").json()
