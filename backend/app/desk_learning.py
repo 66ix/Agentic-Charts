@@ -90,7 +90,8 @@ def weight(call: DeskCall, now: float) -> float:
 
 def learnable(calls: Iterable[DeskCall], demo_ok: bool = False) -> list[DeskCall]:
     """Calls whose level outcome is known, on real prices (or demo prices when the app runs on demo data)."""
-    return [c for c in calls if c.level_hit is not None and (demo_ok or c.data_source == "binance")]
+    return [c for c in calls if c.level_hit is not None and (demo_ok or c.data_source == "binance")
+            and "promoted_to" not in c.features]  # a watched zone later called learns once, as the call
 
 
 def level_r(c: DeskCall) -> float:
@@ -290,12 +291,29 @@ def bucket_table(calls: list[DeskCall], now: float, demo_ok: bool = False) -> li
 # ----------------------------------------------------------------------- working now --
 
 RECENT_DAYS = 30
+MIN_SIGNIFICANT = 12    # zones before 'working now' calls a setup working or not
+SIGNIFICANCE = 0.1      # ... and only when random odds would do as well less often than this
 MIN_RECENT = 5
+
+
+def hit_tails(odds: list[float], hits: int) -> tuple[float, float]:
+    """(P(at least `hits`), P(at most `hits`)) for independent zones with these chances of a hit (Poisson
+    binomial, exact): how often random odds alone would do as well, or as badly."""
+    dist = [1.0]
+    for p in odds:
+        nxt = [0.0] * (len(dist) + 1)
+        for k, q in enumerate(dist):
+            nxt[k] += q * (1 - p)
+            nxt[k + 1] += q * p
+        dist = nxt
+    return min(1.0, sum(dist[hits:])), min(1.0, sum(dist[:hits + 1]))
 
 
 def working_now(calls: list[DeskCall], now: float, days: int = RECENT_DAYS, demo_ok: bool = False) -> list[dict]:
     """Setups by how their zones did in the last `days` days (calls and watched zones whose level outcome is known),
-    against what random odds would have given, best first. Only setups with MIN_RECENT finished zones."""
+    against what random odds would have given, best first. Only setups with MIN_RECENT finished zones; 'working' or
+    'not working' only from MIN_SIGNIFICANT zones and when random odds would do that well (or badly) less than
+    SIGNIFICANCE of the time, else 'too early' or 'no edge either way'."""
     since = now - days * 86400
     groups: dict[str, list[DeskCall]] = {}
     for c in learnable(calls, demo_ok):
@@ -306,9 +324,19 @@ def working_now(calls: list[DeskCall], now: float, days: int = RECENT_DAYS, demo
         if len(rows) < MIN_RECENT:
             continue
         hits = sum(1 for c in rows if c.level_hit)
-        exp = sum(random_odds(level_r(c)) for c in rows)
+        odds = [random_odds(level_r(c)) for c in rows]
+        exp = sum(odds)
         lift = hits / exp if exp else 0.0
+        p_high, p_low = hit_tails(odds, hits)
+        if len(rows) < MIN_SIGNIFICANT:
+            verdict = f"too early ({len(rows)} zones)"
+        elif lift >= 1.2 and p_high < SIGNIFICANCE:
+            verdict = "working"
+        elif lift <= 0.8 and p_low < SIGNIFICANCE:
+            verdict = "not working"
+        else:
+            verdict = "no edge either way"
         out.append({"bucket": b, "setup": rows[-1].setup, "zones": len(rows), "hits": hits,
                     "expected": round(exp, 2), "lift": round(lift, 2),
-                    "verdict": "working" if lift >= 1.2 else "not working" if lift <= 0.8 else "no edge either way"})
+                    "p": round(p_high if lift >= 1 else p_low, 3), "verdict": verdict})
     return sorted(out, key=lambda r: (-r["lift"], -r["zones"]))

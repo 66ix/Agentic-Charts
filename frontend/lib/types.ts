@@ -781,8 +781,12 @@ export interface KimiAgentForecast {
   evals: number;
   kimi_err: number | null;
   agent_err: number | null;
+  /** Of the forecasts that called a direction (not flat), the share that was right. */
   kimi_dir: number | null;
+  /** ... and of Kimi + Agent, on the same forecasts. */
   agent_dir: number | null;
+  /** Share of forecasts that called a direction. */
+  kimi_called?: number | null;
   t: number | null;
   weights: Record<string, number>;
   now: Record<string, number>;

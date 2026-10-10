@@ -23,7 +23,7 @@ from .config import get_settings
 from .kimi import Inputs, KimiCooked, Result, __version__
 from .market_data import DERIVED_INTERVALS, INTERVAL_SECONDS, MarketData
 from .kimi.patterns_v574 import HARM_NAMES, HARM_SHORT, HARM_STATES
-from .kimi_agent import MIN_EVALS, MIN_SIGNALS, SignalFilter, apply_fix, features, forecast_fix, signal_filter
+from .kimi_agent import MIN_EVALS, MIN_SIGNALS, SignalFilter, apply_fix, features, forecast_fix, signal_filter, verdict_key
 from .schemas import (Candle, KimiAgentForecast, KimiBreakout, KimiFib, KimiFibLevel, KimiForecast, KimiHarmonic,
                       KimiLevel, KimiNextCandle, KimiPattern, KimiPoint, KimiResponse, KimiRow, KimiSegment,
                       KimiSignal)
@@ -159,8 +159,8 @@ def _signals(res: Result, times: np.ndarray, verdicts: dict | None = None) -> li
                        tier={1: "top", 0: "rest", -1: "warm-up"}[s.tier],
                        result={0: "open", 1: "win", 2: "loss", 3: "expiry"}[s.result],
                        r=None if math.isnan(s.r) else round(float(s.r), 2),
-                       agent=verdicts[s.bar][0] if s.bar in verdicts else None,
-                       agent_r=verdicts[s.bar][1] if s.bar in verdicts else None) for s in keep]
+                       agent=verdicts[verdict_key(s)][0] if verdict_key(s) in verdicts else None,
+                       agent_r=verdicts[verdict_key(s)][1] if verdict_key(s) in verdicts else None) for s in keep]
 
 
 def _agent(res: Result, fc: KimiForecast | None, o: np.ndarray, h: np.ndarray, l: np.ndarray,
@@ -180,14 +180,18 @@ def _agent(res: Result, fc: KimiForecast | None, o: np.ndarray, h: np.ndarray, l
             active=fix.active, reason=fix.reason, path=path, band_high=hi, band_low=lo, final=final,
             pct_change=(final - born) / born * 100.0 if born else 0.0, nudge_pct=round(nudge, 3),
             headline=head if fix.active else fc.headline, evals=fix.evals, kimi_err=fix.kimi_err,
-            agent_err=fix.agent_err, kimi_dir=fix.kimi_dir, agent_dir=fix.agent_dir, t=fix.t, weights=fix.weights,
+            agent_err=fix.agent_err, kimi_dir=fix.kimi_dir, agent_dir=fix.agent_dir,
+            kimi_called=fix.kimi_called, t=fix.t, weights=fix.weights,
             now=fix.now)})
     if fix.kimi_err is not None:
         better = fix.agent_err is not None and fix.agent_err < fix.kimi_err
         rows.append(KimiRow(label="End error Kimi / +Agent", value=f"{fix.kimi_err:.2f}% / {fix.agent_err:.2f}%",
                             tone="up" if fix.active else "down" if not better else None))
-        rows.append(KimiRow(label="Direction Kimi / +Agent",
-                            value=f"{(fix.kimi_dir or 0) * 100:.0f}% / {(fix.agent_dir or 0) * 100:.0f}%"))
+        if fix.kimi_called is not None:
+            rows.append(KimiRow(label="Direction called", value=f"{fix.kimi_called * 100:.0f}% of forecasts"))
+        if fix.kimi_dir is not None:
+            rows.append(KimiRow(label="Right when called Kimi / +Agent",
+                                value=f"{fix.kimi_dir * 100:.0f}% / {(fix.agent_dir or 0) * 100:.0f}%"))
     learning = fix.evals < MIN_EVALS
     rows.append(KimiRow(label="Forecast correction",
                         value=(f"on, {fix.nudge_vol:+.2f}σ now" if fix.active else

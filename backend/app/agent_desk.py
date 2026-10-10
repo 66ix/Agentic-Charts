@@ -7,18 +7,19 @@ becomes a possible call with a limit buy at the top of the zone, an invalidation
 the next resistance. desk_learning.py gives each its confidence (from the coin's backtest and the desk's own past
 calls) and, once there is enough history, a learned take-profit. The call with the best expected R is made when its
 confidence is at least the minimum, its expected R after fees is positive and the coin has no call still running on
-that timeframe. A zone called recently (REPEAT_BARS candles) isn't called again straight away.
+that timeframe. A zone recorded in the last 2 x ENTRY_BARS candles, or still waiting, isn't recorded again, except a
+watched zone skipped for capacity or a running call, which is called once there is room while it still waits.
 
 Each call gets a paper position in the desk's own wallet (AGENT_WALLET_CASH, 1000 USDT by default; paper.py rules):
-Kelly-scaled to the call's confidence and reward-to-risk (desk_calls.size_for). The limit buy, the take-profit sell
-and the stop-sell go in together as one group: a sell reached before the buy fills waits and only counts candles after
+sized so it risks a Kelly-scaled share of the wallet at its invalidation, after fees (desk_calls.size_for). The limit
+buy, the take-profit sell and the stop-sell go in together as one group: a sell reached before the buy fills waits and only counts candles after
 the fill, and whichever sell fills first cancels the other. The group is cancelled when the call expires unfilled, and
 a held position is sold at market when the hold window runs out. The wallet is replayed on 1m candles and the call
 is scored on 5m-1h candles, so the two can differ by a candle.
 
 Every other new buy zone it looked at is watched rather than called (`shadow`): no paper trade, no message, but it
 is scored the same way and learned from, so the desk keeps learning about setups it doesn't trade yet, including ones
-whose backtest shows no edge. Calls and watched zones on a zone recorded in the last REPEAT_BARS candles are skipped.
+whose backtest shows no edge. Zones recorded in the last 2 x ENTRY_BARS candles are skipped.
 
 Scoring runs every SCORE_SECONDS on the calls still running (desk_calls.score_call). New calls, fills and results go
 to Telegram / Discord (each can be turned off) and to the alert history.
@@ -46,6 +47,7 @@ from .desk_calls import (ACTIVE, CLOSED, DESK_TIMEFRAMES, ENTRY_BARS, MIN_EXPECT
 from .desk_learning import (RECENT_DAYS, bucket_table, calibration, estimate, learnable, take_profit, verdict,
                             working_now)
 from .jobs import jobs
+from .kimi_service import closed_only
 from .market_data import INTERVAL_SECONDS, MarketData, candles_to_df
 from .paper import NewPaperOrder, PaperService
 from .scanner import DEFAULT_WATCHLIST
@@ -66,7 +68,7 @@ CANDLES = 300
 MIN_CANDLES = 120
 CONCURRENCY = 3
 TRACK_TIMEOUT = 30.0
-REPEAT_BARS = 2 * max(ENTRY_BARS.values())
+PROMOTABLE = ("capacity", "running call")  # watched for these reasons, a still-waiting zone can be called later
 MAX_SYMBOLS = 40
 KEEP_WATCHED_DAYS = 365   # watched zones older than this count for ~6% at a 90-day half-life: dropped once a day
 PRUNE_SECONDS = 86400.0
@@ -312,13 +314,25 @@ class AgentDesk:
         htfs = higher_timeframes(interval)
         higher = await asyncio.gather(*(self.market.get_klines(symbol, h, CANDLES) for h in htfs),
                                       return_exceptions=True)
-        frames = {h: candles_to_df(r[0]) for h, r in zip(htfs, higher)
-                  if not isinstance(r, BaseException) and len(r[0]) >= 60 and r[1] == source}
+        # Closed higher-timeframe candles only: the open D1/W1 bar would move a zone between buckets hour to hour.
+        closed_htf = {h: closed_only(r[0], h, now) for h, r in zip(htfs, higher)
+                      if not isinstance(r, BaseException) and r[1] == source}
+        frames = {h: candles_to_df(c) for h, c in closed_htf.items() if len(c) >= 60}
         cands = await asyncio.to_thread(candidates, symbol, interval, candles_to_df(closed), frames)
+        # A zone recorded in the last 2 x ENTRY_BARS candles (or still waiting) isn't recorded again, except a watched
+        # zone skipped only for capacity or a running call: that one can still be called while it waits.
+        repeat = 2 * ENTRY_BARS[interval] * step
         recent = [c for c in self._calls.values() if c.symbol == symbol and c.interval == interval
-                  and c.created_at >= now - REPEAT_BARS * step]
+                  and (c.created_at >= now - repeat or c.status in ACTIVE)]
+
+        def overlaps(c: Candidate, r: DeskCall) -> bool:
+            return min(c.zone.high, r.zone_high) > max(c.zone.low, r.zone_low)
+
+        def promotable(r: DeskCall) -> bool:
+            return r.shadow and r.status == "waiting" and r.skip_reason in PROMOTABLE and "promoted_to" not in r.features
+
         cands = [c for c in cands if live > c.plan.stop and not any(
-            min(c.zone.high, r.zone_high) > max(c.zone.low, r.zone_low) for r in recent)]
+            overlaps(c, r) for r in recent if not promotable(r))]
         if not cands:
             return CoinResult()
         history = learnable(self._calls.values(), self.demo_ok)
@@ -335,24 +349,40 @@ class AgentDesk:
                              history, now)
             rr = (tp.price - c.plan.entry) / risk if risk > 0 else 0.0
             er = expected_r(tp.p, rr, c.plan.risk_pct)
-            ok = tp.p >= self.settings.min_confidence and er >= MIN_EXPECTED_R and kelly(tp.p, rr) > 0 and rr >= 1.0
+            ok = tp.p >= self.settings.min_confidence and er >= MIN_EXPECTED_R and kelly(tp.p, rr, c.plan.risk_pct) > 0 and rr >= 1.0
             scored.append((er, ok, c, tp.p, est.basis + (f" {tp.note}" if tp.note else ""), tp.price, tp.fraction))
         scored.sort(key=lambda x: -x[0])
-        running = [c for c in self._calls.values() if not c.shadow and c.status in ACTIVE]
-        can_call = (len(running) < self.settings.max_active
-                    and not any(c.symbol == symbol and c.interval == interval for c in running))
+
+        def room() -> tuple[bool, bool]:
+            """(can call, wallet full). Checked right before each decision, with no await until the call is
+            registered: coins run concurrently, so a check made earlier could let two calls past max_active."""
+            running = [c for c in self._calls.values() if not c.shadow and c.status in ACTIVE]
+            full = len(running) >= self.settings.max_active
+            return (not full and not any(c.symbol == symbol and c.interval == interval for c in running)), full
+
         out = CoinResult(zones=len(scored), best={"symbol": symbol, "interval": interval, "setup": scored[0][2].setup,
                                                   "expected_r": round(scored[0][0], 3)})
         saved: list[DeskCall] = []
         for er, ok, cand, p, basis, tp_price, fraction in scored:
+            can_call, full = room()
             shadow = not (ok and can_call and out.call is None)
+            was = next((r for r in recent if promotable(r) and overlaps(cand, r)), None)
+            if shadow and was is not None:
+                continue  # still watched as it was: no second copy
             call = new_call(cand, symbol, interval, bar, int(now), source, p, basis, tp_price, fraction, shadow)
             call.features["live_price"] = live
             if shadow:
+                call.skip_reason = ("confidence" if not ok else "one call per run" if out.call is not None
+                                    else "capacity" if full else "running call")
                 out.watched += 1
             else:
-                await self._place(call)
+                if was is not None:  # a watched zone called now: the watched copy leaves learning, the call learns
+                    call.features["from_watched"] = was.id
+                    was.features["promoted_to"] = call.id
+                    saved.append(was)
+                self._calls[call.id] = call  # counts against max_active before the await below
                 out.call = call
+                await self._place(call)
             self._calls[call.id] = call
             saved.append(call)
         await self.db.run(self._save, saved)
@@ -371,7 +401,7 @@ class AgentDesk:
     async def _place(self, call: DeskCall) -> None:
         try:
             w = await self.paper.wallet()
-            k, pct, notional, note = size_for(call.confidence, call.rr, w.equity, w.cash)
+            k, pct, notional, note = size_for(call.confidence, call.rr, call.risk_pct, w.equity, w.cash)
             call.kelly, call.size_pct, call.paper_note = round(k, 4), pct, note
             if notional is None:
                 return

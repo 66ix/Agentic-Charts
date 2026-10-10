@@ -771,8 +771,9 @@ class KimiAgentForecast(BaseModel):
     evals: int = 0
     kimi_err: Optional[float] = Field(None, description="Average end error of Kimi's line, % of price")
     agent_err: Optional[float] = Field(None, description="... and of Kimi + Agent, on the same forecasts")
-    kimi_dir: Optional[float] = None
-    agent_dir: Optional[float] = None
+    kimi_dir: Optional[float] = Field(None, description="Of the forecasts that called a direction, the share right")
+    agent_dir: Optional[float] = Field(None, description="... and of Kimi + Agent, on the same forecasts")
+    kimi_called: Optional[float] = Field(None, description="Share of forecasts that called a direction (not flat)")
     t: Optional[float] = None
     weights: dict = Field(default_factory=dict)
     now: dict = Field(default_factory=dict, description="The agent's features on the last closed candle")

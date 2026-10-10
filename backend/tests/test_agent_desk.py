@@ -53,15 +53,20 @@ def test_due_bars_waits_for_the_close_and_runs_each_candle_once():
 
 
 def test_sizing_scales_with_confidence_and_respects_the_cash():
-    assert kelly(0.5, 2.0) == pytest.approx(0.25)
+    assert kelly(0.5, 2.0) == pytest.approx(0.25)  # no fees
+    assert kelly(0.5, 2.0, 2 * 0.1 / 0.3) == pytest.approx(0.0905, abs=1e-3)  # fees of 0.3R: W 1.7, L 1.3
     assert expected_r(0.5, 2.0, 2.0) == pytest.approx(0.5 - 0.1)  # fees: 0.2% of a 2% risk = 0.1R
-    k_lo, pct_lo, n_lo, _ = size_for(0.45, 2.0, 1000, 1000)
-    k_hi, pct_hi, n_hi, _ = size_for(0.65, 2.0, 1000, 1000)
+    k_lo, pct_lo, n_lo, _ = size_for(0.45, 2.0, 3.0, 1000, 1000)
+    k_hi, pct_hi, n_hi, _ = size_for(0.65, 2.0, 3.0, 1000, 1000)
     assert 0 < pct_lo < pct_hi <= 15 and n_lo < n_hi
-    assert size_for(0.3, 1.5, 1000, 1000)[2] is None              # no edge: nothing placed
-    k, pct, n, note = size_for(0.9, 3.0, 1000, 40)
+    assert size_for(0.3, 1.5, 3.0, 1000, 1000)[2] is None         # no edge: nothing placed
+    # Sized from the risk: a wide stop buys less than a tight one, and never risks more than 1% of the wallet.
+    _, pct_tight, _, _ = size_for(0.55, 2.0, 2.0, 1000, 1000)
+    _, pct_wide, _, _ = size_for(0.55, 2.0, 10.0, 1000, 1000)
+    assert pct_wide < pct_tight and pct_wide * 10.0 / 100 <= 1.0 + 1e-9
+    k, pct, n, note = size_for(0.9, 3.0, 2.0, 1000, 40)
     assert pct == 15 and n == 40 and "Trimmed" in note             # capped, then trimmed to the free cash
-    assert size_for(0.6, 2.0, 1000, 5)[2] is None                  # under Binance's minimum order
+    assert size_for(0.6, 2.0, 3.0, 1000, 5)[2] is None             # under Binance's minimum order
 
 
 # ------------------------------------------------------------------------ scoring --
