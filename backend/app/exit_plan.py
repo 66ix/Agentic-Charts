@@ -247,11 +247,17 @@ SCHEMA = ["""CREATE TABLE exit_plans (symbol TEXT PRIMARY KEY, body TEXT NOT NUL
 DONE_TOL = 0.005  # a sell of yours within 0.5% of a rung's price, after the plan was made, marks the rung done
 
 
+# Ids in ExitPlan.armed that are signal alerts (the daily-close invalidation), not price alerts.
+SIGNAL_PREFIX = "sig:"
+
+
 class ExitPlanService:
     """Builds, keeps (SQLite) and arms exit plans. `binance` (binance_import) gives the holding and your sells."""
 
-    def __init__(self, market, db, alerts=None, binance=None) -> None:
+    def __init__(self, market, db, alerts=None, binance=None, signals=None) -> None:
         self.market, self.db, self.alerts, self.binance = market, db, alerts, binance
+        # signal_alerts: the invalidation is judged on a daily close there, not on a touch.
+        self.signals = signals
         db.migrate("exit_plans", SCHEMA)
 
     async def _holding(self, symbol: str) -> Optional[dict]:
@@ -314,12 +320,16 @@ class ExitPlanService:
         if self.alerts is None:
             return
         for aid in plan.armed:
-            await self.alerts.remove(aid)
+            if aid.startswith(SIGNAL_PREFIX):
+                if self.signals is not None:
+                    await self.signals.remove(aid.removeprefix(SIGNAL_PREFIX))
+            else:
+                await self.alerts.remove(aid)
         plan.armed = []
 
     async def arm(self, symbol: str) -> ExitPlan:
-        """One price alert per rung not done yet, and one at the invalidation (labelled to check the daily close);
-        arming again replaces the previous ones."""
+        """One price alert per rung not done yet, and one at the invalidation: a daily close below it when signal
+        alerts are available, else a price alert labelled to check the daily close. Arming again replaces them."""
         from .schemas import AlertSpec
 
         plan = self.get(symbol)
@@ -332,11 +342,20 @@ class ExitPlanService:
         specs = [AlertSpec(kind="cross", price=r.price, repeat=False,
                            label=f"Exit {coin} TP{i + 1}: sell {r.sell_pct:g}% ≈ ${r.usdt:,.0f}")
                  for i, r in enumerate(plan.rungs) if not r.done]
-        if plan.invalidation:
+        level_id = None
+        if plan.invalidation and self.signals is not None:
+            from .signal_alerts import LevelClose
+
+            p = plan.invalidation.price
+            a = await self.signals.add_level(symbol, "1d", LevelClose(price_low=p, price_high=p, side="below",
+                                                                     label=f"exit plan for {coin} is wrong"),
+                                             note=f"Exit {coin}: daily close below {_fmt(p)}", owner="exit")
+            level_id = SIGNAL_PREFIX + a.id
+        elif plan.invalidation:
             specs.append(AlertSpec(kind="cross", price=plan.invalidation.price, repeat=False,
                                    label=f"Exit {coin}: wrong on a daily close below "
                                          f"{_fmt(plan.invalidation.price)}; check the daily close"))
         made = await self.alerts.add(symbol, specs)
-        plan.armed = [a.id for a in made]
+        plan.armed = [a.id for a in made] + ([level_id] if level_id else [])
         self._save(plan)
         return plan

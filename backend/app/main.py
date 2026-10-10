@@ -151,7 +151,8 @@ async def lifespan(app: FastAPI):
     app.state.market_scanner = MarketScanner(market, TrackRecordService(market), app.state.alerts)
     app.state.market_scanner.start()
     # The agent desk (agent_desk.py): its own calls at 1h/4h/1d closes, scored, paper-traded and learned from.
-    app.state.exit_plans = ExitPlanService(market, app.state.db, app.state.alerts, app.state.binance)
+    app.state.exit_plans = ExitPlanService(market, app.state.db, app.state.alerts, app.state.binance,
+                                          app.state.signal_alerts)
     app.state.desk = AgentDesk(market, app.state.db, app.state.alerts, app.state.market_scanner.track)
     app.state.desk.start()
     app.state.brief.desk_lines = app.state.desk.brief_lines

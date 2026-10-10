@@ -342,6 +342,16 @@ def test_repeat_stays_armed_with_a_cooldown():
     assert fired and a.armed and a.fire_count == 2 and a.last_side == "below"
 
 
+def test_repeat_cross_ignores_hovering_on_the_level():
+    a = _cross(last_side="below", repeat=True)  # level 10
+    a, fired = evaluate(a, 10.01, now_ms=1_000_000)
+    assert fired
+    a, fired = evaluate(a, 9.99, now_ms=2_000_000)  # past the cooldown but within 0.3% of the level
+    assert not fired and a.last_side == "above"
+    a, fired = evaluate(a, 9.9, now_ms=2_100_000)  # clearly below now
+    assert fired and a.fire_count == 2
+
+
 def test_expiry_disarms_without_firing():
     a = _cross(last_side="below", expires_at=1_000_000)
     a, fired = evaluate(a, 10.5, now_ms=1_000_001)

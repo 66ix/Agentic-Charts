@@ -36,6 +36,8 @@ import {
   TRIGGER_INTERVALS,
   browserTimeZone,
   describeAlert,
+  createLevelAlert,
+  describeLevel,
   describeTrigger,
   expiryLabel,
   fetchLevelReview,
@@ -464,6 +466,15 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
+type FireOn = "touch" | "15m" | "1h" | "4h" | "1d";
+const FIRE_ON: { value: FireOn; label: string }[] = [
+  { value: "touch", label: "Touch (live price)" },
+  { value: "15m", label: "15m close" },
+  { value: "1h", label: "1H close" },
+  { value: "4h", label: "4H close" },
+  { value: "1d", label: "Daily close" },
+];
+
 function NewAlertForm(props: {
   symbol: string;
   price: number | null;
@@ -479,8 +490,29 @@ function NewAlertForm(props: {
   const [note, setNote] = useState("");
   const [repeat, setRepeat] = useState(false);
   const [expires, setExpires] = useState<number | null>(null);
+  const [fireOn, setFireOn] = useState<FireOn>("touch");
+  const [closes, setCloses] = useState(1);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
+
+  const submitClose = async (spec: AlertSpec, interval: Interval) => {
+    const lo = spec.kind === "cross" ? (spec.price as number) : (spec.price_low as number);
+    const hi = spec.kind === "cross" ? lo : (spec.price_high as number);
+    // A level above price waits for a close above it, one below for a close below; a zone for a close inside.
+    const side = spec.kind === "zone" ? "inside" : live != null && lo < live ? "below" : "above";
+    setProblem(null);
+    setBusy(true);
+    try {
+      await createLevelAlert({
+        symbol: props.symbol, interval, price_low: lo, price_high: hi, side, closes, label: label.trim(), repeat, note: note.trim(),
+      });
+      props.onDone();
+    } catch (err) {
+      setProblem((err as Error).message || "Could not create the alert.");
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const submit = async () => {
     let spec: AlertSpec;
@@ -495,6 +527,7 @@ function NewAlertForm(props: {
       const [a, b] = lo <= hi ? [lo, hi] : [hi, lo];
       spec = { kind, price: null, price_low: a, price_high: b, label: label.trim() || `Zone ${formatPrice(a)}–${formatPrice(b)}` };
     }
+    if (fireOn !== "touch") return submitClose(spec, fireOn);
     if (expires != null && expires <= Date.now()) return setProblem("The expiry time has already passed.");
     setProblem(null);
     setBusy(true);
@@ -532,17 +565,44 @@ function NewAlertForm(props: {
         </div>
       )}
       <div className="grid grid-cols-2 gap-2">
-        <Field label="Label">
-          <input className={INPUT} value={label} maxLength={200} placeholder="optional" onChange={(e) => setLabel(e.target.value)} />
+        <Field label="Fire on">
+          <select className={INPUT} value={fireOn} onChange={(e) => setFireOn(e.target.value as FireOn)}>
+            {FIRE_ON.map((f) => (
+              <option key={f.value} value={f.value}>
+                {f.label}
+              </option>
+            ))}
+          </select>
         </Field>
-        <Field label="Expires">
-          <ExpiryPicker value={expires} onChange={setExpires} />
-        </Field>
+        {fireOn === "touch" ? (
+          <Field label="Expires">
+            <ExpiryPicker value={expires} onChange={setExpires} />
+          </Field>
+        ) : (
+          <Field label="Closes in a row">
+            <select className={INPUT} value={closes} onChange={(e) => setCloses(Number(e.target.value))}>
+              {[1, 2, 3].map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+          </Field>
+        )}
       </div>
+      <Field label="Label">
+        <input className={INPUT} value={label} maxLength={200} placeholder="optional" onChange={(e) => setLabel(e.target.value)} />
+      </Field>
       <Field label="Note">
         <input className={INPUT} value={note} maxLength={500} placeholder="e.g. take profit, move stop" onChange={(e) => setNote(e.target.value)} />
       </Field>
       <Checkbox checked={repeat} onChange={setRepeat} label="Keep it armed after it fires (at most once every 5 minutes)" />
+      {fireOn !== "touch" && (
+        <p className="text-[11px] leading-relaxed text-mute">
+          Fires when a candle closes {kind === "zone" ? "inside the zone" : "beyond the level"}, not on a wick through it. It is listed
+          with the signal alerts.
+        </p>
+      )}
       {problem && <div className="text-[11px] text-down">{problem}</div>}
       <div className="flex justify-end gap-1.5">
         <button type="button" onClick={props.onDone} className="btn-ghost h-7 px-2 text-[12px]">
@@ -918,7 +978,7 @@ function SignalRow(props: { alert: SignalAlert; onPick(): void; onToggle(): void
         <button type="button" onClick={props.onPick} className="font-medium text-ink hover:text-accent">
           {displaySymbol(a.symbol)} {tf}
         </button>{" "}
-        <span className="text-mute">{a.trigger ? describeTrigger(a) : signalName(a.signal)}</span>
+        <span className="text-mute">{a.trigger ? describeTrigger(a) : a.level ? describeLevel(a, tf) : signalName(a.signal)}</span>
         <div className="truncate text-[11px] text-mute">
           {a.last_fired_at
             ? `Last fired ${timeAgo(a.last_fired_at)} · ${a.fire_count}× in total`

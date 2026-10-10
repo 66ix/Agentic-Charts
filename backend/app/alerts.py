@@ -51,6 +51,7 @@ MAX_SNAPSHOTS = 50  # chart snapshots of fires kept for the History tab
 MAX_ALERTS = 200
 LISTENER_QUEUE_SIZE = 64
 REPEAT_COOLDOWN_MS = 5 * 60_000  # a repeating alert fires at most this often
+REPEAT_BAND = 0.003  # a repeating cross alert re-arms only once price is this far (0.3%) from its level
 EXPIRY_CHECK_SECONDS = 30.0
 MAX_HISTORY = 500
 Side = Literal["above", "below", "inside"]
@@ -73,7 +74,8 @@ def evaluate(alert: PriceAlert, price: float, now_ms: Optional[int] = None) -> t
     a cross alert when price moves to the other side of the level, a zone alert when price moves
     into the zone (or jumps straight through it). The first observation only records the side.
     A `repeat` alert stays armed after firing; a crossing within REPEAT_COOLDOWN_MS of its last fire
-    only moves `last_side`, so a choppy level cannot spam. An alert past `expires_at` is disarmed and
+    only moves `last_side`, and after a fire a repeating cross alert keeps its side until price is REPEAT_BAND
+    away from the level, so a price hovering on the level cannot fire it again and again. An alert past `expires_at` is disarmed and
     marked expired instead. Returns the same object when nothing changed."""
     if not alert.armed or not math.isfinite(price):
         return alert, False
@@ -82,6 +84,9 @@ def evaluate(alert: PriceAlert, price: float, now_ms: Optional[int] = None) -> t
         return alert.model_copy(update={"armed": False, "expired": True}), False
     side = _side(alert, price)
     prev = alert.last_side
+    if (alert.repeat and alert.kind == "cross" and alert.triggered_at is not None and prev and side != prev
+            and alert.price and abs(price - alert.price) < REPEAT_BAND * alert.price):
+        side = prev  # still on the level since the last fire: not a new crossing
     fired = False
     if prev and prev != side:
         fired = alert.kind == "cross" or side == "inside" or prev != "inside"  # above→below skips over the zone

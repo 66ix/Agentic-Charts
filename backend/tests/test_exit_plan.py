@@ -109,3 +109,45 @@ def test_arm_once_and_mark_sold_rungs_done():
     again = svc.get("INJUSDT")
     assert again.rungs[0].done and not any(r.done for r in again.rungs[1:])
     assert asyncio.run(svc.delete("INJUSDT")) and not alerts.alerts
+
+
+def test_invalidation_is_a_daily_close_when_signal_alerts_exist():
+    md, alerts = MarketData(), FakeAlerts()
+
+    class Signals:
+        def __init__(self):
+            self.made = {}
+
+        async def add_level(self, symbol, interval, level, repeat=False, note="", owner=None):
+            from types import SimpleNamespace
+            a = SimpleNamespace(id=f"L{len(self.made)}", interval=interval, level=level)
+            self.made[a.id] = a
+            return a
+
+        async def remove(self, aid):
+            return self.made.pop(aid, None) is not None
+
+    class Binance:
+        _fills: dict = {}
+
+        class account:
+            @staticmethod
+            def status():
+                return {"configured": False}
+
+    sig = Signals()
+    svc = ExitPlanService(md, Database("memory"), alerts, Binance(), sig)
+
+    async def go():
+        plan = await svc.build("INJUSDT", "quarters", qty=200.0, avg_entry=5.0)
+        await svc.arm("INJUSDT")
+        await svc.arm("INJUSDT")
+        await md.close()
+        return plan
+
+    plan = asyncio.run(go())
+    assert plan.invalidation is not None
+    assert len(alerts.alerts) == len(plan.rungs)  # rungs only: no price alert at the invalidation
+    (only,) = sig.made.values()
+    assert only.interval == "1d" and only.level.side == "below" and only.level.price_low == plan.invalidation.price
+    assert asyncio.run(svc.delete("INJUSDT")) and not sig.made
