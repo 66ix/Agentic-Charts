@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field
 from .market_data import MarketData, candles_to_df
 from .pricefmt import _fmt
 from .schemas import BoxOverlay
+from .ta_agent import ZONE_BARS
 from .ta_agent import GREEN, ORANGE, RED, TEAL, TF_LABEL, Zone, atr, cluster_levels, find_swings, rgba, \
     supply_demand_zones
 
@@ -38,7 +39,7 @@ log = logging.getLogger(__name__)
 
 LADDER: tuple[str, ...] = ("1w", "1d", "4h", "1h", "15m")
 DEFAULT_START, DEFAULT_END = "1d", "15m"
-CANDLES = 400
+CANDLES = ZONE_BARS
 MIN_CANDLES = 60
 MIN_TOUCHES = 2
 MIN_SR_SCORE = 0.45

@@ -52,6 +52,7 @@ from .market_data import INTERVAL_SECONDS, MarketData, candles_to_df
 from .paper import NewPaperOrder, PaperService
 from .scanner import DEFAULT_WATCHLIST
 from .schemas import TrackRecord, norm_symbol
+from .ta_agent import ZONE_BARS
 from .ta_agent import TF_LABEL, higher_timeframes
 
 if TYPE_CHECKING:
@@ -64,7 +65,7 @@ CHECK_SECONDS = 30.0
 SCORE_SECONDS = 120.0
 CLOSE_DELAY = 45.0
 STALE_FRACTION = 0.25
-CANDLES = 300
+CANDLES = ZONE_BARS
 MIN_CANDLES = 120
 CONCURRENCY = 3
 TRACK_TIMEOUT = 30.0

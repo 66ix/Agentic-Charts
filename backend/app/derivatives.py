@@ -28,6 +28,7 @@ import httpx
 import websockets
 
 from .config import Settings, get_settings
+from .perp_map import PerpMap
 
 log = logging.getLogger(__name__)
 
@@ -223,6 +224,7 @@ class DerivativesService:
         self._oi_cache: tuple[float, OpenInterest] | None = None
         self._symbol_cache: dict[str, tuple[float, dict | None]] = {}
         self._task: asyncio.Task | None = None
+        self.perps = PerpMap(self._exchange_info)
 
     def start(self) -> None:
         if self.enabled and self._task is None:
@@ -263,6 +265,11 @@ class DerivativesService:
         self._oi_cache = (time.monotonic() + 300, oi)  # 1h buckets: no point refreshing faster
         return oi
 
+    async def _exchange_info(self) -> dict:
+        r = await self._client.get(f"{self.s.binance_futures_rest_url}/fapi/v1/exchangeInfo", timeout=8.0)
+        r.raise_for_status()
+        return r.json()
+
     # ----------------------------------------------------------- per symbol
     async def symbol_snapshot(self, symbol: str) -> dict | None:
         """Funding rate and 24h open-interest change for one perpetual, or None when unavailable
@@ -275,10 +282,11 @@ class DerivativesService:
         base = self.s.binance_futures_rest_url
         out: dict | None = None
         try:
+            perp, _ = await self.perps.resolve(symbol)  # PEPEUSDT trades as 1000PEPEUSDT
             prem, hist = await asyncio.gather(
-                self._client.get(f"{base}/fapi/v1/premiumIndex", params={"symbol": symbol}, timeout=4.0),
+                self._client.get(f"{base}/fapi/v1/premiumIndex", params={"symbol": perp}, timeout=4.0),
                 self._client.get(f"{base}/futures/data/openInterestHist",
-                                 params={"symbol": symbol, "period": "1h", "limit": 25}, timeout=4.0))
+                                 params={"symbol": perp, "period": "1h", "limit": 25}, timeout=4.0))
             out = parse_symbol_snapshot(prem.json() if prem.status_code == 200 else None,
                                         hist.json() if hist.status_code == 200 else None)
         except (httpx.HTTPError, ValueError) as exc:
@@ -300,7 +308,10 @@ class DerivativesService:
         """Latest liquidations of one symbol (newest first), or None when the stream is off and nothing is saved."""
         if not self.enabled:
             return None
-        rows = self.liquidations.recent(symbol, limit)
+        perp, mult = self.perps.cached(symbol)  # the stream names the perpetual: 1000PEPEUSDT for PEPEUSDT
+        rows = self.liquidations.recent(perp, limit)
+        if mult != 1:
+            rows = [{**r, "price": r["price"] / mult, "qty": r["qty"] * mult} for r in rows]
         if not rows and not self.stream_connected:
             return None
         return rows

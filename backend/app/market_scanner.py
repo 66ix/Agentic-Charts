@@ -48,6 +48,7 @@ from .market_data import FALLBACK_SYMBOLS, INTERVAL_SECONDS, MarketData, candles
 from .pricefmt import _fmt
 from .scanner import change_24h
 from .schemas import INTERVALS, AnalysisIntent, GridCoin, Interval, MarketSetup, SetupAgreement, TrackRecord
+from .ta_agent import ZONE_BARS
 from .ta_agent import analyze, atr, ema, higher_timeframes
 from .track_record import TrackRecordService
 from .trade_plan import build_plan, plan_overlays
@@ -58,7 +59,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 PLAN_INTENT = AnalysisIntent(features=["support_resistance", "supply_demand"], max_zones=2)
-CANDLES = 300
+CANDLES = ZONE_BARS
 MIN_CANDLES = 60
 MIN_RR = 1.0
 KEEP = 25            # setups kept per side

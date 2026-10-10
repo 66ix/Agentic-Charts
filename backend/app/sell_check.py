@@ -21,17 +21,19 @@ from typing import Literal, Optional
 
 import pandas as pd
 from .indicators import rsi as rsi_series
+from .kimi_service import closed_only
 from .market_data import MarketData, candles_to_df
 from .pricefmt import _fmt
 from .schemas import SellSignal
 from .scanner import change_24h
+from .ta_agent import ZONE_BARS
 from .ta_agent import TF_LABEL, Zone, atr, cluster_levels, find_swings, supply_demand_zones
 
 log = logging.getLogger(__name__)
 
 TIMEFRAMES = ("1h", "4h", "1d")
 DEFAULT_TF = "4h"
-CANDLES = 300
+CANDLES = ZONE_BARS
 MIN_CANDLES = 60
 LOOKBACK = 8
 LOST_CONFIRM = 2
@@ -92,9 +94,11 @@ def _support_below(zones: list[Zone], last: float) -> Optional[float]:
     return max(below, default=None)
 
 
-def check(symbol: str, interval: str, df: pd.DataFrame, daily: Optional[pd.DataFrame], source: str) -> Optional[
-        SellSignal]:
-    """One coin: a sell or trim signal, or None when it holds up. CPU-bound."""
+def check(symbol: str, interval: str, df: pd.DataFrame, daily: Optional[pd.DataFrame], source: str,
+          forming: Optional[pd.DataFrame] = None) -> Optional[SellSignal]:
+    """One coin: a sell or trim signal, or None when it holds up, judged on closed candles (`df`, `daily`) like the
+    sell alerts. `forming`: the same candles plus the one still open; a support it breaks that the closed ones
+    don't is reported as provisional. CPU-bound."""
     if len(df) < MIN_CANDLES:
         return None
     df = df.reset_index(drop=True)
@@ -126,6 +130,18 @@ def check(symbol: str, interval: str, df: pd.DataFrame, daily: Optional[pd.DataF
         reason += f"; next support {_fmt(support)} ({drop:+.1f}%)." if support else "."
         return SellSignal(**base, action="sell", reason=reason, sell_low=z.price_low, sell_high=z.price_high,
                           zone=f"{label} {was}", score=round(score, 3))
+
+    # Not lost on closed candles: does the open candle break one? Said, but only as provisional.
+    if forming is not None and len(forming) > len(df):
+        fr = forming.reset_index(drop=True)
+        z = _lost(fr, zones, atr_v)
+        if z is not None:
+            was = "demand" if z.kind in ("supply", "demand") else "support"
+            reason = (f"Provisional: the open {tfl} candle is below {was} {_fmt(z.price_low)}–{_fmt(z.price_high)}; "
+                      f"it counts once it closes there ({LOST_CONFIRM} closes in all).")
+            reason += f" Next support {_fmt(support)} ({drop:+.1f}%)." if support else ""
+            return SellSignal(**base, action="trim", reason=reason, sell_low=z.price_low, sell_high=z.price_high,
+                              zone=f"{tfl} {was} (provisional)", score=0.3)
 
     # At resistance, the daily zone first when both are there.
     for label, zs, _, a in frames:
@@ -193,14 +209,17 @@ async def sell_scan(market: MarketData, symbols: list[str], interval: str) -> li
     async def one(sym: str) -> Optional[SellSignal]:
         async with sem:
             try:
-                candles, source = await market.get_klines(sym, interval, CANDLES)
+                candles, source = await market.get_klines(sym, interval, CANDLES + 1)
                 daily = None
                 if interval != "1d":
-                    daily = candles_to_df((await market.get_klines(sym, "1d", CANDLES))[0])
+                    # Closed candles only, like the sell alerts: the live price isn't a close.
+                    daily = candles_to_df(closed_only((await market.get_klines(sym, "1d", CANDLES + 1))[0], "1d"))
             except Exception as exc:  # unknown symbol, network
                 log.info("Sell check skipped %s: %s", sym, exc)
                 return None
-        return await asyncio.to_thread(check, sym, interval, candles_to_df(candles), daily, source)
+        closed = closed_only(candles, interval)
+        return await asyncio.to_thread(check, sym, interval, candles_to_df(closed), daily, source,
+                                       candles_to_df(candles) if len(closed) < len(candles) else None)
 
     rows = await asyncio.gather(*(one(s) for s in symbols[:40]))
     return sorted((r for r in rows if r is not None), key=lambda r: -r.score)

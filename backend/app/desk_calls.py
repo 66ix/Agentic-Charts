@@ -155,10 +155,13 @@ def agree_level(ratio: float) -> str:
     return "with" if ratio >= 0.67 else "against" if ratio < 0.34 else "mixed"
 
 
+ZONES_VERSION = 2  # bumped when zone detection changes what fresh / htf mean, so old statistics don't mix in
+
+
 def bucket_of(interval: str, kind: str, fresh: Optional[bool], htf: bool, agree: str) -> str:
-    """The group a call learns with: 4h|demand|fresh|htf|with."""
+    """The group a call learns with: 4h|demand|fresh|htf2|with (the HTF token carries ZONES_VERSION)."""
     return "|".join((interval, kind, "fresh" if fresh else "tested" if fresh is False else "-",
-                     "htf" if htf else "nohtf", agree))
+                     f"{'htf' if htf else 'nohtf'}{ZONES_VERSION}", agree))
 
 
 def describe_setup(interval: str, kind: str, fresh: Optional[bool], htf: list[str], agree: str) -> str:

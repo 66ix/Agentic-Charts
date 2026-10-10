@@ -43,6 +43,7 @@ from .kimi_service import closed_only, summarize as kimi_summarize
 from .market_data import INTERVAL_SECONDS, MarketData, candles_to_df
 from .scanner import DEFAULT_WATCHLIST, SCAN_INTENT, summarize as scan_summarize
 from .schemas import Interval, ScanResult, norm_symbol
+from .ta_agent import ZONE_BARS
 from .ta_agent import TF_LABEL, analyze
 
 if TYPE_CHECKING:
@@ -474,7 +475,7 @@ class BriefService:
                            data_source="synthetic" if any(c.source == "synthetic" for c in coins) else "binance")
 
     async def _coin(self, sym: str, interval: str, secs: BriefSections) -> CoinBrief:
-        candles, source = await self.market.get_klines(sym, interval, 300)
+        candles, source = await self.market.get_klines(sym, interval, ZONE_BARS + 1)
         if len(candles) < 60:
             return CoinBrief(sym, error="not enough history")
         df = candles_to_df(candles)
