@@ -32,7 +32,7 @@ from .grid_planner import plan_facts as grid_plan_facts
 from .gridbot import GridBotService
 from .kimi_service import KimiService, summarize
 from .llm import ChartContext, LLMClient
-from .market_data import INTERVAL_SECONDS, MarketData, candles_to_df
+from .market_data import FALLBACK_SYMBOLS, INTERVAL_SECONDS, MarketData, candles_to_df
 from .market_metrics import MarketMetricsService, overview_facts
 from .market_scanner import MarketScanner, MarketScanResult
 from .scanner import DEFAULT_WATCHLIST, scan, tickers
@@ -256,6 +256,13 @@ async def _market_overview(metrics: MarketMetricsService | None) -> dict | None:
     return overview_facts(res) if res else None
 
 
+async def _listed(market: MarketData) -> frozenset[str] | None:
+    """Binance's live USDT pairs, or None when only the built-in fallback list is at hand (synthetic data, or
+    exchangeInfo failed): that list is too short to rule a coin out."""
+    symbols = await _guarded(market.list_symbols(), "symbol list", 5.0)
+    return frozenset(symbols) if symbols and symbols is not FALLBACK_SYMBOLS else None
+
+
 async def _vs_btc(market: MarketData, symbol: str) -> dict | None:
     """The coin against BTC on daily candles (relative.py): change vs BTC today and over 7 days, 30-day correlation
     and beta. None for BTC itself, pairs not quoted in a dollar stablecoin, or when the candles can't be had."""
@@ -382,7 +389,8 @@ async def _chart_cvd(futures: FuturesDataService | None, symbol: str, tf: str) -
 
 
 # Left out of the "numbers used" view: tool transcripts and what the answer did rather than read.
-USED_SKIP = frozenset({"research", "actions", "navigation", "spot_note", "trading_style"})
+USED_SKIP = frozenset({"research", "actions", "navigation", "spot_note", "trading_style", "symbol", "coin",
+                       "data_source"})
 SHOW_VERBS = re.compile(r"\b(?:show|add|turn on|switch on|enable|display|plot|put|overlay|bring up|pull up|"
                         r"draw|toggle|apply|equip|load)\b", re.I)
 FUTURES_WORDS = re.compile(r"\b(funding|open interest|oi|long[ /-]?short|l/s|liquidat\w*|order ?book|walls?|cvd|"
@@ -651,7 +659,7 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
     plan and the rest go to `on_result` before the summary is written, and the summary to `on_delta` as it is."""
     settings = get_settings()
     scanner = scanner or MarketScanner(market)
-    chart = ChartContext(req.symbol, req.interval, req.watchlist, req.spot_only)
+    chart = ChartContext(req.symbol, req.interval, req.watchlist, req.spot_only, await _listed(market))
     steps: list[str] = []
     research: list[dict] = []
     loop = None
@@ -779,7 +787,11 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
     df = candles_to_df(candles)
     # Detection is CPU-bound (SciPy); keep the event loop free for streams.
     result = await asyncio.to_thread(analyze, df, run_intent, tf, higher, frames, req.indicator_settings)
-    facts = dict(result.facts)
+    # The coin by name, so the narrator never guesses one, and a flag when the candles are demo data. The chart's own
+    # candles ("client") are demo data when this server only has synthetic data to give.
+    demo = source == "synthetic" or (source == "client" and market.settings.data_source == "synthetic")
+    facts = {"symbol": symbol, "coin": symbol if custom_chart else base,
+             **({"data_source": "demo (synthetic)"} if demo else {}), **result.facts}
 
     for ov in result.overlays:
         ov.id = _new_id()

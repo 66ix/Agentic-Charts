@@ -336,6 +336,12 @@ class ChatTurn(BaseModel):
     role: Literal["user", "agent"]
     text: str = Field("", max_length=2000)
 
+    @field_validator("text", mode="before")
+    @classmethod
+    def _clip(cls, v: Any) -> Any:
+        # A long earlier answer is cut, not rejected: rejecting it would fail every later request in the chat.
+        return v[:2000] if isinstance(v, str) else v
+
 
 class AlertSpec(BaseModel):
     """A price alert the client should arm. `cross` fires when price crosses `price`;

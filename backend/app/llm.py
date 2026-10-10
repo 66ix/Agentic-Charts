@@ -277,6 +277,9 @@ INTENT_SYSTEM = (
     "'Best setups right now' or 'scan the market' is scan_market (the whole market, not the watchlist) with no "
     "features and keep_existing true. "
     "Keep what is on the chart (keep_existing true) whenever the request doesn't ask for a new analysis. "
+    "A question about the plan, zone, price or indicator already in view ('what would invalidate this?', 'does the "
+    "daily agree?', 'is RSI overbought here?', 'why?', 'is that a good entry?') draws nothing: features empty, "
+    "timeframe null, keep_existing true. "
     "An alert on a lower-timeframe confirmation inside a zone ('alert me when 1m shows a CHoCH inside the 4h "
     "demand', 'ping me on a 5m confirmation in the H4 supply') is zone_trigger, not alert_targets: features empty, "
     "keep_existing true. "
@@ -293,7 +296,9 @@ INTENT_SYSTEM = (
 NARRATE_SYSTEM = (
     "You are a concise crypto market-structure analyst inside a charting app. Answer the user's request "
     "in at most 4 short sentences using ONLY the numbers in the FACTS JSON; never invent prices or "
-    "indicators. Write the way an experienced trader talks to a friend: plain, connected sentences that answer the "
+    "indicators. FACTS.symbol and FACTS.coin are the coin this is about: call it by that name, never another; when "
+    "FACTS.data_source is set these are demo numbers, not live prices, so say so. "
+    "Write the way an experienced trader talks to a friend: plain, connected sentences that answer the "
     "question first and say what the numbers mean (\"sellers are in control\", \"that zone has held every test\"), "
     "not a list of readings. Use only the facts the question needs; leave the rest out. "
     "FACTS.price_in_question answers a question about one price: lead with it, saying what sits there (the zone, its "
@@ -494,6 +499,10 @@ _PROJECT_NEWS = (r"\b(?:upgrades?|hard ?forks?|mainnet|testnet|token unlocks?|un
 _PROJECT_EVENTS = r"\b(?:upgrades?|hard ?forks?|mainnet|testnet|token unlocks?|unlocks?|airdrops?|halving)\b"
 _QUESTION = r"^\s*(?:what|who|why|how|when|which|is|are|does|do|did|can|could|will|explain|tell me|any)\b"
 _EXPLAIN = r"^\s*(?:what (?:is|are|does)|explain|how (?:does|do)|define|what's the difference)\b"
+_QUESTION_ONLY = (r"^\s*(?:why\b|what (?:would|could|will) (?:invalidate|kill|break|stop)|"
+                  r"does (?:the )?(?:daily|weekly|4h|h4|1d|d1|w1|1w|htf|higher)\b.*\bagree|"
+                  r"is (?:this|that|it) (?:a )?(?:good|safe|valid|worth)|how far (?:is|are)|"
+                  r"(?:is|what(?:'?s| is)|how(?:'?s| is)) (?:the )?(?:rsi|macd|ema|vwap|bollinger|stoch|sar|cvd)\b)")
 _CHART_WORDS = (r"\b(?:chart|trend|price|level|zone|support|resistance|supply|demand|setup|entry|stop|target|rsi|macd|"
                 r"ema|vwap|candle|breakout|pattern|swing|fvg|order ?block|liquidity|this coin|here|kimi|funding|"
                 r"open interest|oi|long[ /-]?short|l/s|liquidat\w*|order ?book|walls?|cvd|order ?flow|positioning)\b")
@@ -659,11 +668,11 @@ def _scan_filter(p: str) -> str:
 
 
 def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases: set[str] | None = None,
-                chart_symbol: str | None = None) -> AnalysisIntent:
+                chart_symbol: str | None = None, listed: frozenset[str] | None = None) -> AnalysisIntent:
     """Keyword parser used when no LLM is available."""
     asked = prompt
     p = prompt.lower()
-    symbol = find_symbol(prompt, known_bases)
+    symbol = find_symbol(prompt, known_bases, listed)
     names_coin = symbol is not None
     if symbol == chart_symbol:
         symbol = None
@@ -674,7 +683,7 @@ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases
     if metric_alerts:
         for a, b in m_spans:
             p, prompt = p[:a] + " " * (b - a) + p[b:], prompt[:a] + " " * (b - a) + prompt[b:]
-        symbol = find_symbol(prompt, known_bases)
+        symbol = find_symbol(prompt, known_bases, listed)
         names_coin = symbol is not None
         if symbol == chart_symbol:
             symbol = None
@@ -821,6 +830,10 @@ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases
         or bool(re.search(_EXPLAIN, p)))
     # "What does Kimi say?" is read from Kimi's own facts: no detectors, and the chart stays as it is.
     asks_kimi = not feats and bool(re.search(r"\bkimi\b", p))
+    # A question about what is already in view ("what would invalidate this?", "does the daily agree?", "is RSI
+    # overbought here?") is answered from the facts: nothing is redrawn, so a plan on the chart stays there.
+    if not feats and not acting and not navigating and not general and not asks_kimi and re.search(_QUESTION_ONLY, p):
+        return AnalysisIntent(features=[], keep_existing=True, answer_hint=asked.strip()[:200])
     follow_up = previous is not None and not feats and not acting and not general and (
         timeframe is not None or symbol is not None
         or re.search(r"\b(same|again|that|it|this|now|instead|redo|refresh)\b", p))
@@ -868,6 +881,8 @@ class ChartContext:
     interval: str = ""
     watchlist: list[str] = field(default_factory=list)
     spot_only: bool = False
+    # Binance's live USDT pairs; None when only the built-in fallback list is at hand (too short to rule a coin out).
+    listed: frozenset[str] | None = None
 
 
 @dataclass
@@ -995,7 +1010,8 @@ class LLMClient:
                 log.warning("LLM intent parsing failed (%s: %s); using rule parser", type(exc).__name__, exc)
                 self._trip(exc)
         known = {w.removesuffix("USDT") for w in (chart.watchlist if chart else [])}
-        return rule_intent(prompt, previous, known, chart.symbol if chart else None), "rules"
+        return rule_intent(prompt, previous, known, chart.symbol if chart else None,
+                           chart.listed if chart else None), "rules"
 
     async def tool_turn(self, system: str, messages: list[dict], tools: list[dict], force: str | None = None) -> ToolTurn:
         """One model turn with tools. `messages` is provider-neutral:

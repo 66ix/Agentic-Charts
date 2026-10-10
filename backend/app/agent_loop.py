@@ -18,7 +18,8 @@ import httpx
 from pydantic import ValidationError
 
 from .llm import INTENT_SCHEMA, INTENT_SYSTEM, ChartContext, LLMClient
-from .schemas import ALL_FEATURES, INTERVALS, SCAN_FILTERS, AnalysisIntent, ChatTurn
+from .schemas import ALL_FEATURES, INTERVALS, SCAN_FILTERS, AnalysisIntent, ChatTurn, norm_symbol
+from .symbols import QUOTES, find_symbol
 
 log = logging.getLogger(__name__)
 
@@ -141,9 +142,26 @@ def _clip(obj: Any) -> str:
     return text if len(text) <= MAX_RESULT_CHARS else text[:MAX_RESULT_CHARS] + "…"
 
 
+def _pair(raw: Any, chart: ChartContext) -> tuple[str, str | None]:
+    """The coin a tool call names, as a Binance pair ('INJ', 'BTC/USDT', 'solana' → INJUSDT, BTCUSDT, SOLUSDT),
+    and an error instead when there is none to look up: looking up a bad pair would give demo candles or fail."""
+    text = str(raw or chart.symbol).strip()
+    parts = text.upper().split("/")
+    ratio = len(parts) == 2 and all(len(p) > 4 and p.endswith(QUOTES) for p in parts)  # ETHUSDT/BTCUSDT, not ETH/USDT
+    if ratio or text.upper().startswith("INDEX:"):
+        return text, f"{text} is built in the browser and can't be looked up; use a USDT pair like ETHUSDT"
+    sym = find_symbol(text) or norm_symbol(text)
+    if not sym.isalnum() or (chart.listed and sym.endswith("USDT") and sym not in chart.listed):
+        return sym, f"unknown symbol {text}; use a USDT pair like INJUSDT"
+    return sym, None
+
+
 async def _run_tool(box: Toolbox, name: str, args: dict, chart: ChartContext) -> tuple[Any, str]:
+    if name in ("look_at_chart", "read_kimi", "market_context"):
+        sym, error = _pair(args.get("symbol"), chart)
+        if error:
+            return {"error": error}, ""
     if name == "look_at_chart":
-        sym = str(args.get("symbol") or chart.symbol).upper()
         tf = args.get("timeframe") if args.get("timeframe") in INTERVALS else chart.interval
         feats = [f for f in args.get("features") or [] if f in ALL_FEATURES] or ["support_resistance"]
         return await box.look(sym, tf, feats), f"Looked at {sym} on {tf}"
@@ -158,11 +176,9 @@ async def _run_tool(box: Toolbox, name: str, args: dict, chart: ChartContext) ->
         res = await box.market_scan(tf, direction)
         return res, f"Scanned the top {res.get('coins', 0)} coins for {tf} setups"
     if name == "read_kimi" and box.kimi is not None:
-        sym = str(args.get("symbol") or chart.symbol).upper()
         tf = args.get("timeframe") if args.get("timeframe") in INTERVALS else chart.interval
         return await box.kimi(sym, tf), f"Read Kimi Cooked on {sym} {tf}"
     if name == "market_context":
-        sym = str(args.get("symbol") or chart.symbol).upper()
         return await box.context(sym), f"Checked futures data, order flow and upcoming events for {sym}"
     return {"error": f"unknown tool {name}"}, ""
 
@@ -192,7 +208,11 @@ async def plan_with_tools(llm: LLMClient, prompt: str, history: list[ChatTurn], 
                 return LoopResult(intent, f"{llm.provider}:{llm.model} (tools)", steps, research)
             for call in turn.calls:
                 calls_made += 1
-                result, step = await _run_tool(box, call.name, call.args, chart)
+                try:
+                    result, step = await _run_tool(box, call.name, call.args, chart)
+                except Exception as exc:  # one failed look (too few candles, Binance down) doesn't end the plan
+                    log.info("Planner tool %s failed: %s", call.name, exc)
+                    result, step = {"error": f"{call.name} failed: {exc}"}, ""
                 if step:
                     steps.append(step)
                     research.append({"tool": call.name, "args": call.args, "result": result})
