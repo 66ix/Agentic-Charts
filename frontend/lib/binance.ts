@@ -161,8 +161,44 @@ export interface WalletBalance {
 }
 
 /** GET /api/binance/positions: the user's own positions, and the bots' separately. */
+/** A Simple Earn holding (locked staking lives under Simple Earn Locked on Binance). */
+export interface EarnPosition {
+  product: "flexible" | "locked";
+  asset: string;
+  qty: number;
+  apr_pct: number | null;
+  /** Rewards so far (flexible: all paid; locked: accrued this term), in the asset. */
+  rewards: number | null;
+  /** Locked: when the coins come back (UNIX s). */
+  ends_at: number | null;
+  duration_days: number | null;
+  price: number | null;
+  value: number | null;
+}
+
+/** GET /api/binance/pnl-calendar: realized PnL per day in the user's time zone. */
+export interface PnlDay {
+  date: string;
+  pnl: number;
+  /** Fills that took profit or loss (spot sells, futures closes). */
+  closes: number;
+  wins: number;
+  losses: number;
+  symbols: { symbol: string; pnl: number }[];
+}
+
+export interface PnlCalendar {
+  days: PnlDay[];
+  total: number;
+  first_fill_at: number | null;
+  kind: FillKind | "all";
+  market: AccountMarket | "all";
+  notes: string[];
+  last_import: number | null;
+}
+
 export interface AccountPositions {
-  manual: { spot: SpotHolding[]; futures: FuturesPosition[]; cash: { asset: string; qty: number }[] };
+  manual: { spot: SpotHolding[]; futures: FuturesPosition[]; cash: { asset: string; qty: number }[]; earn?: EarnPosition[] };
   bots: {
     /** The "Trading Bots" wallet's total (Binance reports only the total, not the coins). */
     wallet: WalletBalance | null;
@@ -247,6 +283,12 @@ export async function classifyAccount(keys: string[], kind: FillKind | null, bot
   );
   journalChanged();
   return out;
+}
+
+export function fetchPnlCalendar(kind: FillKind | "all", market: AccountMarket | "", signal?: AbortSignal) {
+  const q = new URLSearchParams({ tz_offset: String(-new Date().getTimezoneOffset()), kind });
+  if (market) q.set("market", market);
+  return apiRequest<PnlCalendar>(`/api/binance/pnl-calendar?${q}`, { signal });
 }
 
 export function fetchAccountPositions(refresh = false, signal?: AbortSignal) {

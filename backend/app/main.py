@@ -1101,6 +1101,7 @@ async def backtest(req: BacktestRequest, request: Request) -> dict:
 #   GET    /api/binance/fills                ?symbol=&kind=manual|bot|unknown&market=spot|futures&limit=
 #   GET    /api/binance/trades               ?kind= → round trips rebuilt from the fills
 #   POST   /api/binance/classify             {keys, kind (null clears), bot_id?} → re-classify, journal re-synced
+#   GET    /api/binance/pnl-calendar         ?tz_offset=&kind=manual|bot|unknown|all&market= → realized PnL per day
 #   GET    /api/binance/positions            ?refresh= → own spot holdings + futures positions, bots' separately
 #   GET    /api/binance/gridbots/{id}/compare  a tracked grid bot's real fills next to the simulated ones
 
@@ -1168,6 +1169,14 @@ async def binance_fills(request: Request, symbol: str | None = Query(None),
 @app.get("/api/binance/trades")
 async def binance_trades(request: Request, kind: str | None = Query(None, pattern="^(manual|bot|unknown)$")) -> dict:
     return {"trades": [t.model_dump() for t in request.app.state.binance.trades(kind)]}
+
+
+@app.get("/api/binance/pnl-calendar")
+async def binance_pnl_calendar(request: Request, tz_offset: int = Query(0, ge=-840, le=840),
+                               kind: str = Query("manual", pattern="^(manual|bot|unknown|all)$"),
+                               market: str | None = Query(None, pattern="^(spot|futures)$")) -> dict:
+    """Realized PnL per day from the imported fills; tz_offset is minutes east of UTC (the browser's)."""
+    return request.app.state.binance.pnl_calendar(tz_offset, kind, market)
 
 
 @app.post("/api/binance/classify")

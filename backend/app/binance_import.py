@@ -413,6 +413,90 @@ def journal_entry(t: RoundTrip) -> NewJournalEntry:
                                quote_asset=t.quote_asset, notes=t.notes))
 
 
+# ------------------------------------------------------------ PnL calendar --
+
+USD_QUOTES = {"USDT", "USDC", "FDUSD", "TUSD", "BUSD", "DAI", "USDP"}
+
+
+def realized_events(fills: list[AccountFill]) -> tuple[list[dict], dict]:
+    """Realized PnL per closing fill, so a day counts the profit taken that day even when the position stays open.
+    Spot: each sell realizes (price − average cost) × qty − fees, with buys priced at their average cost; sells of
+    coins bought before the imported history are skipped. Futures: Binance's realizedPnl minus the commission of
+    every fill. → (events [{time, symbol, market, pnl, quote, closes}], counts of what was skipped)."""
+    events: list[dict] = []
+    skipped = {"no_cost": 0, "other_quote": 0}
+    groups: dict[tuple, list[AccountFill]] = {}
+    for f in fills:
+        groups.setdefault((f.market, f.symbol, f.position_side, f.kind, f.bot_id), []).append(f)
+    for (market, symbol, *_), rows in groups.items():
+        rows.sort(key=lambda f: (f.time_ms, f.trade_id))
+        quote = _quote_of(rows[0])
+        if quote not in USD_QUOTES:
+            skipped["other_quote"] += sum(1 for f in rows if f.side == "sell" or f.realized_pnl)
+            continue
+        qty = cost = 0.0
+        for f in rows:
+            fee_q, fee_base, _ = _fee(f)
+            if market == "futures":
+                pnl = (f.realized_pnl or 0.0) - fee_q
+                if f.realized_pnl or fee_q:
+                    events.append({"time": f.time, "symbol": symbol, "market": market, "pnl": pnl, "quote": quote,
+                                   "closes": 1 if f.realized_pnl else 0, "kind": f.kind})
+                continue
+            if f.side == "buy":
+                qty += f.qty - fee_base
+                cost += f.qty * f.price + fee_q
+                continue
+            if qty <= 1e-12:
+                skipped["no_cost"] += 1
+                continue
+            sold = min(f.qty, qty)
+            basis = cost / qty * sold
+            pnl = sold * f.price - basis - fee_q * (sold / f.qty if f.qty else 1.0)
+            cost -= basis
+            qty -= sold
+            if f.qty - sold > 1e-12 * max(f.qty, 1.0):
+                skipped["no_cost"] += 1
+            events.append({"time": f.time, "symbol": symbol, "market": market, "pnl": pnl, "quote": quote,
+                           "closes": 1, "kind": f.kind})
+    return events, skipped
+
+
+def pnl_calendar(fills: list[AccountFill], tz_offset_min: int = 0, kind: Optional[str] = "manual",
+                 market: Optional[str] = None) -> dict:
+    """Daily realized PnL in USD (stablecoin-quoted pairs) for a calendar, days in the user's time zone
+    (`tz_offset_min` east of UTC). `kind` None or "all" counts every fill; `market` None counts spot and futures."""
+    rows = [f for f in fills if (kind in (None, "all") or f.kind == kind) and (not market or f.market == market)]
+    events, skipped = realized_events(rows)
+    days: dict[str, dict] = {}
+    for e in events:
+        d = time.strftime("%Y-%m-%d", time.gmtime(e["time"] + tz_offset_min * 60))
+        day = days.setdefault(d, {"date": d, "pnl": 0.0, "closes": 0, "wins": 0, "losses": 0, "symbols": {}})
+        day["pnl"] += e["pnl"]
+        day["closes"] += e["closes"]
+        if e["closes"]:
+            day["wins" if e["pnl"] > 0 else "losses"] += 1
+        day["symbols"][e["symbol"]] = day["symbols"].get(e["symbol"], 0.0) + e["pnl"]
+    out_days = []
+    for d in sorted(days.values(), key=lambda x: x["date"]):
+        syms = sorted(d.pop("symbols").items(), key=lambda kv: -abs(kv[1]))
+        out_days.append({**d, "pnl": round(d["pnl"], 2),
+                         "symbols": [{"symbol": s, "pnl": round(v, 2)} for s, v in syms[:5]]})
+    notes = []
+    if skipped["no_cost"]:
+        notes.append(f"{skipped['no_cost']} sell{'s' if skipped['no_cost'] != 1 else ''} of coins bought before the "
+                     "imported history left out (no known cost).")
+    if skipped["other_quote"]:
+        notes.append(f"{skipped['other_quote']} fill{'s' if skipped['other_quote'] != 1 else ''} on pairs not quoted "
+                     "in a stablecoin left out.")
+    if any(f.commission and f.commission_asset.upper() not in USD_QUOTES and f.commission_asset.upper() not in
+           f.symbol for f in rows):
+        notes.append("Fees paid in BNB are not taken off.")
+    first = min((f.time for f in rows), default=None)
+    return {"days": out_days, "total": round(sum(d["pnl"] for d in out_days), 2), "first_fill_at": first,
+            "kind": kind or "all", "market": market or "all", "tz_offset_min": tz_offset_min, "notes": notes}
+
+
 # -------------------------------------------------------------- positions --
 
 
@@ -513,6 +597,12 @@ class BinanceImportService:
                 and (not market or f.market == market)]
         rows.sort(key=lambda f: (-f.time_ms, f.key))
         return rows[:limit]
+
+    def pnl_calendar(self, tz_offset_min: int = 0, kind: Optional[str] = "manual",
+                     market: Optional[str] = None) -> dict:
+        out = pnl_calendar(list(self._fills.values()), tz_offset_min, kind, market)
+        out["last_import"] = self.last.get("at") if isinstance(self.last, dict) else None
+        return out
 
     def trades(self, kind: Optional[str] = None) -> list[RoundTrip]:
         return [t for t in build_round_trips(list(self._fills.values())) if not kind or t.kind == kind]
@@ -697,9 +787,15 @@ class BinanceImportService:
                 futures = await self.account.futures_positions()
             except (BinanceApiError, httpx.HTTPError) as exc:
                 notes.append(f"USD-M futures unavailable: {exc}")
+        earn: list[dict] = []
+        try:
+            earn = await self.account.earn_positions()
+        except (BinanceApiError, httpx.HTTPError) as exc:
+            notes.append(f"Earn balances unavailable: {exc}")
         fills = list(self._fills.values())
         coins = [a for a in balances if a not in STABLES]
-        prices = await self._prices([f"{a}USDT" for a in coins] + [p["symbol"] for p in futures])
+        earn_coins = [e["asset"] for e in earn if e["asset"] not in STABLES]
+        prices = await self._prices([f"{a}USDT" for a in coins + earn_coins] + [p["symbol"] for p in futures])
 
         manual_spot, bot_spot, cash = [], [], []
         for asset, qty in sorted(balances.items()):
@@ -756,6 +852,12 @@ class BinanceImportService:
                    "reason": reason}
             (bot_fut if kind == "bot" else manual_fut).append(row)
 
+        for e in earn:
+            price = 1.0 if e["asset"] in STABLES else prices.get(f"{e['asset']}USDT")
+            e["price"] = price
+            e["value"] = round(e["qty"] * price, 2) if price else None
+        earn.sort(key=lambda e: -(e["value"] or 0))
+
         tracked_bots = []
         for b in self.gridbots.list():
             try:
@@ -766,7 +868,7 @@ class BinanceImportService:
                                  "base_held": r.base_held if r else None, "quote_held": r.quote_held if r else None,
                                  "value": r.current_value if r else None, "simulated": True})
         bot_wallet = next((w for w in wallets if w["wallet"].lower().replace(" ", "") == "tradingbots"), None)
-        out = {"manual": {"spot": manual_spot, "futures": manual_fut, "cash": cash},
+        out = {"manual": {"spot": manual_spot, "futures": manual_fut, "cash": cash, "earn": earn},
                "bots": {"wallet": bot_wallet, "spot": bot_spot, "futures": bot_fut, "tracked": tracked_bots},
                "wallets": wallets, "notes": notes, "updated_at": int(time.time())}
         self._positions = (time.monotonic(), out)

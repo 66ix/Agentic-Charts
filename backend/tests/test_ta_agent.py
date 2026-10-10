@@ -159,3 +159,29 @@ def test_indicator_snapshot_uses_the_charts_lengths():
     mid, sd = df["close"].tail(10).mean(), df["close"].tail(10).std(ddof=0)
     assert snap["bollinger"]["upper"] == pytest.approx(mid + 3 * sd, rel=1e-5)
     assert snap["lengths"]["ema_fast"] == 9
+
+
+def test_template_answer_reads_like_a_person_and_answers_a_typed_price():
+    from app.ta_agent import describe, price_check, prices_in_prompt
+    facts = {"timeframe": "H4", "last_price": 7.0, "trend": "down", "atr": 0.25, "atr_pct": 3.57,
+             "resistance": [{"low": 7.11, "high": 7.19, "touches": 2, "distance_atr": 0.44, "inside": False,
+                             "htf_confluence": ["D1"], "held": 2, "tests_resolved": 2},
+                            {"low": 7.35, "high": 7.56, "touches": 1, "distance_atr": 1.4, "inside": False}],
+             "support": [{"low": 6.67, "high": 6.75, "touches": 1, "distance_atr": 1.0, "inside": False,
+                          "held": 0, "tests_resolved": 1}],
+             "last_structure_break": {"type": "CHoCH", "direction": "bearish", "level": 7.131, "bars_ago": 6},
+             "momentum": {"rsi": 38.4, "divergence": "hidden bearish (7.1770 → 7.1440)"},
+             "derivatives": {"funding_rate_pct": 0.0058, "oi_change_24h_pct": -9.35}}
+    text = describe(facts, "INJUSDT")
+    assert text.startswith("INJ is trending down on the 4-hour and trading at 7.0000.")
+    assert "lines up with the daily" in text and "held all two times" in text and "gave way" in text
+    assert "ATR" not in text and "funding" not in text  # no stat readouts nobody asked for
+    assert "hidden bearish divergence" in text and "Sellers broke structure through 7.1310 six candles ago" in text
+
+    assert prices_in_prompt("what's at 7.15 on the 4h, up 30%?", 7.0) == [7.15]
+    (chk,) = price_check("What's at 7.15? What happens if it breaks?", facts)
+    assert chk["side"] == "above" and chk["zone"]["kind"] == "resistance" and chk["relation"] == "inside"
+    assert chk["next_if_broken"] == {"kind": "resistance", "low": 7.35, "high": 7.56}
+    text = describe({**facts, "price_check": [chk]}, "INJUSDT")
+    assert "7.1500 is inside the resistance zone at 7.1100–7.1900" in text and "next resistance up is 7.3500" in text
+    assert price_check("anything at 99?", facts) == []  # far from the price: not a price question

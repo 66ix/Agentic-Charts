@@ -31,12 +31,13 @@ import {
   type ImportStatus,
   type SpotHolding,
 } from "@/lib/binance";
+import PnlCalendarView from "@/components/PnlCalendar";
 import { displaySymbol, formatPrice } from "@/lib/format";
 import { fetchGridBots, type GridBot } from "@/lib/gridbot";
 
 const STATUS_MS = 60_000;
 
-type Tab = "setup" | "positions" | "fills";
+type Tab = "setup" | "positions" | "pnl" | "fills";
 
 const KIND_LABEL: Record<FillKind, string> = { manual: "Mine", bot: "Bot", unknown: "Unknown" };
 const KIND_CLASS: Record<FillKind, string> = {
@@ -489,6 +490,23 @@ function PositionsView({ bots, enabled }: { bots: GridBot[]; enabled: boolean })
               </div>
             )}
           </Section>
+          <Section
+            title="Earn and staking"
+            right={m.earn?.length ? <span className="font-mono text-[11px] text-ink">{money(m.earn.reduce((t, e) => t + (e.value ?? 0), 0))} USD</span> : undefined}
+          >
+            {!m.earn?.length && <p className="text-[11px] text-mute">Nothing in Simple Earn. ETH and SOL staking show up above as WBETH and BNSOL.</p>}
+            {m.earn?.map((e) => (
+              <div key={`${e.product}-${e.asset}-${e.ends_at ?? ""}`} className="flex items-baseline gap-2 font-mono text-[11px]">
+                <span className="w-12 text-ink">{e.asset}</span>
+                <span className="text-ink">{qty(e.qty)}</span>
+                <span className="rounded border border-line px-1 font-sans text-[10px] text-mute">{e.product === "locked" ? `Locked${e.duration_days ? ` ${e.duration_days}d` : ""}` : "Flexible"}</span>
+                {e.apr_pct != null && <span className="text-up">{e.apr_pct}% APR</span>}
+                <span className="flex-1" />
+                <span className="font-sans text-[10px] text-mute">{e.ends_at ? `unlocks ${new Date(e.ends_at * 1000).toLocaleDateString([], { month: "short", day: "numeric" })}` : ""}</span>
+                <span className="text-ink">{e.value != null ? money(e.value) : "–"}</span>
+              </div>
+            ))}
+          </Section>
           <Section title="Your USD-M futures positions">
             {m.futures.length === 0 && <p className="text-[11px] text-mute">No open positions.</p>}
             {m.futures.map((p) => (
@@ -809,14 +827,14 @@ export default function AccountPanel() {
   return (
     <div className="flex h-full min-h-0 flex-col text-xs">
       <div className="flex items-center gap-1 border-b border-line px-2 py-1.5">
-        {(["setup", "positions", "fills"] as const).map((t) => (
+        {(["setup", "positions", "pnl", "fills"] as const).map((t) => (
           <button
             key={t}
             type="button"
             onClick={() => setTab(t)}
             className={clsx("rounded px-2 py-1 text-[11px] font-medium", tab === t ? "bg-panel2 text-ink" : "text-mute hover:text-ink")}
           >
-            {t === "setup" ? "Setup" : t === "positions" ? "Positions" : `Fills${status ? ` · ${status.fills}` : ""}`}
+            {t === "setup" ? "Setup" : t === "positions" ? "Positions" : t === "pnl" ? "PnL calendar" : `Fills${status ? ` · ${status.fills}` : ""}`}
           </button>
         ))}
       </div>
@@ -835,6 +853,7 @@ export default function AccountPanel() {
           </div>
         )}
         {tab === "positions" && <PositionsView bots={bots} enabled={enabled} />}
+        {tab === "pnl" && <PnlCalendarView enabled={enabled} version={version} />}
         {tab === "fills" && <FillsView bots={bots} enabled={enabled} version={version} />}
       </div>
     </div>

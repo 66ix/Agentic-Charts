@@ -27,6 +27,7 @@ time, open, high, low, close, volume (oldest → newest).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Iterable, Literal
 
@@ -905,6 +906,9 @@ def _position_lines(position: dict | None, holdings: dict | None) -> list[str]:
     if position:
         if position.get("spot"):
             lines.append(f"You hold {_spot_text(position['spot'])}.")
+        for e in position.get("in_earn", []):
+            apr = f" at {e['apr_pct']}% APR" if e.get("apr_pct") is not None else ""
+            lines.append(f"You also have {e['qty']:g} in {e['product']} Earn{apr}.")
         for p in position.get("futures", []):
             line = f"Your futures {p['side']}: {p['qty']:g} at {_fmt(p['entry_price'])}"
             line += f", {p['leverage']}x" if p.get("leverage") else ""
@@ -916,78 +920,262 @@ def _position_lines(position: dict | None, holdings: dict | None) -> list[str]:
         lines.append(f"Your holdings: ${holdings['spot_value_usd']:,.0f} in {len(spot)} coins"
                      + (f" plus ${holdings['stablecoins_usd']:,.0f} in stablecoins" if holdings.get("stablecoins_usd")
                         else "") + (": " + "; ".join(_spot_text(r) for r in spot[:8]) if spot else "") + ".")
+        if holdings.get("earn"):
+            lines.append(f"In Simple Earn: ${holdings['earn_value_usd']:,.0f}, " + "; ".join(
+                f"{e['qty']:g} {e['asset']} {e['product']}" + (f" at {e['apr_pct']}% APR" if e.get("apr_pct") is not None
+                                                               else "") for e in holdings["earn"][:6]) + ".")
         for p in holdings.get("futures", []):
             lines.append(f"Futures {p['symbol']} {p['side']} {p['qty']:g} at {_fmt(p['entry_price'])}"
                          + (f", PnL {p['unrealized_pnl']:+,.2f}" if p.get("unrealized_pnl") is not None else "") + ".")
     return lines
 
 
+TF_WORDS = {"M1": "1-minute", "M5": "5-minute", "M15": "15-minute", "M30": "30-minute", "H1": "1-hour",
+            "H3": "3-hour", "H4": "4-hour", "D1": "daily", "W1": "weekly", "MN": "monthly"}
+TREND_WORDS = {"up": "trending up", "down": "trending down"}
+NUMBER_WORDS = ("no", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten")
+
+
+def _coin(symbol: str) -> str:
+    for q in ("USDT", "USDC", "FDUSD", "BUSD", "BTC", "ETH"):
+        if symbol.endswith(q) and len(symbol) > len(q):
+            return symbol[: -len(q)]
+    return symbol
+
+
+def _n(n: int) -> str:
+    return NUMBER_WORDS[n] if 0 <= n < len(NUMBER_WORDS) else str(n)
+
+
+def _tf_word(tf: str) -> str:
+    return TF_WORDS.get(tf, tf)
+
+
+def _tf_list(tfs: list[str]) -> str:
+    words = [_tf_word(t) for t in tfs]
+    return words[0] if len(words) == 1 else ", ".join(words[:-1]) + " and " + words[-1]
+
+
+def _pct_away(z: dict, last: float) -> float:
+    edge = z["low"] if z["low"] > last else z["high"]
+    return abs(edge - last) / last * 100 if last else 0.0
+
+
+def _distance_words(z: dict, last: float, side: str) -> str:
+    """'and price is trading inside it' / 'just above price' / 'about 2.1% below price'."""
+    if z.get("inside"):
+        return "and price is trading inside it right now"
+    atr_away = z.get("distance_atr")
+    if atr_away is not None and atr_away < 0.5:
+        return f"just {side} price"
+    return f"about {_pct_away(z, last):.1f}% {side} price"
+
+
+def _record_words(z: dict) -> str:
+    """How the zone held up when it was tested, in words; empty when it hasn't been tested yet."""
+    t, h = z.get("tests_resolved") or 0, z.get("held") or 0
+    if not t:
+        return ""
+    num = (lambda n: str(n)) if t > 10 else _n
+    if h == t:
+        return "it held the only time it was tested" if t == 1 else f"it held all {num(t)} times it was tested"
+    if h == 0:
+        return "it gave way the last time it was tested" if t == 1 else f"it gave way all {num(t)} times it was tested"
+    return f"it held {num(h)} of the {num(t)} times it was tested"
+
+
+def _zone_sentence(opening: str, kind: str, z: dict, last: float, side: str) -> str:
+    """'Overhead, resistance sits at 7.11–7.19, just above price, and it lines up with the daily. It held all two
+    times it was tested.'"""
+    s = f"{opening}{kind} sits at {_fmt(z['low'])}–{_fmt(z['high'])}, {_distance_words(z, last, side)}"
+    if z.get("htf_confluence"):
+        s += f", and it lines up with the {_tf_list(z['htf_confluence'])}"
+    s += "."
+    rec = _record_words(z)
+    return s + (f" {rec[0].upper()}{rec[1:]}." if rec else "")
+
+
+def _overlaps(a: dict, b: dict) -> bool:
+    return a["low"] <= b["high"] and b["low"] <= a["high"]
+
+
+def _bars_ago(n: int) -> str:
+    return "on the last candle" if n <= 1 else f"{_n(n) if n <= 10 else n} candles ago"
+
+
+def _price_check_lines(checks: list[dict], tf: str) -> list[str]:
+    """Answers 'what's at 7.15?': which zone the price is in or near, how it has behaved, what's next if it breaks."""
+    out = []
+    for c in checks:
+        p = _fmt(c["price"])
+        z = c.get("zone")
+        if not z:
+            s = f"Nothing I detected on the {_tf_word(tf)} sits at {p}, so on its own it isn't a level."
+            if c.get("closest"):
+                n = c["closest"]
+                s += f" The closest level is {n['kind']} at {_fmt(n['low'])}–{_fmt(n['high'])}."
+            out.append(s)
+            continue
+        where = "inside" if c["relation"] == "inside" else f"right by ({c['relation']})"
+        role = "resistance" if c["side"] == "above" else "support"
+        s = (f"{p} is {where} the {z['kind']} zone at {_fmt(z['low'])}–{_fmt(z['high'])}, "
+             f"{c['pct_from_price']:.1f}% {c['side']} the current price, so it acts as {role} for now.")
+        rec = _record_words(z)
+        if rec:
+            s += f" {rec[0].upper()}{rec[1:]}."
+        nxt = c.get("next_if_broken")
+        if nxt:
+            s += (f" If it breaks, the next {nxt['kind']} {'up' if c['side'] == 'above' else 'down'} is "
+                  f"{_fmt(nxt['low'])}–{_fmt(nxt['high'])}.")
+        elif c.get("next_if_broken") is None and c["side"] in ("above", "below"):
+            s += f" If it breaks there is no other detected level {'above' if c['side'] == 'above' else 'below'} it."
+        out.append(s)
+    return out
+
+
+def _takeaway(facts: dict, res: dict | None, sup: dict | None) -> str | None:
+    """One sentence on what the picture means: what to watch at the nearest zone, or where the cleaner entry is."""
+    trend = facts["trend"]
+    if res and (res.get("inside") or (res.get("distance_atr") or 9) < 0.5):
+        return (f"It's pressing into resistance, so a close above {_fmt(res['high'])} would be the sign buyers are "
+                f"taking over, while a rejection there keeps sellers in control.")
+    if sup and (sup.get("inside") or (sup.get("distance_atr") or 9) < 0.5):
+        return (f"It's sitting right on support, so the question is whether {_fmt(sup['low'])} holds; a close below "
+                f"it opens the way lower.")
+    if trend == "down" and sup:
+        return (f"With the trend down, the better buy is a reaction at support around {_fmt(sup['low'])}–"
+                f"{_fmt(sup['high'])} rather than chasing here.")
+    if trend == "up" and sup:
+        return (f"With the trend up, a pullback that holds support around {_fmt(sup['low'])}–{_fmt(sup['high'])} "
+                f"would be a cleaner entry than buying up here.")
+    return None
+
+
+PRICE_IN_PROMPT = re.compile(r"(?<![\w.])(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+\.\d+|\d+)(?![\w%.])")
+ZONE_KEYS = ("resistance", "support", "supply", "demand")
+
+
+def prices_in_prompt(prompt: str, last: float) -> list[float]:
+    """Prices the user typed ('what's at 7.1561?'): numbers within half and double the last price, at most two.
+    Timeframes ('4h'), percentages and counts far from the price are left out."""
+    out: list[float] = []
+    for m in PRICE_IN_PROMPT.finditer(prompt or ""):
+        try:
+            v = float(m.group(1).replace(",", ""))
+        except ValueError:
+            continue
+        if last and 0.5 * last <= v <= 2 * last and v not in out:
+            out.append(v)
+    return out[:2]
+
+
+def price_check(prompt: str, facts: dict) -> list[dict]:
+    """For each price in the prompt: the detected zone it sits in (or the nearest one within an ATR), which side of
+    the current price it is on, how that zone held up and the next zone beyond it if it breaks."""
+    last, atr_v = facts.get("last_price"), facts.get("atr")
+    if not last or not atr_v:
+        return []
+    zones = [{**z, "kind": k} for k in ZONE_KEYS for z in facts.get(k) or []]
+    out = []
+    for p in prices_in_prompt(prompt, last):
+        side = "above" if p > last else "below"
+        row: dict = {"price": p, "side": side, "pct_from_price": round(abs(p - last) / last * 100, 2) if last else 0.0}
+        inside = [z for z in zones if z["low"] <= p <= z["high"]]
+        near = sorted(zones, key=lambda z: min(abs(z["low"] - p), abs(z["high"] - p)))
+        z = inside[0] if inside else (near[0] if near and min(abs(near[0]["low"] - p), abs(near[0]["high"] - p))
+                                      <= atr_v else None)
+        if z is None:
+            row["zone"] = None
+            row["closest"] = {k: near[0][k] for k in ("kind", "low", "high")} if near else None
+            out.append(row)
+            continue
+        row["relation"] = "inside" if inside else ("above it" if p > z["high"] else "below it")
+        row["zone"] = {k: z[k] for k in ("kind", "low", "high", "held", "tests_resolved", "htf_confluence")
+                       if k in z}
+        beyond = [o for o in zones if (o["low"] > z["high"] if side == "above" else o["high"] < z["low"])]
+        beyond.sort(key=lambda o: o["low"] if side == "above" else -o["high"])
+        row["next_if_broken"] = {k: beyond[0][k] for k in ("kind", "low", "high")} if beyond else None
+        out.append(row)
+    return out
+
+
 def describe(facts: dict, symbol: str) -> str:
-    """Plain-English summary of the analysis, used when no LLM is configured."""
+    """The answer in plain, conversational English, used when no LLM is configured (or it fails). It leads with
+    the question about a price when there is one, then what matters for a decision: the trend, the nearest zones
+    and how they held up, the last structure break and divergence. Everything else is drawn on the chart and
+    left out unless the user asked for it."""
     tf = facts["timeframe"]
     last = facts["last_price"]
-    lines = [f"{symbol} on {tf}: last {_fmt(last)}, trend {facts['trend']} "
-             f"(ATR {_fmt(facts['atr'], last)}, {facts['atr'] / last * 100:.2f}% of price)."]
+    coin = _coin(symbol)
+    trend = TREND_WORDS.get(facts["trend"], "moving sideways")
+    lines = []
+    if facts.get("price_check"):
+        lines.append(f"{coin} is at {_fmt(last)} on the {_tf_word(tf)}.")
+        lines += _price_check_lines(facts["price_check"], tf)
+    else:
+        lines.append(f"{coin} is {trend} on the {_tf_word(tf)} and trading at {_fmt(last)}.")
     lines += facts.get("navigation", [])
-    if facts.get("resistance"):
-        z = facts["resistance"][0]
-        lines.append(f"Nearest {tf} resistance {_fmt(z['low'])}–{_fmt(z['high'])} ({_touches(z['touches'])}"
-                     f"{_held(z)}{_where(z)}{_htf(z)}).")
-    if facts.get("support"):
-        z = facts["support"][0]
-        lines.append(f"Nearest {tf} support {_fmt(z['low'])}–{_fmt(z['high'])} ({_touches(z['touches'])}"
-                     f"{_held(z)}{_where(z)}{_htf(z)}).")
+    res, sup = (facts.get("resistance") or [None])[0], (facts.get("support") or [None])[0]
+    checked = [c["zone"] for c in facts.get("price_check", []) if c.get("zone")]
+    if res and not any(_overlaps(res, c) for c in checked):
+        lines.append(_zone_sentence("Overhead, ", "resistance", res, last, "above"))
+    if sup and not any(_overlaps(sup, c) for c in checked):
+        lines.append(_zone_sentence("Below, " if res else "", "support", sup, last, "below").replace(
+            "support sits", "support sits" if res else "Support sits"))
     if "supply" in facts and not facts["supply"]:
-        lines.append(f"No unmitigated {tf} supply zone above price right now.")
+        lines.append(f"There's no unmitigated {_tf_word(tf)} supply above price right now.")
     if "demand" in facts and not facts["demand"]:
-        lines.append(f"No unmitigated {tf} demand zone below price right now.")
-    for key in ("supply", "demand"):
+        lines.append(f"There's no unmitigated {_tf_word(tf)} demand below price right now.")
+    extra = 0
+    for key, side in (("supply", "above"), ("demand", "below")):
         if facts.get(key):
             z = facts[key][0]
-            tested = " (untested" if z["tests"] == 0 else f" (tested {z['tests']}x"
-            lines.append(f"Unmitigated {key} {_fmt(z['low'])}–{_fmt(z['high'])}{tested}{_held(z)}{_where(z)}"
-                         f"{_htf(z)}).")
-    for w in facts.get("windows", []):
-        lines.append(f"{w['tf']} window: high {_fmt(w['high'])}, low {_fmt(w['low'])}.")
+            if any(_overlaps(z, o) for o in [r for r in (res, sup) if r] + checked):
+                continue
+            fresh = "fresh " if z["tests"] == 0 else ""
+            extra += 1
+            s = f"{'There is also' if extra == 1 else 'And there is'} {fresh}{key} at {_fmt(z['low'])}–{_fmt(z['high'])}, {_distance_words(z, last, side)}"
+            if z.get("htf_confluence"):
+                s += f", lining up with the {_tf_list(z['htf_confluence'])}"
+            lines.append(s + ".")
+    if not (res or sup or facts.get("supply") or facts.get("demand")):
+        for w in facts.get("windows", []):
+            lines.append(f"The {_tf_word(w['tf'])} window runs from {_fmt(w['low'])} to {_fmt(w['high'])}.")
     if facts.get("structure"):
         lines.append("Recent structure: " + " → ".join(facts["structure"]) + ".")
     br = facts.get("last_structure_break")
     if br and (facts.get("structure") is not None or br["bars_ago"] <= 20):
-        lines.append(f"Last break: {br['direction']} {br['type']} through {_fmt(br['level'])}, "
-                     f"{br['bars_ago']} bars ago.")
+        who = "Sellers" if br["direction"] == "bearish" else "Buyers"
+        lines.append(f"{who} broke structure through {_fmt(br['level'])} {_bars_ago(br['bars_ago'])} "
+                     f"(a {br['direction']} {br['type']}).")
     mom = facts.get("momentum") or {}
     if mom.get("divergence"):
-        lines.append(f"RSI {mom.get('rsi')} with {mom['divergence']} divergence.")
+        lines.append(f"RSI is at {mom.get('rsi')} with a {re.sub(r' [(].*', '', mom['divergence'])} divergence.")
     elif mom.get("rsi") is not None and (mom["rsi"] >= 70 or mom["rsi"] <= 30):
-        lines.append(f"RSI {mom['rsi']} ({'overbought' if mom['rsi'] >= 70 else 'oversold'}).")
+        lines.append(f"RSI is {'overbought' if mom['rsi'] >= 70 else 'oversold'} at {mom['rsi']}.")
+    if not facts.get("price_check") and (take := _takeaway(facts, res, sup)):
+        lines.append(take)
     for sw in facts.get("sweeps", [])[:2]:
-        lines.append(f"{sw['direction'].title()} sweep of {_fmt(sw['level'])} {sw['bars_ago']} bars ago.")
+        lines.append(f"Price swept the {sw['direction']} side at {_fmt(sw['level'])} {_bars_ago(sw['bars_ago'])}.")
     if "sweeps" in facts and not facts["sweeps"]:
-        lines.append("No liquidity sweeps in the last 30 bars.")
+        lines.append("No liquidity sweeps in the last 30 candles.")
     for g in facts.get("fvg", [])[:2]:
-        lines.append(f"Unfilled {g['direction']} FVG {_fmt(g['low'])}–{_fmt(g['high'])}.")
+        lines.append(f"There's an unfilled {g['direction']} fair value gap at {_fmt(g['low'])}–{_fmt(g['high'])}.")
     for o in facts.get("order_blocks", [])[:2]:
-        lines.append(f"{o['direction'].title()} order block {_fmt(o['low'])}–{_fmt(o['high'])}.")
+        lines.append(f"There's a {o['direction']} order block at {_fmt(o['low'])}–{_fmt(o['high'])}.")
     if facts.get("patterns"):
         lines.append("Patterns: " + "; ".join(facts["patterns"]) + ".")
     elif "patterns" in facts:
         lines.append("No range, triangle, wedge or double top/bottom right now.")
     if facts.get("volume_profile"):
         vp = facts["volume_profile"]
-        lines.append(f"Volume profile: POC {_fmt(vp['poc'])}, value area {_fmt(vp['val'])}–{_fmt(vp['vah'])}.")
-    if facts.get("derivatives") and not facts.get("futures_context"):
-        d = facts["derivatives"]
-        bits = []
-        if d.get("funding_rate_pct") is not None:
-            bits.append(f"funding {d['funding_rate_pct']}%")
-        if d.get("oi_change_24h_pct") is not None:
-            bits.append(f"open interest {d['oi_change_24h_pct']:+}% in 24h")
-        if bits:
-            lines.append("Futures: " + ", ".join(bits) + ".")
+        lines.append(f"Most volume traded around {_fmt(vp['poc'])}, with the value area from {_fmt(vp['val'])} to "
+                     f"{_fmt(vp['vah'])}.")
+    # Funding and open interest only when asked (futures_context); spot traders don't need them on every answer.
     if facts.get("futures_context"):
         lines += _futures_lines(facts["futures_context"])
-    if facts.get("session_levels"):
-        lines += level_lines(facts["session_levels"])
+    if (facts.get("session_levels") or {}).get("at"):
+        lines += level_lines({"at": facts["session_levels"]["at"]})
     if facts.get("upcoming_events"):
         ev = facts["upcoming_events"]
         lines.append("Coming up: " + "; ".join(f"{e['country']} {e['title']} in {e['in_hours']:.0f}h" for e in ev[:3])
@@ -999,8 +1187,8 @@ def describe(facts: dict, symbol: str) -> str:
     if facts.get("plan"):
         p = facts["plan"]
         tgts = ", ".join(f"{_fmt(t['price'])} ({t['rr']}R)" for t in p["targets"])
-        lines.append(f"{p['direction'].title()} plan from {p['basis']}: entry {_fmt(p['entry'])}, "
-                     f"stop {_fmt(p['stop'])}, targets {tgts}.")
+        lines.append(f"The {p['direction']} plan comes from {p['basis']}: enter around {_fmt(p['entry'])}, stop at "
+                     f"{_fmt(p['stop'])}, and take profit at {tgts}.")
         lines += p.get("notes", [])
         if (p.get("track_record") or {}).get("summary"):
             lines.append(f"Track record: {p['track_record']['summary']}.")
@@ -1029,8 +1217,8 @@ def describe(facts: dict, symbol: str) -> str:
         lines += _kimi_lines(facts["kimi"])
     if (facts.get("volume") or {}).get("unusual"):
         v = facts["volume"]
-        lines.append(f"Unusual volume: the last bar is {v['last_vs_avg']}x its average, the last 5 bars "
-                     f"{v['recent_vs_avg']}x.")
+        lines.append(f"Volume is unusually heavy: the last candle traded {v['last_vs_avg']}x its average and the "
+                     f"last five {v['recent_vs_avg']}x.")
     if facts.get("your_note_on_this_coin"):
         lines.append(f"Your note on this coin: {facts['your_note_on_this_coin']}")
     lines += _position_lines(facts.get("your_position"), facts.get("your_holdings"))

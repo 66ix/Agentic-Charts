@@ -382,6 +382,11 @@ through an API key that can only read (`binance_account.py`, `binance_import.py`
   Account tab; overrides are saved on the server and the journal follows.
 - **Positions:** your spot holdings with the average entry from your own buys, your USD-M positions, and the bots
   apart: the Trading Bots wallet's total, holdings you marked as a bot's, and the tracked bots' simulated holdings.
+  Coins in Simple Earn (Flexible and Locked, which is where Binance keeps locked staking now) are listed with their
+  APR and unlock date; ETH and SOL staking appear in the spot wallet as WBETH and BNSOL.
+- **PnL calendar:** realized PnL per day from the imported fills, in your time zone, as a month calendar (yours,
+  the bots' or both; spot, futures or both). A spot sell counts on its day at the average cost of the coins sold,
+  so trimming a position shows up without closing it.
 
 What is documented and what is inferred: Binance documents the per-wallet balances
 (`GET /sapi/v1/asset/wallet/balance`, which lists a "Trading Bots" wallet with its total value only) and the
@@ -485,7 +490,9 @@ Overlay types: `box`, `horizontal_line`, `trendline`, `marker` (see `backend/app
 - **Supply/demand zones:** a base of up to 3 small-bodied candles followed by an impulse ≥ 1.6 ATR. Zones a later candle has closed through are discarded; untested ones are marked "fresh".
 - **Window highs/lows:** the high and low of the last completed H4 / D1 (or requested) candle, drawn as rays from that candle.
 - **Trendlines:** through the two latest swing highs (if falling) and swing lows (if rising), extended right.
-- **Higher-timeframe confluence:** S/R and supply/demand zones are also detected on the next two timeframes up (H4 → D1, W1). A zone overlapping one of them scores higher and is labelled, e.g. "H4 Demand + D1/W1".
+- **Higher-timeframe confluence:** S/R and supply/demand zones are also detected on the next two timeframes up (H4 → D1, W1). A zone overlapping one of them scores higher and is labelled, e.g. "H4 Demand + D1/W1". Zones the agent drew on higher timeframes stay visible on the lower ones,
+  one per area: where daily, 4H and 1H boxes overlap, only the strongest (strength, how often it held, timeframes
+  agreeing) is shown.
 - **Liquidity sweeps:** a wick through a swing high/low that closes back inside (`patterns.py`).
 - **Fair value gaps:** three-candle gaps that price has not filled yet. **Order blocks:** the last opposite candle before an impulse that broke structure, while unmitigated.
 - **Patterns:** ranges (a flat box that held for 30+ bars), triangles and wedges (lines fitted through swings), double tops/bottoms with their neckline.

@@ -132,22 +132,70 @@ const HTF_KINDS = /^(support|resistance|supply|demand|window_high|window_low)$/;
  * The agent's zones and window levels saved on the timeframes above `interval` for this coin, to show on this one:
  * what the agent drew on the daily stays visible on the 4H and below. Each gets its timeframe in front of its label
  * (unless the label already starts with it) and starts at the chart's left edge, since its first touch can be older
- * than the lower timeframe's candles. `read` returns the overlays saved under a key.
+ * than the lower timeframe's candles. Stacked levels from different timeframes are thinned to the best one per
+ * area (pickHtf). `read` returns the overlays saved under a key.
  */
 export function higherTfOverlays(symbol: string, interval: string, read: (key: string) => Overlay[]): Overlay[] {
   const order: string[] = TIMEFRAMES.map((t) => t.value);
   const at = order.indexOf(interval);
   if (at < 0) return [];
-  const out: Overlay[] = [];
-  for (const tf of order.slice(at + 1)) {
+  const all: { o: Overlay; rank: number }[] = [];
+  order.slice(at + 1).forEach((tf, rank) => {
     const tag = HTF_TAGS[tf] ?? tf.toUpperCase();
     read(overlaysKey(symbol, tf)).forEach((o, i) => {
       if (!HTF_KINDS.test(o.kind ?? "") || (o.type !== "box" && o.type !== "horizontal_line")) return;
       const label = o.label.startsWith(tag) ? o.label : `${tag} ${o.label}`;
-      out.push({ ...o, id: `htf-${tf}-${o.id ?? i}`, label, time_start: null });
+      all.push({ o: { ...o, id: `htf-${tf}-${o.id ?? i}`, label, time_start: null }, rank });
     });
+  });
+  return pickHtf(all);
+}
+
+const HELD = /(\d+)\/(\d+) held/;
+const CONFLUENCE = /\+ ([A-Z0-9/]+)/;
+
+/** How good a higher-timeframe zone is: the agent's strength, how often it held when tested, how many timeframes
+ *  above it agree, and a small edge for the higher timeframe. */
+export function htfScore(o: Overlay, rank: number): number {
+  const held = HELD.exec(o.label);
+  const heldRatio = held && Number(held[2]) > 0 ? Number(held[1]) / Number(held[2]) : 0.5;
+  const confluence = CONFLUENCE.exec(o.label)?.[1].split("/").length ?? 0;
+  return (o.strength ?? 0.5) + 0.4 * (heldRatio - 0.5) + 0.1 * confluence + 0.05 * rank;
+}
+
+/**
+ * One higher-timeframe level per area instead of a stack of them: boxes that overlap (or nearly touch) form one
+ * area and only the best of them (htfScore) is kept, whichever timeframe it is from. Window highs/lows within
+ * 0.3% of each other keep only the highest timeframe's line.
+ */
+export function pickHtf(all: { o: Overlay; rank: number }[]): Overlay[] {
+  const boxes = all
+    .filter((x): x is { o: Extract<Overlay, { type: "box" }>; rank: number } => x.o.type === "box")
+    .sort((a, b) => a.o.price_low - b.o.price_low);
+  const out: Overlay[] = [];
+  let area: typeof boxes = [];
+  let top = -Infinity;
+  const flush = () => {
+    if (!area.length) return;
+    out.push(area.reduce((best, x) => (htfScore(x.o, x.rank) > htfScore(best.o, best.rank) ? x : best)).o);
+    area = [];
+  };
+  for (const x of boxes) {
+    const tol = 0.25 * (x.o.price_high - x.o.price_low);
+    if (area.length && x.o.price_low > top + tol) flush();
+    if (!area.length) top = -Infinity;
+    area.push(x);
+    top = Math.max(top, x.o.price_high);
   }
-  return out;
+  flush();
+  const lines = all
+    .filter((x): x is { o: Extract<Overlay, { type: "horizontal_line" }>; rank: number } => x.o.type === "horizontal_line")
+    .sort((a, b) => b.rank - a.rank);
+  const kept: Extract<Overlay, { type: "horizontal_line" }>[] = [];
+  for (const x of lines) {
+    if (!kept.some((k) => Math.abs(k.price - x.o.price) <= 0.003 * x.o.price)) kept.push(x.o);
+  }
+  return [...out, ...kept];
 }
 
 const HTF_TAGS: Record<string, string> = {

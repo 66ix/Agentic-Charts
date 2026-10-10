@@ -150,6 +150,15 @@ class MockBinance:
             oid = int(params["orderId"])
             return httpx.Response(200, json=[{"orderId": o, "clientOrderId": c} for o, c in sorted(self.orders.items())
                                              if o >= oid])
+        if path == "/sapi/v1/simple-earn/flexible/position":
+            return httpx.Response(200, json={"total": 1, "rows": [
+                {"asset": "USDT", "totalAmount": "100", "latestAnnualPercentageRate": "0.05",
+                 "cumulativeTotalRewards": "1.2"}]})
+        if path == "/sapi/v1/simple-earn/locked/position":
+            return httpx.Response(200, json={"total": 2, "rows": [
+                {"asset": "BTC", "amount": "0.1", "APY": "0.0123", "rewardAmt": "0.0001", "duration": "30",
+                 "deliverDate": "1767225600000"},
+                {"asset": "DOT", "amount": "0", "APY": "0.1"}]})
         if path == "/fapi/v1/income":
             return httpx.Response(200, json=[{"symbol": "ETHUSDT", "incomeType": "REALIZED_PNL", "income": "200"}])
         if path == "/fapi/v2/positionRisk":
@@ -403,6 +412,11 @@ def test_import_classify_journal_positions_and_bot_compare(tmp_path):
         assert spot["BTC"]["from_fills_qty"] == pytest.approx(0.5)
         assert spot["INJ"]["own_qty"] == pytest.approx(3.0)  # the bot's buy was sold again: nothing of it held
         assert pos["manual"]["cash"] == [{"asset": "USDT", "qty": 250.0}]
+        earn = {e["asset"]: e for e in pos["manual"]["earn"]}
+        assert set(earn) == {"USDT", "BTC"}  # the empty DOT row is left out
+        assert earn["USDT"]["product"] == "flexible" and earn["USDT"]["apr_pct"] == 5.0 and earn["USDT"]["value"] == 100
+        assert earn["BTC"]["product"] == "locked" and earn["BTC"]["apr_pct"] == 1.23
+        assert earn["BTC"]["ends_at"] == 1767225600 and earn["BTC"]["duration_days"] == 30
         (sol,) = pos["manual"]["futures"]
         assert sol["side"] == "short" and sol["qty"] == 10 and sol["unrealized_pnl"] == 100
         assert pos["bots"]["wallet"] == {"wallet": "Trading Bots", "usdt": 512.5, "active": True}
@@ -524,3 +538,40 @@ def test_api_never_returns_the_secret():
 def test_binance_errors_carry_status_and_code():
     exc = BinanceApiError("Invalid symbol. (HTTP 400, code -1121)", 400, -1121)
     assert exc.status == 400 and exc.code == -1121
+
+
+def _pfill(i, side, price, qty, t, market="spot", symbol="INJUSDT", fee=0.0, fee_asset="USDT", pnl=None, kind="manual"):
+    return AccountFill(key=f"{market}:{symbol}:{i}", market=market, symbol=symbol, trade_id=i, order_id=i, time=t,
+                       time_ms=t * 1000, side=side, price=price, qty=qty, quote_qty=price * qty, commission=fee,
+                       commission_asset=fee_asset, realized_pnl=pnl, kind=kind)
+
+
+def test_pnl_calendar_counts_profit_on_the_day_it_is_taken():
+    from app.binance_import import pnl_calendar
+    day = 86_400
+    t0 = 1_760_000_400  # 2025-10-09 09:00 UTC
+    fills = [
+        _pfill(1, "buy", 10.0, 10, t0, fee=0.1),
+        _pfill(2, "buy", 12.0, 10, t0 + 3600),                  # average cost 11.005 with the fee
+        _pfill(3, "sell", 13.0, 5, t0 + day, fee=0.065),        # a trim: realized while the position stays open
+        _pfill(4, "sell", 9.0, 15, t0 + 2 * day),               # the rest at a loss
+        _pfill(5, "sell", 50.0, 1, t0, symbol="BTCUSDT"),       # coins bought before the import: no cost, left out
+        _pfill(6, "sell", 2000.0, 1, t0 + day, market="futures", symbol="ETHUSDT", fee=0.8, pnl=40.0),
+        _pfill(7, "sell", 0.002, 100, t0, symbol="INJBTC"),     # not a stablecoin pair
+        _pfill(8, "buy", 10.0, 1, t0, kind="bot"),
+        _pfill(9, "sell", 20.0, 1, t0 + day, kind="bot"),
+    ]
+    cal = pnl_calendar(fills)
+    days = {d["date"]: d for d in cal["days"]}
+    assert list(days) == ["2025-10-10", "2025-10-11"]
+    trim = 5 * 13.0 - 5 * (220.1 / 20) - 0.065
+    assert days["2025-10-10"]["pnl"] == pytest.approx(round(trim + 40 - 0.8, 2))
+    assert days["2025-10-10"]["closes"] == 2 and days["2025-10-10"]["wins"] == 2
+    assert days["2025-10-11"]["pnl"] == pytest.approx(round(15 * 9.0 - 15 * (220.1 / 20), 2))
+    assert days["2025-10-11"]["losses"] == 1
+    assert any("bought before" in n for n in cal["notes"]) and any("stablecoin" in n for n in cal["notes"])
+    # The bot's round trip shows up only when asked for; spot only leaves the futures close out.
+    assert pnl_calendar(fills, kind="bot")["total"] == 10.0
+    assert pnl_calendar(fills, market="spot")["days"][0]["pnl"] == pytest.approx(round(trim, 2))
+    # Days follow the user's time zone: 09:00 UTC is already the next day 15 hours east.
+    assert pnl_calendar(fills, tz_offset_min=15 * 60)["days"][0]["date"] == "2025-10-11"

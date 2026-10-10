@@ -59,7 +59,7 @@ from .schemas import (
     is_custom_symbol,
 )
 from .ta_agent import (GREEN, ORANGE, TEAL, _fmt, analyze, describe, higher_timeframes, htf_readings, htf_zones,
-                       rgba)
+                       price_check, rgba)
 from .top_down import TopDownResult, describe_walk, walk, walk_facts
 from .trade_plan import build_plan, plan_overlays
 from .level_review import LevelLog
@@ -311,11 +311,14 @@ def holding_facts(pos: dict, symbol: str) -> dict | None:
     manual = pos.get("manual", {})
     spot = next((r for r in manual.get("spot", []) if r["asset"] == base and (r.get("value") or 0) >= 5), None)
     fut = [p for p in manual.get("futures", []) if p["symbol"] == symbol]
-    if not spot and not fut:
+    if not spot and not fut and not any(e["asset"] == base for e in manual.get("earn", [])):
         return None
     out: dict = {}
     if spot:
         out["spot"] = _spot_row(spot)
+    if earning := [e for e in manual.get("earn", []) if e["asset"] == base]:
+        out["in_earn"] = [{k: e[k] for k in ("product", "qty", "value", "apr_pct", "ends_at") if e.get(k) is not None}
+                          for e in earning]
     if fut:
         out["futures"] = [_futures_row(p) for p in fut]
     return out
@@ -328,6 +331,11 @@ def portfolio_facts(pos: dict) -> dict:
     cash = sum(c["qty"] for c in manual.get("cash", []))
     out: dict = {"spot_value_usd": round(sum(r["value"] for r in spot), 2), "stablecoins_usd": round(cash, 2),
                  "spot": [_spot_row(r) for r in spot[:20]]}
+    earn = [e for e in manual.get("earn", []) if (e.get("value") or 0) >= 5]
+    if earn:
+        out["earn_value_usd"] = round(sum(e["value"] for e in earn), 2)
+        out["earn"] = [{k: e[k] for k in ("product", "asset", "qty", "value", "apr_pct", "ends_at") if e.get(k)
+                        is not None} for e in earn[:15]]
     if manual.get("futures"):
         out["futures"] = [_futures_row(p) for p in manual["futures"][:10]]
     return out
@@ -856,6 +864,8 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         facts["navigation"] = nav
     if actions:
         facts["actions"] = actions
+    if checks := price_check(req.prompt, facts):  # "what's at 7.15?": the zone there and what's next if it breaks
+        facts["price_check"] = checks
     narrate_facts = {k: v for k, v in facts.items() if k != "last_bar_time"}
     fallback = describe(narrate_facts, symbol)
     if want_grid:  # the grid plan leads the answer; the chart summary follows

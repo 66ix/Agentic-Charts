@@ -20,6 +20,8 @@ Endpoints used (all GET, all read-only; weights from Binance's docs):
   /api/v3/myTrades                       spot fills of one symbol, paged by fromId              (20)
   /api/v3/allOrders                      spot orders of one symbol (clientOrderId), by orderId  (20)
   /sapi/v1/asset/wallet/balance          value of each wallet (Spot, Funding, Trading Bots...)  (60)
+  /sapi/v1/simple-earn/flexible/position  Simple Earn Flexible holdings                       (150)
+  /sapi/v1/simple-earn/locked/position   Simple Earn Locked holdings (incl. locked staking)    (150)
   /fapi/v1/userTrades                    USD-M futures fills of one symbol (7-day windows)      (5)
   /fapi/v1/allOrders                     USD-M futures orders of one symbol, by orderId          (5)
   /fapi/v1/income?incomeType=REALIZED_PNL which futures symbols had realized PnL                (30)
@@ -320,6 +322,23 @@ class BinanceAccount:
         return [{"wallet": w.get("walletName", ""), "usdt": float(w.get("balance", 0)),
                  "active": bool(w.get("activate", True))} for w in data if isinstance(w, dict)]
 
+    async def earn_positions(self) -> list[dict]:
+        """Coins in Simple Earn, Flexible and Locked (Binance moved locked staking into Simple Earn Locked), e.g.
+        [{"product": "locked", "asset": "DOT", "qty": 12.5, "apr_pct": 14.2, "rewards": 0.31, "ends_at": 1767225600}].
+        ETH and SOL staking show up as WBETH and BNSOL in the spot wallet instead."""
+        out: list[dict] = []
+        for product in ("flexible", "locked"):
+            page = 1
+            while page <= 10:
+                data = await self.get(self.spot_url, f"/sapi/v1/simple-earn/{product}/position",
+                                      {"current": page, "size": 100})
+                rows = data.get("rows", []) if isinstance(data, dict) else []
+                out += [r for r in (earn_row(product, x) for x in rows) if r]
+                if len(rows) < 100:
+                    break
+                page += 1
+        return out
+
     async def my_trades(self, symbol: str, from_id: int, limit: int = 1000) -> list[dict]:
         return await self.get(self.spot_url, "/api/v3/myTrades", {"symbol": symbol, "fromId": from_id,
                                                                   "limit": limit})
@@ -346,6 +365,30 @@ class BinanceAccount:
         """Open USD-M positions (positionAmt != 0)."""
         rows = await self.get(self.futures_url, "/fapi/v2/positionRisk", {})
         return [r for r in rows if isinstance(r, dict) and float(r.get("positionAmt", 0) or 0) != 0]
+
+
+def _num(v: Any) -> Optional[float]:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def earn_row(product: str, x: Any) -> Optional[dict]:
+    """One Simple Earn position from Binance's answer, or None for an empty or malformed row. APRs come as
+    fractions ("0.0398") and dates in ms."""
+    if not isinstance(x, dict) or not x.get("asset"):
+        return None
+    qty = _num(x.get("totalAmount") if product == "flexible" else x.get("amount")) or 0.0
+    if qty <= 0:
+        return None
+    apr = _num(x.get("latestAnnualPercentageRate") if product == "flexible" else x.get("APY"))
+    rewards = _num(x.get("cumulativeTotalRewards") if product == "flexible" else x.get("rewardAmt"))
+    end = _num(x.get("deliverDate") or x.get("rewardsEndDate")) if product == "locked" else None
+    return {"product": product, "asset": str(x["asset"]).upper(), "qty": qty,
+            "apr_pct": round(apr * 100, 2) if apr is not None else None, "rewards": rewards,
+            "ends_at": int(end / 1000) if end else None,
+            "duration_days": int(_num(x.get("duration")) or 0) or None if product == "locked" else None}
 
 
 def _refusal(chk: dict) -> str:
