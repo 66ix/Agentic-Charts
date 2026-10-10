@@ -326,6 +326,8 @@ interface BinancePosition {
   qty: number;
   entry: number | null;
   market: "spot" | "futures";
+  /** Spot: some or all of it sits in Simple Earn. */
+  earn?: boolean;
 }
 
 function AddTrade(p: { symbol: string; interval: Interval; price: number | null; onAdded(t: ManagedTrade): void }) {
@@ -347,9 +349,14 @@ function AddTrade(p: { symbol: string; interval: Interval; price: number | null;
     fetchAccountPositions(false, ctrl.signal)
       .then((r) =>
         setPositions([
-          ...r.manual.spot
-            .filter((h) => h.own_qty > 0 && (h.value == null || h.value >= 5))
-            .map((h) => ({ key: h.key, symbol: h.symbol, direction: "long" as const, qty: h.own_qty, entry: h.avg_entry, market: "spot" as const })),
+          // Spot and Simple Earn merged (older servers: the spot wallet only).
+          ...(r.manual.holdings
+            ? r.manual.holdings
+                .filter((h) => h.qty > 0 && (h.value == null || h.value >= 5))
+                .map((h) => ({ key: h.key, symbol: h.symbol, direction: "long" as const, qty: h.qty, entry: h.avg_entry, market: "spot" as const, earn: h.earn_qty > 0 }))
+            : r.manual.spot
+                .filter((h) => h.own_qty > 0 && (h.value == null || h.value >= 5))
+                .map((h) => ({ key: h.key, symbol: h.symbol, direction: "long" as const, qty: h.own_qty, entry: h.avg_entry, market: "spot" as const }))),
           ...r.manual.futures.map((f) => ({ key: f.key, symbol: f.symbol, direction: f.side, qty: f.qty, entry: f.entry_price || null, market: "futures" as const })),
         ]),
       )
@@ -405,6 +412,7 @@ function AddTrade(p: { symbol: string; interval: Interval; price: number | null;
             >
               <span className="font-medium text-ink">{displaySymbol(b.symbol)}</span>
               <span className={b.direction === "long" ? "text-up" : "text-down"}>{b.market === "spot" ? "spot" : b.direction}</span>
+              {b.earn && <span className="rounded border border-accent/40 px-1 text-[10px] text-accent" title="Some or all of it is in Simple Earn">Earn</span>}
               <span className="font-mono text-mute">
                 {formatPrice(b.qty)} {b.entry ? `@ ${formatPrice(b.entry)}` : "· entry unknown"}
               </span>

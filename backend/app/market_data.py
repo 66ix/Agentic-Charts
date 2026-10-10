@@ -101,6 +101,7 @@ class MarketData:
         self._fails = 0           # failed Binance requests in a row
         self._symbols: tuple[float, list[str]] | None = None
         self._good_symbols: list[str] | None = None
+        self.usd_pairs: frozenset[str] = frozenset()  # every trading USDT/USDC/FDUSD pair, from the last good list
         # Switched to the fallback endpoints once the primary answers 451/403 (geo-block).
         self.rest_url = self.settings.binance_rest_url
         self.ws_url = self.settings.binance_ws_url
@@ -284,10 +285,10 @@ class MarketData:
             try:
                 resp = await self._binance_get("/api/v3/exchangeInfo", params={"permissions": "SPOT"})
                 resp.raise_for_status()
-                symbols = sorted(
-                    s["symbol"] for s in resp.json()["symbols"]
-                    if s.get("status") == "TRADING" and s.get("quoteAsset") == "USDT"
-                )
+                trading = [s for s in resp.json()["symbols"] if s.get("status") == "TRADING"]
+                symbols = sorted(s["symbol"] for s in trading if s.get("quoteAsset") == "USDT")
+                self.usd_pairs = frozenset(s["symbol"] for s in trading
+                                           if s.get("quoteAsset") in ("USDT", "USDC", "FDUSD"))
                 self._good_symbols = symbols
                 self._symbols = (time.monotonic() + SYMBOLS_TTL, symbols)
                 return symbols

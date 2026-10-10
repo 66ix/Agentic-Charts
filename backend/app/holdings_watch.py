@@ -36,7 +36,6 @@ OWNER = "holdings"
 SIGNALS = ["lost_support", "at_resistance"]
 CHECK_EVERY = 600.0
 MAX_COINS = 40
-STABLE_ASSETS = {"USDT", "USDC", "FDUSD", "TUSD", "BUSD", "DAI", "USDP", "EUR", "TRY"}
 BOT_NOTE = ("Binance's API shows only the Trading Bots wallet's total, not the coins inside it or the bots' open "
             "orders. Bots you track in the Grid bots tab are watched by their coin instead.")
 
@@ -101,25 +100,27 @@ class HoldingsWatch:
         """Your own holdings worth `min_value`+ → [{symbol, value, source}], and notes. Pure."""
         rows: dict[str, dict] = {}
         manual = positions.get("manual", {})
-        held: dict[str, dict] = {}  # spot and Simple Earn together: a coin moved to Earn is still yours
-        for r in manual.get("spot", []):
-            if r.get("own_qty", 0) > 0:
-                held[r["symbol"]] = {"symbol": r["symbol"], "value": r.get("value"), "source": "spot"}
-        for r in manual.get("earn", []):
-            if r.get("asset") in STABLE_ASSETS or r.get("qty", 0) <= 0:
-                continue
-            row = held.get(r["symbol"])
-            if row is None:
-                held[r["symbol"]] = {"symbol": r["symbol"], "value": r.get("value"), "source": "earn"}
-            else:
-                row["value"] = None if row["value"] is None or r.get("value") is None else row["value"] + r["value"]
-                row["source"] = "spot + earn"
-        for sym, row in held.items():
-            if row["value"] is not None:
-                row["value"] = round(row["value"], 2)
-                if row["value"] < min_value:
+        # Spot and Simple Earn together (binance_import.merge_holdings): a coin moved to Earn is still yours.
+        held = manual.get("holdings")
+        if held is None:  # positions without merged rows: spot rows, plus Earn per coin
+            by: dict[str, dict] = {}
+            for r in manual.get("spot", []):
+                if r.get("own_qty", 0) > 0:
+                    by[r["symbol"]] = {"symbol": r["symbol"], "qty": r["own_qty"], "value": r.get("value"),
+                                       "sources": ["spot"]}
+            for r in manual.get("earn", []):
+                if r.get("qty", 0) <= 0 or r.get("asset") in ("USDT", "USDC", "FDUSD", "TUSD", "BUSD", "DAI", "USDP"):
                     continue
-            rows[sym] = row
+                h = by.setdefault(r["symbol"], {"symbol": r["symbol"], "qty": 0.0, "value": 0.0, "sources": []})
+                h["qty"] += r["qty"]
+                h["value"] = None if h["value"] is None or r.get("value") is None else h["value"] + r["value"]
+                h["sources"].append("earn")
+            held = list(by.values())
+        for r in held:
+            value = r.get("value")
+            if r.get("qty", 0) <= 0 or (value is not None and value < min_value):
+                continue
+            rows[r["symbol"]] = {"symbol": r["symbol"], "value": value, "source": "+".join(r.get("sources") or [])}
         if include_bots:
             bots = positions.get("bots", {})
             for r in bots.get("tracked", []) + bots.get("spot", []):

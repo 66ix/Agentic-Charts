@@ -6,7 +6,8 @@ import asyncio
 import numpy as np
 import pandas as pd
 
-from app.binance_import import AccountFill, BinanceImportService, _fee, average_entry, build_round_trips
+from app.binance_import import (AccountFill, BinanceImportService, _fee, average_entry, build_round_trips,
+                                merge_holdings)
 from app.holdings_watch import HoldingsWatch
 from app.paper import PaperOrder, build_wallet
 
@@ -20,19 +21,18 @@ def _fill(i, side, price, qty, symbol="INJUSDT", fee=0.0, fee_asset="", t=T0):
 
 
 def _positions(spot_value, earn_qty, earn_value):
-    return {"manual": {"spot": [{"key": "holding:spot:INJ", "asset": "INJ", "symbol": "INJUSDT", "own_qty": 0.1,
-                                 "value": spot_value}],
-                       "earn": [{"asset": "INJ", "symbol": "INJUSDT", "product": "flexible", "qty": earn_qty,
-                                 "value": earn_value},
-                                {"asset": "USDT", "symbol": "USDTUSDT", "product": "flexible", "qty": 500,
-                                 "value": 500}],
-                       "futures": []},
+    spot = [{"key": "holding:spot:INJ", "asset": "INJ", "symbol": "INJUSDT", "own_qty": 0.1, "price": 10.0,
+             "value": spot_value}]
+    earn = [{"asset": "INJ", "symbol": "INJUSDT", "product": "flexible", "qty": earn_qty, "value": earn_value,
+             "price": 10.0},
+            {"asset": "USDT", "symbol": "USDTUSDT", "product": "flexible", "qty": 500, "value": 500}]
+    return {"manual": {"spot": spot, "earn": earn, "futures": [], "holdings": merge_holdings(spot, earn, [])},
             "bots": {}}
 
 
 def test_a_coin_moved_to_earn_stays_watched():
     coins, _ = HoldingsWatch.coins(_positions(1.0, 50, 400.0), 10.0, False)
-    assert [(c["symbol"], c["value"], c["source"]) for c in coins] == [("INJUSDT", 401.0, "spot + earn")]
+    assert [(c["symbol"], c["value"], c["source"]) for c in coins] == [("INJUSDT", 501.0, "spot+earn")]
 
 
 def test_a_coin_moved_to_earn_keeps_its_open_key():
@@ -120,3 +120,52 @@ def test_a_plan_whose_buy_was_cancelled_drops_its_stop():
               _order(3, "buy", "market", qty=3, placed=T0 + 60, market_price=10.0)]
     w = build_wallet(1000.0, 0.1, T0, orders, {"XUSDT": df}, now=T0 + 10_000)
     assert _result(w, "o2")["status"] == "cancelled" and w.holdings[0].qty == 3
+
+
+def test_merged_holdings_count_earn_rewards_at_no_cost_and_locked_coins():
+    fills = [_fill(1, "buy", 20.0, 100)]
+    spot = [{"asset": "INJ", "own_qty": 0.0, "price": 25.0}]
+    earn = [{"asset": "INJ", "product": "locked", "qty": 100.0, "price": 25.0, "redeem_at": 1_800_000_000},
+            {"asset": "INJ", "product": "flexible", "qty": 20.0, "price": 25.0, "rewards_total": 5.0},
+            {"asset": "USDT", "product": "flexible", "qty": 50.0}]
+    [h] = merge_holdings(spot, earn, fills)
+    assert h["key"] == "holding:spot:INJ" and h["qty"] == 120 and h["earn_qty"] == 120 and h["locked_qty"] == 100
+    assert h["redeem_at"] == 1_800_000_000 and h["sources"] == ["earn"] and h["avg_entry"] == 20.0
+    assert h["rewards_qty"] == 5 and h["unrealized_pnl"] == 100 * 5 + 5 * 25  # bought coins' gain + free rewards
+    assert h["value"] == 120 * 25
+
+
+def test_what_should_i_sell_checks_what_you_hold():
+    import os
+
+    os.environ["DATA_SOURCE"] = "synthetic"
+    from app.agent import run_analysis
+    from app.llm import LLMClient
+    from app.market_data import MarketData
+    from app.schemas import AnalyzeRequest
+
+    class Account:
+        def status(self):
+            return {"configured": True}
+
+    class Binance:
+        account = Account()
+
+        async def positions(self, refresh=False):
+            spot = [{"asset": "SOL", "own_qty": 3.0, "price": 150.0, "value": 450.0}]
+            earn = [{"asset": "INJ", "product": "locked", "qty": 50.0, "price": 8.0, "value": 400.0}]
+            return {"manual": {"spot": spot, "earn": earn, "futures": [], "cash": [],
+                               "holdings": merge_holdings(spot, earn, [])}}
+
+    md, llm = MarketData(), LLMClient()
+
+    async def go():
+        try:
+            return await run_analysis(AnalyzeRequest(symbol="BTCUSDT", interval="4h", prompt="What should I sell?",
+                                                     watchlist=["ETHUSDT", "DOGEUSDT"]), md, llm, binance=Binance())
+        finally:
+            await md.close()
+            await llm.close()
+
+    res = asyncio.run(go())
+    assert res.sell_watch is not None and res.sell_watch.symbols == ["SOLUSDT", "INJUSDT"]

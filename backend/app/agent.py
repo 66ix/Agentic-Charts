@@ -317,6 +317,33 @@ def _futures_row(p: dict) -> dict:
                                   "liquidation_price", "unrealized_pnl") if p.get(k) is not None}
 
 
+def held_symbols(pos: dict, min_value: float = 10.0) -> list[str]:
+    """The coins you hold worth `min_value` or more (spot and Simple Earn), biggest first."""
+    return [r["symbol"] for r in pos.get("manual", {}).get("holdings", [])
+            if r.get("value") is not None and r["value"] >= min_value][:40]
+
+
+def _held_row(h: dict) -> dict:
+    """A merged holding (binance_import.merge_holdings) for the narrator: how much, where, cost and gain."""
+    out = {"coin": h["asset"], "qty": h["qty"], "value_usd": h.get("value"), "price": h.get("price")}
+    if h.get("earn_qty"):
+        out["in_spot"], out["in_earn"] = h["spot_qty"], h["earn_qty"]
+    if h.get("locked_qty"):
+        when = time.strftime("%d %b", time.gmtime(h["redeem_at"])) if h.get("redeem_at") else "later"
+        out["locked"] = f"{h['locked_qty']:g} locked in Earn until {when}: can't be sold before then"
+    if h.get("rewards_qty"):
+        out["earn_rewards_qty"] = h["rewards_qty"]
+    if h.get("avg_entry"):
+        out["avg_entry"] = h["avg_entry"]
+        if h.get("price"):
+            out["pnl_pct"] = round((h["price"] / h["avg_entry"] - 1) * 100, 2)
+        if h.get("unrealized_pnl") is not None:
+            out["unrealized_pnl_usd"] = h["unrealized_pnl"]
+            if h.get("rewards_qty"):
+                out["pnl_note"] = "includes Earn rewards, which cost nothing"
+    return out
+
+
 def holding_facts(pos: dict, symbol: str) -> dict | None:
     """What the user holds of `symbol` on Binance: their spot holding (with average entry from imported fills)
     and any USD-M position on it."""
@@ -325,9 +352,12 @@ def holding_facts(pos: dict, symbol: str) -> dict | None:
     spot = next((r for r in manual.get("spot", []) if r["asset"] == base and (r.get("value") or 0) >= 5), None)
     fut = [p for p in manual.get("futures", []) if p["symbol"] == symbol]
     earn = [r for r in manual.get("earn", []) if r["asset"] == base]
-    if not spot and not fut and not earn:
+    held = next((h for h in manual.get("holdings", []) if h["asset"] == base and (h.get("value") or 0) >= 5), None)
+    if not spot and not fut and not earn and not held:
         return None
     out: dict = {}
+    if held:
+        out["held"] = _held_row(held)  # spot and Earn together
     if spot:
         out["spot"] = _spot_row(spot)
     if fut:
@@ -349,6 +379,10 @@ def portfolio_facts(pos: dict) -> dict:
     cash = sum(c["qty"] for c in manual.get("cash", []))
     out: dict = {"spot_value_usd": round(sum(r["value"] for r in spot), 2), "stablecoins_usd": round(cash, 2),
                  "spot": [_spot_row(r) for r in spot[:20]]}
+    held = [h for h in manual.get("holdings", []) if (h.get("value") or 0) >= 5]
+    if held:  # every coin owned, spot and Earn together
+        out["coins_value_usd"] = round(sum(h["value"] for h in held), 2)
+        out["coins"] = [_held_row(h) for h in held[:20]]
     if manual.get("futures"):
         out["futures"] = [_futures_row(p) for p in manual["futures"][:10]]
     earn = [r for r in manual.get("earn", []) if (r.get("value") or 0) >= 1]
@@ -795,7 +829,10 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
     want_sell = (intent.sell_check or spot_note is not None) and not custom_chart
     base = re.sub(r"(?:USDT|USDC|FDUSD|BUSD|BTC)$", "", symbol) or symbol
     one_coin = bool(intent.symbol or spot_note or re.search(rf"\b{re.escape(base)}\b", req.prompt, re.I))
-    sell_symbols = [symbol] if one_coin else (req.watchlist or DEFAULT_WATCHLIST)
+    held_now = await _positions(binance) if want_sell and not one_coin else None
+    held_syms = held_symbols(held_now) if held_now else []
+    # "What should I sell?" checks what you hold (spot and Earn); the watchlist without a read-only key.
+    sell_symbols = [symbol] if one_coin else (held_syms or req.watchlist or DEFAULT_WATCHLIST)
     sell_tf = timeframe_for(tf)
     extras = asyncio.gather(
         _sells(market, sell_symbols, sell_tf) if want_sell else _none(),

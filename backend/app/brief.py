@@ -291,16 +291,23 @@ def market_line(metrics: Any) -> Optional[str]:
 
 def holdings_lines(pos: dict) -> list[str]:
     """Your own spot holdings (worth $5 or more) and USD-M positions from binance_import.positions."""
-    spot = sorted((r for r in pos.get("manual", {}).get("spot", []) if (r.get("value") or 0) >= 5),
+    manual = pos.get("manual", {})
+    merged = manual.get("holdings")
+    spot = sorted((r for r in (merged if merged is not None else manual.get("spot", [])) if (r.get("value") or 0) >= 5),
                   key=lambda r: -(r.get("value") or 0))
-    futures = pos.get("manual", {}).get("futures", [])
+    futures = manual.get("futures", [])
     if not spot and not futures:
         return []
     total = sum(r["value"] for r in spot)
     out = [f"Your holdings: ${total:,.0f} in {len(spot)} coin{'s' if len(spot) != 1 else ''}" if spot
            else "Your holdings"]
     for r in spot[:15]:
-        line = f"{r['asset']} {r['own_qty']:g} · ${r['value']:,.0f}"
+        line = f"{r['asset']} {r.get('qty', r.get('own_qty', 0)):g} · ${r['value']:,.0f}"
+        if r.get("locked_qty"):
+            until = time.strftime("%d %b", time.gmtime(r["redeem_at"])) if r.get("redeem_at") else "later"
+            line += f" ({r['locked_qty']:g} locked in Earn until {until})"
+        elif r.get("earn_qty"):
+            line += f" ({r['earn_qty']:g} in Earn)"
         if r.get("avg_entry") and r.get("price"):
             line += f" · avg {fmt_price(r['avg_entry'])}, {(r['price'] / r['avg_entry'] - 1) * 100:+.1f}%"
             if r.get("unrealized_pnl") is not None:
