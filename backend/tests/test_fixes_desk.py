@@ -99,3 +99,12 @@ def test_watched_zones_say_why_they_were_not_called():
     asyncio.run(desk.run_interval("4h", now=end + 60, force=True))
     watched = desk.calls(watched=True)
     assert watched and all(w.skip_reason in ("confidence", "expected R", "reward:risk") for w in watched)
+
+
+def test_new_calls_are_broadcast_so_open_apps_refresh():
+    end = T0 + 30
+    desk = _desk(FakeMarket(end))
+    seen = []
+    desk.alerts.broadcast = lambda msg: seen.append(msg)
+    made = asyncio.run(desk.run_interval("4h", now=end + 60, force=True))
+    assert made and any(m.get("type") == "desk_scored" and set(m["changed"]) >= {c.id for c in made} for m in seen)

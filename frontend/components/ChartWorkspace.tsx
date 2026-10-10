@@ -21,6 +21,8 @@ import { DEFAULT_INTERVAL, DEFAULT_SYMBOL } from "@/lib/config";
 import { isCustom } from "@/lib/customSymbols";
 import { fetchLiquidationLevels, liquidationOverlays } from "@/lib/marketdata";
 import { focusFrom } from "@/lib/focus";
+import { DESK_SELECT_KEY, deskChip, deskOverlays } from "@/lib/desk";
+import { useDeskCalls } from "@/hooks/useDeskCalls";
 import { CHAT_ID_KEY, CHATS_KEY, lastAnswerOn, toSession, upsertSession, worthKeeping, type ChatSession } from "@/lib/chatHistory";
 import { createJournalEntry, planToJournalEntry } from "@/lib/journal";
 import { DEFAULT_SIZING, sizePlan, type SizingSettings } from "@/lib/sizing";
@@ -63,7 +65,7 @@ import type {
 import { CURRENT_WORKSPACE_KEY, saveWorkspace, WORKSPACES_KEY, type SavedWorkspace } from "@/lib/workspaces";
 
 import AgentPanel, { placeholderFor, type AgentMessage, type AgentPanelHandle } from "./AgentPanel";
-import { type AgenticChartHandle, type CompareLine, type FeedInfo, type KimiVisibility } from "./AgenticChart";
+import { type AgenticChartHandle, type ChartChip, type CompareLine, type FeedInfo, type KimiVisibility } from "./AgenticChart";
 import AlertsPanel from "./AlertsPanel";
 import AlertToasts, { signalToast, type Toast } from "./AlertToasts";
 import ChartCell from "./ChartCell";
@@ -372,6 +374,32 @@ export default function ChartWorkspace() {
   );
   const pinnedSet = useMemo(() => new Set(pinIndex), [pinIndex]);
 
+  // The desk's running calls on every chart showing their coin, live (refetched, so not kept in the saved panels).
+  const desk = useDeskCalls();
+  const livePanels = useMemo<PanelOverlays>(() => {
+    if (!desk.calls.length) return panels;
+    const out: PanelOverlays = { ...panels };
+    for (const c of desk.calls) {
+      const key = `desk:active:${c.symbol}`;
+      out[key] = { symbol: c.symbol, overlays: [...(out[key]?.overlays ?? []), ...deskOverlays(c)] };
+    }
+    return out;
+  }, [panels, desk.calls]);
+  const deskChipsFor = useCallback(
+    (sym: string): ChartChip[] =>
+      desk.calls
+        .filter((c) => c.symbol === sym)
+        .map((c) => ({
+          key: c.id,
+          ...deskChip(c, desk.calibrated),
+          onClick: () => {
+            writeStored(DESK_SELECT_KEY, c.id);
+            openTabRef.current("desk");
+          },
+        })),
+    [desk.calls, desk.calibrated],
+  );
+
   const onChartOverlays = useCallback(
     (key: string, sym: string, ovs: Overlay[]) =>
       setPanels((prev) => {
@@ -441,8 +469,8 @@ export default function ChartWorkspace() {
 
   const htf = useHigherTfOverlays(symbol, interval);
   const composed = useMemo(
-    () => composeOverlays({ symbol, overlays, pins, panels, alerts: alertOverlaysFor(symbol), visibility, htf }),
-    [symbol, overlays, pins, panels, alertOverlaysFor, visibility, htf],
+    () => composeOverlays({ symbol, overlays, pins, panels: livePanels, alerts: alertOverlaysFor(symbol), visibility, htf }),
+    [symbol, overlays, pins, livePanels, alertOverlaysFor, visibility, htf],
   );
   const layerCounts = useMemo(() => {
     const kimi = indicators.kimi && !isCustom(symbol) ? 1 : 0;
@@ -1283,7 +1311,8 @@ export default function ChartWorkspace() {
                   layout={layout}
                   visibility={visibility}
                   kimiParts={kimiParts}
-                  panels={panels}
+                  panels={livePanels}
+                  chipsFor={deskChipsFor}
                   alertOverlays={alertOverlaysFor}
                   compare={compareFor(c.symbol)}
                   onActivate={() => setActive(i)}

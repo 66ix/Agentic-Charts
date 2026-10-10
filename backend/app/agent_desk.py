@@ -314,6 +314,8 @@ class AgentDesk:
             self._set_kv("last_run", self.last_run)
         for c in made:
             await self._notify(c, "new")
+        if made and self.alerts is not None:
+            self.alerts.broadcast({"type": "desk_scored", "changed": [c.id for c in made]})
         return made
 
     async def _coin(self, symbol: str, interval: str, bar: int, now: float) -> "CoinResult":
@@ -508,6 +510,8 @@ class AgentDesk:
             self._scored_at = now
         for before, after in changed:
             await self._notify(after, "update")
+        if changed and self.alerts is not None:  # open apps refresh their desk view and chart (no toast)
+            self.alerts.broadcast({"type": "desk_scored", "changed": [a.id for _, a in changed]})
         return [a for _, a in changed]
 
     # ------------------------------------------------------------- messages

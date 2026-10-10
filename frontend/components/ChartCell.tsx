@@ -11,7 +11,7 @@ import { composeOverlays, drawingsFor, pinsKey, type LayerVisibility, type Panel
 import { TIMEFRAMES } from "@/lib/types";
 import type { Candle, ChartCell as Cell, Drawing, IndicatorSettings, IndicatorState, LayoutState, Overlay, ToolId } from "@/lib/types";
 
-import AgenticChart, { type AgenticChartHandle, type CompareLine, type FeedInfo, type KimiVisibility } from "./AgenticChart";
+import AgenticChart, { type AgenticChartHandle, type ChartChip, type CompareLine, type FeedInfo, type KimiVisibility } from "./AgenticChart";
 
 /** What the workspace passes to the active chart; inactive charts read their own saved state. */
 export interface ActiveProps {
@@ -45,6 +45,8 @@ interface Props {
   panels: PanelOverlays;
   alertOverlays(symbol: string): Overlay[];
   compare: CompareLine[];
+  /** Chips for this cell's coin (desk calls). */
+  chipsFor?(symbol: string): ChartChip[];
   onActivate(): void;
   onCrosshairTime(time: number | null): void;
 }
@@ -99,6 +101,7 @@ const ChartCell = forwardRef<AgenticChartHandle, Props>(function ChartCell(p, re
           layout={p.layout}
           kimiParts={p.kimiParts}
           compare={p.compare}
+          extraChips={p.chipsFor?.(cell.symbol)}
           overlays={active?.overlays ?? passive?.overlays ?? []}
           drawings={active?.drawings ?? passive?.drawings ?? []}
           selectedId={active?.selectedId ?? null}

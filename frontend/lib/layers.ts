@@ -13,6 +13,7 @@ export type LayerId =
   | "volume"
   | "custom"
   | "plan"
+  | "desk"
   | "pinned"
   | "alerts"
   | "drawings"
@@ -49,6 +50,7 @@ export const LAYERS: LayerInfo[] = [
   { id: "volume", label: "Volume profile levels", group: "Chart agent" },
   { id: "htf", label: "Higher-timeframe levels", group: "Chart agent" },
   { id: "plan", label: "Trade plan", group: "Chart agent" },
+  { id: "desk", label: "Desk calls", group: "Chart agent" },
   { id: "pinned", label: "Pinned answers", group: "Chart agent" },
   { id: "screenshot", label: "Read from a screenshot", group: "Chart agent" },
   { id: "kimiSR", label: "S/R zones and odds", group: "Kimi Cooked" },
@@ -85,6 +87,7 @@ const KIND_LAYER: Array<[RegExp, LayerId]> = [
   [/^(poc|vah|val)$/, "volume"],
   [/^custom_/, "custom"],
   [/^plan_/, "plan"],
+  [/^desk_/, "desk"],
   [/^(alert|trigger_zone)$/, "alerts"],
   [/^screenshot$/, "screenshot"],
 ];
@@ -109,6 +112,7 @@ export function panelLayer(key: string): LayerId {
     liqs: "liqs",
     compare: "compare",
     exit: "plan",
+    desk: "desk",
   };
   return map[head] ?? "panels";
 }

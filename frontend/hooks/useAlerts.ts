@@ -1,5 +1,6 @@
 "use client";
 
+import { DESK_CHANGED } from "@/lib/desk";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
@@ -241,6 +242,9 @@ export function useAlerts(onFire: (fired: FiredAlert[]) => void, onSignal?: (fir
           notify("Live trade", String(msg.text), `trade-${msg.trade_id}`);
         } else if (msg.type === "history" && msg.item) {
           addHistory([msg.item]);
+        } else if (msg.type === "desk" || msg.type === "desk_scored") {
+          // The desk made, filled or closed a call: its tab and the charts refresh now, not on their next poll.
+          window.dispatchEvent(new CustomEvent(DESK_CHANGED));
         }
       };
       ws.onclose = () => {

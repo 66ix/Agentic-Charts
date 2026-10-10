@@ -6,6 +6,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 
 import { usePersistentState } from "@/hooks/usePersistentState";
 import {
+  DESK_CHANGED,
+  DESK_SELECT_KEY,
   DESK_TIMEFRAMES,
   STATUS_LABEL,
   deskOverlays,
@@ -328,12 +330,22 @@ function Settings({ d, onSaved }: { d: DeskState; onSaved(d: DeskState): void })
   const [msg, setMsg] = useState<string | null>(null);
   const [cash, setCash] = useState("1000");
   const [confirmReset, setConfirmReset] = useState(false);
-  const s = d.settings;
+  // Sliders show their value while dragged and save once on release.
+  const [draft, setDraft] = useState<Partial<DeskSettings>>({});
+  const s = { ...d.settings, ...draft };
+  // Patches merge onto the latest settings, so two quick clicks don't lose the first.
+  const latest = useRef(d.settings);
+  useEffect(() => {
+    latest.current = d.settings;
+  }, [d.settings]);
 
   const save = async (patch: Partial<DeskSettings>) => {
     setBusy("save");
+    const next = { ...latest.current, ...patch };
+    latest.current = next;
     try {
-      onSaved(await saveDeskSettings({ ...s, ...patch }));
+      onSaved(await saveDeskSettings(next));
+      setDraft((x) => Object.fromEntries(Object.entries(x).filter(([k]) => !(k in patch))));
       setMsg(null);
     } catch (err) {
       setMsg((err as Error).message);
@@ -385,7 +397,9 @@ function Settings({ d, onSaved }: { d: DeskState; onSaved(d: DeskState): void })
               max={80}
               step={5}
               value={Math.round(s.min_confidence * 100)}
-              onChange={(e) => void save({ min_confidence: Number(e.target.value) / 100 })}
+              onChange={(e) => setDraft((x) => ({ ...x, min_confidence: Number(e.target.value) / 100 }))}
+              onPointerUp={() => draft.min_confidence != null && void save({ min_confidence: draft.min_confidence })}
+              onKeyUp={() => draft.min_confidence != null && void save({ min_confidence: draft.min_confidence })}
               className="w-28 accent-blue-500"
             />
             {Math.round(s.min_confidence * 100)}%
@@ -400,7 +414,9 @@ function Settings({ d, onSaved }: { d: DeskState; onSaved(d: DeskState): void })
               max={50}
               step={5}
               value={Math.round((s.min_expected_r ?? 0.1) * 100)}
-              onChange={(e) => void save({ min_expected_r: Number(e.target.value) / 100 })}
+              onChange={(e) => setDraft((x) => ({ ...x, min_expected_r: Number(e.target.value) / 100 }))}
+              onPointerUp={() => draft.min_expected_r != null && void save({ min_expected_r: draft.min_expected_r })}
+              onKeyUp={() => draft.min_expected_r != null && void save({ min_expected_r: draft.min_expected_r })}
               className="w-28 accent-blue-500"
             />
             {(s.min_expected_r ?? 0.1).toFixed(2)}R
@@ -520,7 +536,14 @@ export default function DeskPanel(props: DockPanelProps) {
     };
   }, [load]);
 
-  // The selected call on its coin's charts; cleared when another is picked or the panel closes.
+  // The desk changed a call (alerts socket): refresh now rather than on the next poll.
+  useEffect(() => {
+    const now = () => void load();
+    window.addEventListener(DESK_CHANGED, now);
+    return () => window.removeEventListener(DESK_CHANGED, now);
+  }, [load]);
+
+    // The selected call on its coin's charts; cleared when another is picked or the panel closes.
   const drawn = useRef<string | null>(null);
   const draw = useRef(onChartOverlays);
   useEffect(() => {
@@ -529,6 +552,19 @@ export default function DeskPanel(props: DockPanelProps) {
   useEffect(() => () => {
     if (drawn.current) draw.current("desk:selected", drawn.current, []);
   }, []);
+
+  // A chart chip asked for this call: open the list with it selected (works on first mount too).
+  const [asked, setAsked] = usePersistentState<string>(DESK_SELECT_KEY, "");
+  useEffect(() => {
+    if (!asked) return;
+    const c = [...calls, ...watched].find((x) => x.id === asked);
+    if (!c) return;
+    setAsked("");
+    setTab("calls");
+    setFilter(c.status === "waiting" || c.status === "open" ? "active" : "closed");
+    if (selected !== c.id) select(c);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [asked, calls, watched]);
 
   const select = (c: DeskCall) => {
     if (selected === c.id) {
