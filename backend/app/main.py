@@ -706,8 +706,11 @@ async def llm_models(request: Request) -> dict:
 
 @app.put("/api/llm/model")
 async def llm_choose(request: Request, body: dict = Body(...)) -> dict:
-    """{"provider", "model"} switches the agent's model; {"provider": null} goes back to the .env one."""
+    """{"provider", "model"} switches the agent's model; {"provider": null} goes back to the .env one.
+    {"router": "rules_first" | "llm_first" | null} picks who plans requests (null = AGENT_ROUTER)."""
     try:
+        if set(body) == {"router"}:
+            return request.app.state.models.set_router(body["router"])
         choice = ModelChoice.model_validate(body) if body.get("provider") else None
         return request.app.state.models.choose(choice)
     except ValueError as exc:

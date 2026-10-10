@@ -20,8 +20,10 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+import pandas as pd
+
 from . import general
-from .agent_loop import Toolbox, plan_with_tools
+from .agent_loop import LoopResult, Toolbox, plan_with_tools
 from .config import get_settings
 from .derivatives import DerivativesService
 from .dip_ladder import LadderRequest, LadderResult, describe_ladder, ladder_facts, plan_ladder
@@ -31,8 +33,8 @@ from .grid_planner import GridPlanRequest, describe_plan, plan_grid
 from .grid_planner import plan_facts as grid_plan_facts
 from .gridbot import GridBotService
 from .kimi_service import KimiService, summarize
-from .llm import ChartContext, LLMClient
-from .market_data import INTERVAL_SECONDS, MarketData, candles_to_df
+from .llm import ChartContext, LLMClient, rule_route
+from .market_data import FALLBACK_SYMBOLS, INTERVAL_SECONDS, MarketData, candles_to_df
 from .market_metrics import MarketMetricsService, overview_facts
 from .market_scanner import MarketScanner, MarketScanResult
 from .scanner import DEFAULT_WATCHLIST, scan, tickers
@@ -48,6 +50,7 @@ from .schemas import (
     AnalysisIntent,
     AnalyzeRequest,
     AnalyzeResponse,
+    Focus,
     IndicatorLengths,
     BoxOverlay,
     HorizontalLineOverlay,
@@ -58,8 +61,11 @@ from .schemas import (
     ZoneTriggerSpec,
     is_custom_symbol,
 )
-from .ta_agent import (GREEN, ORANGE, TEAL, _fmt, analyze, describe, higher_timeframes, htf_readings, htf_zones,
-                       price_check, rgba)
+from .ta_agent import (GREEN, ORANGE, TEAL, ZONE_BARS, _fmt, analyze, atr, describe, find_swings, higher_timeframes,
+                       htf_readings, htf_zones, price_check, rgba)
+from .focus import focus_line, plan_in_focus
+from .suggest import next_steps
+from .focus import usable as focus_usable
 from .top_down import TopDownResult, describe_walk, walk, walk_facts
 from .trade_plan import build_plan, plan_overlays
 from .level_review import LevelLog
@@ -256,6 +262,13 @@ async def _market_overview(metrics: MarketMetricsService | None) -> dict | None:
     return overview_facts(res) if res else None
 
 
+async def _listed(market: MarketData) -> frozenset[str] | None:
+    """Binance's live USDT pairs, or None when only the built-in fallback list is at hand (synthetic data, or
+    exchangeInfo failed): that list is too short to rule a coin out."""
+    symbols = await _guarded(market.list_symbols(), "symbol list", 5.0)
+    return frozenset(symbols) if symbols and symbols is not FALLBACK_SYMBOLS else None
+
+
 async def _vs_btc(market: MarketData, symbol: str) -> dict | None:
     """The coin against BTC on daily candles (relative.py): change vs BTC today and over 7 days, 30-day correlation
     and beta. None for BTC itself, pairs not quoted in a dollar stablecoin, or when the candles can't be had."""
@@ -304,6 +317,33 @@ def _futures_row(p: dict) -> dict:
                                   "liquidation_price", "unrealized_pnl") if p.get(k) is not None}
 
 
+def held_symbols(pos: dict, min_value: float = 10.0) -> list[str]:
+    """The coins you hold worth `min_value` or more (spot and Simple Earn), biggest first."""
+    return [r["symbol"] for r in pos.get("manual", {}).get("holdings", [])
+            if r.get("value") is not None and r["value"] >= min_value][:40]
+
+
+def _held_row(h: dict) -> dict:
+    """A merged holding (binance_import.merge_holdings) for the narrator: how much, where, cost and gain."""
+    out = {"coin": h["asset"], "qty": h["qty"], "value_usd": h.get("value"), "price": h.get("price")}
+    if h.get("earn_qty"):
+        out["in_spot"], out["in_earn"] = h["spot_qty"], h["earn_qty"]
+    if h.get("locked_qty"):
+        when = time.strftime("%d %b", time.gmtime(h["redeem_at"])) if h.get("redeem_at") else "later"
+        out["locked"] = f"{h['locked_qty']:g} locked in Earn until {when}: can't be sold before then"
+    if h.get("rewards_qty"):
+        out["earn_rewards_qty"] = h["rewards_qty"]
+    if h.get("avg_entry"):
+        out["avg_entry"] = h["avg_entry"]
+        if h.get("price"):
+            out["pnl_pct"] = round((h["price"] / h["avg_entry"] - 1) * 100, 2)
+        if h.get("unrealized_pnl") is not None:
+            out["unrealized_pnl_usd"] = h["unrealized_pnl"]
+            if h.get("rewards_qty"):
+                out["pnl_note"] = "includes Earn rewards, which cost nothing"
+    return out
+
+
 def holding_facts(pos: dict, symbol: str) -> dict | None:
     """What the user holds of `symbol` on Binance: their spot holding (with average entry from imported fills)
     and any USD-M position on it."""
@@ -312,9 +352,12 @@ def holding_facts(pos: dict, symbol: str) -> dict | None:
     spot = next((r for r in manual.get("spot", []) if r["asset"] == base and (r.get("value") or 0) >= 5), None)
     fut = [p for p in manual.get("futures", []) if p["symbol"] == symbol]
     earn = [r for r in manual.get("earn", []) if r["asset"] == base]
-    if not spot and not fut and not earn:
+    held = next((h for h in manual.get("holdings", []) if h["asset"] == base and (h.get("value") or 0) >= 5), None)
+    if not spot and not fut and not earn and not held:
         return None
     out: dict = {}
+    if held:
+        out["held"] = _held_row(held)  # spot and Earn together
     if spot:
         out["spot"] = _spot_row(spot)
     if fut:
@@ -336,6 +379,10 @@ def portfolio_facts(pos: dict) -> dict:
     cash = sum(c["qty"] for c in manual.get("cash", []))
     out: dict = {"spot_value_usd": round(sum(r["value"] for r in spot), 2), "stablecoins_usd": round(cash, 2),
                  "spot": [_spot_row(r) for r in spot[:20]]}
+    held = [h for h in manual.get("holdings", []) if (h.get("value") or 0) >= 5]
+    if held:  # every coin owned, spot and Earn together
+        out["coins_value_usd"] = round(sum(h["value"] for h in held), 2)
+        out["coins"] = [_held_row(h) for h in held[:20]]
     if manual.get("futures"):
         out["futures"] = [_futures_row(p) for p in manual["futures"][:10]]
     earn = [r for r in manual.get("earn", []) if (r.get("value") or 0) >= 1]
@@ -382,7 +429,8 @@ async def _chart_cvd(futures: FuturesDataService | None, symbol: str, tf: str) -
 
 
 # Left out of the "numbers used" view: tool transcripts and what the answer did rather than read.
-USED_SKIP = frozenset({"research", "actions", "navigation", "spot_note", "trading_style"})
+USED_SKIP = frozenset({"research", "actions", "navigation", "spot_note", "trading_style", "symbol", "coin",
+                       "data_source"})
 SHOW_VERBS = re.compile(r"\b(?:show|add|turn on|switch on|enable|display|plot|put|overlay|bring up|pull up|"
                         r"draw|toggle|apply|equip|load)\b", re.I)
 FUTURES_WORDS = re.compile(r"\b(funding|open interest|oi|long[ /-]?short|l/s|liquidat\w*|order ?book|walls?|cvd|"
@@ -632,6 +680,28 @@ async def _grid_plan(gridbots: GridBotService | None, symbol: str):
         return None
 
 
+async def _plan_in_focus(market: MarketData, f: Focus, symbol: str, tf: str, df: pd.DataFrame, result,
+                         htf: dict | None, custom_chart: bool) -> dict | None:
+    """plan_in_focus on the plan's own timeframe: this chart's candles when it is the same, else that timeframe's."""
+    assert f.plan is not None
+    if not f.interval or f.interval == tf:
+        return plan_in_focus(f.plan, f.at, df, result.stats.last_price, result.stats.atr, result.swing_lows,
+                             result.swing_highs, htf)
+    if custom_chart:
+        return None
+    try:
+        candles, _ = await market.get_klines(symbol, f.interval, ZONE_BARS)
+    except Exception:
+        return None
+    fdf = candles_to_df(candles)
+    if len(fdf) < 30:
+        return None
+    a = float(atr(fdf).iloc[-1])
+    highs, lows = find_swings(fdf, a)
+    return plan_in_focus(f.plan, f.at, fdf, float(fdf["close"].iloc[-1]), a, [s.price for s in lows],
+                         [s.price for s in highs], htf)
+
+
 async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
                        derivatives: DerivativesService | None = None, kimi: KimiService | None = None,
                        futures: FuturesDataService | None = None,
@@ -651,18 +721,29 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
     plan and the rest go to `on_result` before the summary is written, and the summary to `on_delta` as it is."""
     settings = get_settings()
     scanner = scanner or MarketScanner(market)
-    chart = ChartContext(req.symbol, req.interval, req.watchlist, req.spot_only)
+    chart = ChartContext(req.symbol, req.interval, req.watchlist, req.spot_only, await _listed(market),
+                         focus_line(req.focus) if focus_usable(req.focus, req.symbol) else "")
     steps: list[str] = []
     research: list[dict] = []
     loop = None
-    if req.prompt.strip() and llm.available() and settings.agent_mode == "tools":
+    # Rules first: a request the rule parser is sure of is planned in milliseconds, without the model.
+    route = None
+    if req.prompt.strip() and llm.available() and llm.router == "rules_first":
+        known = {w.removesuffix("USDT") for w in chart.watchlist}
+        route = rule_route(req.prompt, req.previous_intent, known, chart.symbol, chart.listed)
+        log.info("Route %r: %s", req.prompt[:60], route.reason)
+    if route is not None and route.confident:
+        loop = LoopResult(route.intent, "rules (fast path)")
+    elif req.prompt.strip() and llm.available() and settings.agent_mode == "tools":
         box = make_toolbox(market, derivatives, req.watchlist, kimi, futures, events, scanner, req.spot_only, metrics,
                            req.indicator_settings)
         loop = await plan_with_tools(llm, req.prompt, req.history, req.overlays, req.previous_intent, chart, box,
                                      settings.agent_max_steps)
-    if loop:
+    if loop and loop.intent is not None:
         intent, intent_engine, steps, research = loop.intent, loop.engine, loop.steps, loop.research
     else:
+        if loop:  # the tools looked but never drew: keep what they found
+            steps, research = loop.steps, loop.research
         intent, intent_engine = await llm.parse_intent(req.prompt, req.history, req.overlays, req.previous_intent,
                                                        chart)
     # Asking about an indicator reads it; only "add", "show" or "turn on" puts it on the chart (Kimi has its own rule).
@@ -748,7 +829,10 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
     want_sell = (intent.sell_check or spot_note is not None) and not custom_chart
     base = re.sub(r"(?:USDT|USDC|FDUSD|BUSD|BTC)$", "", symbol) or symbol
     one_coin = bool(intent.symbol or spot_note or re.search(rf"\b{re.escape(base)}\b", req.prompt, re.I))
-    sell_symbols = [symbol] if one_coin else (req.watchlist or DEFAULT_WATCHLIST)
+    held_now = await _positions(binance) if want_sell and not one_coin else None
+    held_syms = held_symbols(held_now) if held_now else []
+    # "What should I sell?" checks what you hold (spot and Earn); the watchlist without a read-only key.
+    sell_symbols = [symbol] if one_coin else (held_syms or req.watchlist or DEFAULT_WATCHLIST)
     sell_tf = timeframe_for(tf)
     extras = asyncio.gather(
         _sells(market, sell_symbols, sell_tf) if want_sell else _none(),
@@ -779,7 +863,11 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
     df = candles_to_df(candles)
     # Detection is CPU-bound (SciPy); keep the event loop free for streams.
     result = await asyncio.to_thread(analyze, df, run_intent, tf, higher, frames, req.indicator_settings)
-    facts = dict(result.facts)
+    # The coin by name, so the narrator never guesses one, and a flag when the candles are demo data. The chart's own
+    # candles ("client") are demo data when this server only has synthetic data to give.
+    demo = source == "synthetic" or (source == "client" and market.settings.data_source == "synthetic")
+    facts = {"symbol": symbol, "coin": symbol if custom_chart else base,
+             **({"data_source": "demo (synthetic)"} if demo else {}), **result.facts}
 
     for ov in result.overlays:
         ov.id = _new_id()
@@ -843,6 +931,17 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
             facts["your_holdings"] = portfolio_facts(positions)
     if (asked := asked_price(req.prompt, intent, result.stats.last_price)) is not None:
         facts["price_in_question"] = await asyncio.to_thread(price_check, df, asked, tf, htf_frames)
+    if req.focus and not intent.trade_plan and focus_usable(req.focus, symbol):
+        # "What would invalidate this?" under a plan: "this" is the plan in focus (focus.py).
+        f = req.focus
+        if f.kind == "plan" and f.plan is not None:
+            pf = await _plan_in_focus(market, f, symbol, tf, df, result, facts.get("higher_timeframes"), custom_chart)
+            if pf is not None:
+                facts["plan_in_focus"] = pf
+        elif f.kind in ("price", "zone") and "price_in_question" not in facts:
+            price = f.price or ((f.zone_low + f.zone_high) / 2 if f.zone_low and f.zone_high else None)
+            if price:
+                facts["price_in_question"] = await asyncio.to_thread(price_check, df, price, tf, htf_frames)
     if desk is not None and not custom_chart and (dk := desk.facts_for(symbol)):
         facts["agent_desk"] = dk  # the calls the desk made on its own on this coin (agent_desk.py)
     if desk is not None and WORKING_WORDS.search(req.prompt):
@@ -945,7 +1044,8 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         summary="",
         intent=intent,
         stats=result.stats,
-        engine={"intent": intent_engine, "summary": "pending", "detector": "scipy"},
+        engine={"intent": intent_engine, "summary": "pending", "detector": "scipy",
+                **({"route": route.reason} if route is not None else {})},
         data_source=source,
         alerts=alerts,
         navigate=navigate,
@@ -963,7 +1063,11 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         sells=sells or [],
         sell_watch=SellWatch(symbols=sell_symbols[:40], interval=sell_tf) if sells is not None else None,
         facts=round_facts({k: v for k, v in narrate_facts.items() if k not in USED_SKIP}),
+        question_only=bool(req.prompt.strip()) and intent.keep_existing and not intent.features
+        and not intent.has_actions and not intent.take_profit,
     )
+    if not custom_chart:
+        res.suggestions = next_steps(narrate_facts, intent, symbol, tf, req.spot_only)
     if on_result is not None:
         await on_result(res)
     sources: list[dict[str, str]] = []

@@ -43,6 +43,7 @@ from .kimi_service import closed_only, summarize as kimi_summarize
 from .market_data import INTERVAL_SECONDS, MarketData, candles_to_df
 from .scanner import DEFAULT_WATCHLIST, SCAN_INTENT, summarize as scan_summarize
 from .schemas import Interval, ScanResult, norm_symbol
+from .ta_agent import ZONE_BARS
 from .ta_agent import TF_LABEL, analyze
 
 if TYPE_CHECKING:
@@ -290,16 +291,23 @@ def market_line(metrics: Any) -> Optional[str]:
 
 def holdings_lines(pos: dict) -> list[str]:
     """Your own spot holdings (worth $5 or more) and USD-M positions from binance_import.positions."""
-    spot = sorted((r for r in pos.get("manual", {}).get("spot", []) if (r.get("value") or 0) >= 5),
+    manual = pos.get("manual", {})
+    merged = manual.get("holdings")
+    spot = sorted((r for r in (merged if merged is not None else manual.get("spot", [])) if (r.get("value") or 0) >= 5),
                   key=lambda r: -(r.get("value") or 0))
-    futures = pos.get("manual", {}).get("futures", [])
+    futures = manual.get("futures", [])
     if not spot and not futures:
         return []
     total = sum(r["value"] for r in spot)
     out = [f"Your holdings: ${total:,.0f} in {len(spot)} coin{'s' if len(spot) != 1 else ''}" if spot
            else "Your holdings"]
     for r in spot[:15]:
-        line = f"{r['asset']} {r['own_qty']:g} · ${r['value']:,.0f}"
+        line = f"{r['asset']} {r.get('qty', r.get('own_qty', 0)):g} · ${r['value']:,.0f}"
+        if r.get("locked_qty"):
+            until = time.strftime("%d %b", time.gmtime(r["redeem_at"])) if r.get("redeem_at") else "later"
+            line += f" ({r['locked_qty']:g} locked in Earn until {until})"
+        elif r.get("earn_qty"):
+            line += f" ({r['earn_qty']:g} in Earn)"
         if r.get("avg_entry") and r.get("price"):
             line += f" · avg {fmt_price(r['avg_entry'])}, {(r['price'] / r['avg_entry'] - 1) * 100:+.1f}%"
             if r.get("unrealized_pnl") is not None:
@@ -394,6 +402,7 @@ class BriefService:
         self._notes: dict[str, str] = {k: str(v) for k, v in (data.get("notes") or {}).items() if v}
         self._last_review: str = str(data.get("last_review") or "")  # ISO week of the last weekly check, "2026-W41"
         self._task: asyncio.Task | None = None
+        self._error: Optional[str] = None  # a failure tick() caught, for the status panel
         self._send_lock = asyncio.Lock()
 
     # ----------------------------------------------------------- settings
@@ -473,7 +482,7 @@ class BriefService:
                            data_source="synthetic" if any(c.source == "synthetic" for c in coins) else "binance")
 
     async def _coin(self, sym: str, interval: str, secs: BriefSections) -> CoinBrief:
-        candles, source = await self.market.get_klines(sym, interval, 300)
+        candles, source = await self.market.get_klines(sym, interval, ZONE_BARS + 1)
         if len(candles) < 60:
             return CoinBrief(sym, error="not enough history")
         df = candles_to_df(candles)
@@ -588,7 +597,8 @@ class BriefService:
             return False
         try:
             await self.send(now=ts)
-        except Exception:
+        except Exception as exc:
+            self._error = f"Scheduled brief failed: {exc}"
             log.exception("Scheduled brief failed")
             return False
         return True
@@ -621,7 +631,8 @@ class BriefService:
         self._save()  # before sending, like the brief: never twice in one week
         try:
             await self.send_review(now=ts)
-        except Exception:
+        except Exception as exc:
+            self._error = f"Weekly level check failed: {exc}"
             log.exception("Weekly level check failed")
             return False
         return True
@@ -641,9 +652,13 @@ class BriefService:
     async def _run(self) -> None:
         while True:
             await asyncio.sleep(self.check_seconds)
+            self._error = None
             try:
                 await self.tick()
-                jobs.ok("brief")
+                if self._error:  # a failed send is caught inside tick(); still show it on Status
+                    jobs.fail("brief", self._error)
+                else:
+                    jobs.ok("brief")
             except Exception as exc:
                 jobs.fail("brief", exc)
                 log.exception("Brief scheduler check failed")

@@ -23,6 +23,7 @@ import {
   type AccountFill,
   type AccountMarket,
   type AccountPositions,
+  type MergedHolding,
   type BinanceKeyStatus,
   type EarnPosition,
   type FillKind,
@@ -652,6 +653,45 @@ function CoachView({ enabled, version }: { enabled: boolean; version: number }) 
   );
 }
 
+/** Every coin owned, spot and Simple Earn together, with where it sits and a totals footer. */
+function MergedHoldings({ rows }: { rows: MergedHolding[] }) {
+  const shown = rows.filter((h) => (h.value ?? 0) >= 1 || h.value == null);
+  const total = shown.reduce((a, h) => a + (h.value ?? 0), 0);
+  const pnl = shown.reduce((a, h) => a + (h.unrealized_pnl ?? 0), 0);
+  const day = (t: number) => new Date(t * 1000).toLocaleDateString([], { day: "numeric", month: "short" });
+  return (
+    <Section title="Everything you own" right={<span className="font-mono text-[11px] text-ink">{money(total)} USDT</span>}>
+      {shown.map((h) => (
+        <div key={h.key} className="flex flex-wrap items-center gap-x-2 gap-y-0.5 font-mono text-[11px]">
+          <span className="w-14 font-sans font-medium text-ink">{h.asset}</span>
+          <span className="text-ink">{qty(h.qty)}</span>
+          {h.spot_qty > 0 && h.earn_qty > 0 && <span className="rounded border border-line px-1 font-sans text-[10px] text-mute">spot {qty(h.spot_qty)}</span>}
+          {h.earn_qty > 0 && (
+            <span className="rounded border border-accent/40 px-1 font-sans text-[10px] text-accent" title={h.locked_qty ? `${qty(h.locked_qty)} locked until ${h.redeem_at ? day(h.redeem_at) : "the term ends"}` : "Flexible: can be redeemed any time"}>
+              Earn {qty(h.earn_qty)}
+              {h.locked_qty > 0 ? ` · locked to ${h.redeem_at ? day(h.redeem_at) : "term end"}` : ""}
+            </span>
+          )}
+          <span className="flex-1" />
+          {h.avg_entry != null && <span className="text-mute">avg {formatPrice(h.avg_entry)}</span>}
+          <span className="text-ink">{h.value != null ? `$${money(h.value)}` : "–"}</span>
+          {h.unrealized_pnl != null && (
+            <span className={h.unrealized_pnl >= 0 ? "text-up" : "text-down"} title={h.rewards_qty ? `Includes ${qty(h.rewards_qty)} ${h.asset} of Earn rewards, which cost nothing` : undefined}>
+              {h.unrealized_pnl >= 0 ? "+" : "−"}${money(Math.abs(h.unrealized_pnl))}
+            </span>
+          )}
+        </div>
+      ))}
+      <div className="flex justify-between border-t border-line pt-1 font-mono text-[11px]">
+        <span className="font-sans text-mute">Total, coins with a known entry</span>
+        <span className={pnl >= 0 ? "text-up" : "text-down"}>
+          {pnl >= 0 ? "+" : "−"}${money(Math.abs(pnl))}
+        </span>
+      </div>
+    </Section>
+  );
+}
+
 function PositionsView({ bots, enabled }: { bots: GridBot[]; enabled: boolean }) {
   const [data, setData] = useState<AccountPositions | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -702,6 +742,7 @@ function PositionsView({ bots, enabled }: { bots: GridBot[]; enabled: boolean })
       {!data && !error && <Loader2 className="mx-auto h-4 w-4 animate-spin text-mute" />}
       {m && b && (
         <>
+          {m.holdings && m.holdings.length > 0 && <MergedHoldings rows={m.holdings} />}
           <Section title="Your spot holdings">
             {m.spot.length === 0 && <p className="text-[11px] text-mute">No coins of your own in the spot wallet.</p>}
             {m.spot.map((h) => (

@@ -94,13 +94,17 @@ def _call(i, bucket, hit, rr=2.0, days_ago=3):
 
 
 def test_working_now_ranks_setups_against_random_odds():
-    good = [_call(i, "4h|demand|fresh|htf|with", i < 6) for i in range(8)]       # 6/8 at 2R: random gives 2.7
-    bad = [_call(i, "4h|support|-|nohtf|against", i < 1) for i in range(8)]      # 1/8
+    good = [_call(i, "4h|demand|fresh|htf|with", i < 10) for i in range(14)]     # 10/14 at 2R: random gives 4.7
+    bad = [_call(i, "4h|support|-|nohtf|against", i < 1) for i in range(14)]     # 1/14
     old = [_call(i, "4h|supply|x", True, days_ago=60) for i in range(8)]          # outside the window
-    few = [_call(i, "4h|demand|tested|nohtf|mixed", True) for i in range(3)]     # too few to judge
-    rows = working_now(good + bad + old + few, T0)
-    assert [r["bucket"] for r in rows] == ["4h|demand|fresh|htf|with", "4h|support|-|nohtf|against"]
-    assert rows[0]["verdict"] == "working" and rows[0]["lift"] > 2 and rows[1]["verdict"] == "not working"
+    few = [_call(i, "4h|demand|tested|nohtf|mixed", True) for i in range(3)]     # too few to list
+    lucky = [_call(i, "4h|demand|fresh|nohtf|with", i < 3) for i in range(5)]    # 3/5: chance does this often
+    rows = working_now(good + bad + old + few + lucky, T0)
+    assert [r["bucket"] for r in rows] == ["4h|demand|fresh|htf|with", "4h|demand|fresh|nohtf|with",
+                                           "4h|support|-|nohtf|against"]
+    assert rows[0]["verdict"] == "working" and rows[0]["lift"] > 2 and rows[0]["p"] < 0.1
+    assert rows[1]["verdict"] == "too early (5 zones)"
+    assert rows[2]["verdict"] == "not working"
 
 
 def test_api_coach_and_changes():

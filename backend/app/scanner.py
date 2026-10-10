@@ -23,9 +23,16 @@ RESIST_KINDS = ("resistance", "supply")
 
 
 def change_24h(df: pd.DataFrame) -> float | None:
+    """% change of the last close against the price 24 hours before it: the close of the last candle that closed by
+    then (on 1d that is yesterday's close, not its open), or the first open when the candles start later."""
+    if df.empty:
+        return None
     last = df.iloc[-1]
-    ref = df[df["time"] >= int(last["time"]) - 86400]
-    base = float(ref["open"].iloc[0]) if len(ref) else float(df["open"].iloc[-1])
+    times = df["time"].to_numpy()
+    step = int(times[1] - times[0]) if len(times) > 1 else 86400
+    cutoff = int(last["time"]) + step - 86400  # 24 h before the last candle's close
+    before = df[df["time"] + step <= cutoff]
+    base = float(before["close"].iloc[-1]) if len(before) else float(df["open"].iloc[0])
     return round((float(last["close"]) / base - 1) * 100, 2) if base > 0 else None
 
 

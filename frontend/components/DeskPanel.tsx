@@ -120,6 +120,7 @@ function CallRow({ c, selected, onSelect }: { c: DeskCall; selected: boolean; on
           <span className="rounded bg-panel2 px-1 text-[10px] text-mute">{tf}</span>
           <span className={clsx("rounded border px-1 py-px text-[10px]", STATUS_CLASS[c.status])}>
             {c.shadow && c.status === "waiting" ? "Watching" : c.shadow && c.status === "open" ? "Watching (in zone)" : STATUS_LABEL[c.status]}
+            {c.shadow && c.skip_reason ? ` · not called: ${c.skip_reason}` : ""}
           </span>
           {c.data_source === "synthetic" && <span className="text-[10px] text-yellow-300">demo</span>}
           <span className="flex-1" />
@@ -240,10 +241,10 @@ function Record({ d, wallet }: { d: DeskState; wallet: PaperWallet | null }) {
             <span className="min-w-0 flex-1 truncate text-ink" title={r.setup}>
               {r.setup}
             </span>
-            <span className="font-mono text-mute">
-              {r.hits}/{r.zones}
+            <span className="font-mono text-mute" title={r.p != null ? `Random odds would do this ${Math.round(r.p * 100)}% of the time` : undefined}>
+              {r.hits}/{r.zones} · {r.verdict}
             </span>
-            <span className={clsx("w-12 text-right font-mono", r.lift >= 1.2 ? "text-up" : r.lift <= 0.8 ? "text-down" : "text-mute")}>{r.lift.toFixed(2)}x</span>
+            <span className={clsx("w-12 text-right font-mono", r.verdict === "working" ? "text-up" : r.verdict === "not working" ? "text-down" : "text-mute")}>{r.lift.toFixed(2)}x</span>
           </div>
         ))}
       </Section>

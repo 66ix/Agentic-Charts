@@ -38,6 +38,7 @@ from .kimi_service import HISTORY_DAYS, LABELS, TYPE_NAMES, closed_only, kimi_in
 from .market_data import DERIVED_INTERVALS, INTERVAL_SECONDS, MAX_KLINES, candles_to_df
 from .patterns import liquidity_sweeps
 from .schemas import Candle, Interval, norm_symbol
+from .ta_agent import ZONE_BARS
 from .ta_agent import TF_LABEL, Swing, atr, cluster_levels, find_swings, pick_nearest, supply_demand_zones
 
 if TYPE_CHECKING:
@@ -46,7 +47,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-WINDOW = 400   # candles the detectors see at each step
+WINDOW = ZONE_BARS   # candles the detectors see at each step
 STEP = 5       # re-detect every this many candles
 WARMUP = 60    # first candle that can trade (detectors need some history)
 PER_SIDE = 2   # zones per side of price, as the agent draws them (AnalysisIntent.max_zones default)

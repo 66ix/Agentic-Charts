@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Iterable, Literal
+from typing import Iterable, Literal, Optional
 
 import numpy as np
 import pandas as pd
@@ -231,6 +231,14 @@ class Swing:
     structure: str = ""  # HH / LH / HL / LL
 
 
+# Zones must not depend on how many candles a caller loaded: the chart, the agent, the desk, the scanner, the brief,
+# the sell check, the backtest and the top-down all detect on ZONE_BARS closed candles, swings use one fixed spacing,
+# and a level's recency decays over absolute bars.
+ZONE_BARS = 500
+SWING_DISTANCE = 8        # bars between swing points (what the 500-candle chart always used)
+RECENCY_BARS = 300.0      # a level last touched this many bars ago scores e^-1 of a fresh one for recency
+
+
 def find_swings(
     df: pd.DataFrame, atr_value: float, distance: int | None = None, prominence_atr: float = 1.0
 ) -> tuple[list[Swing], list[Swing]]:
@@ -238,7 +246,7 @@ def find_swings(
     n = len(df)
     if n < 5:
         return [], []
-    distance = distance or max(3, min(12, n // 60))
+    distance = distance or SWING_DISTANCE
     prominence = max(atr_value * prominence_atr, 1e-12)
     times = df["time"].to_numpy()
 
@@ -314,7 +322,7 @@ def cluster_levels(
         highs = sum(1 for s in members if s.kind == "high")
         last_idx = max(s.idx for s in members)
         touches = len(members)
-        recency = last_idx / max(n_bars - 1, 1)
+        recency = float(np.exp(-max(0, n_bars - 1 - last_idx) / RECENCY_BARS))
         prom = np.mean([s.prominence for s in members]) / max_prom
         score = 0.45 * min(touches / 4, 1.0) + 0.30 * recency + 0.25 * prom
         if hi < last_price:
@@ -402,11 +410,12 @@ def supply_demand_zones(
         closes_after = c[after]
         if bullish:
             invalid = bool((closes_after < lo).any())
-            # A "test" is a later bar wicking back into the zone.
-            tests = int(((l[after] <= hi) & (l[after] >= lo)).sum())
+            # A "test" is a later visit back into the zone: one run of candles trading at or below its top, however
+            # many candles it lasts (a wick right through counts too).
+            tests = _visits(l[after] <= hi)
         else:
             invalid = bool((closes_after > hi).any())
-            tests = int(((h[after] >= lo) & (h[after] <= hi)).sum())
+            tests = _visits(h[after] >= lo)
         if not invalid:
             strength = min(abs(move) / (a[i - 1] * impulse_atr * 2), 1.0)
             freshness = 1.0 / (1 + tests)
@@ -415,6 +424,28 @@ def supply_demand_zones(
                               meta={"impulse_atr": round(abs(move) / a[i - 1], 2)}))
         i += 2
     return _dedupe_zones(zones)
+
+
+def _trendline_break(df: pd.DataFrame, a: Swing, b: Swing, atr_v: float, resistance: bool) -> Optional[int]:
+    """Bars ago that a close first crossed the line through swings `a` and `b` by more than 0.1 ATR after `b`
+    (above a resistance line, below a support line), or None while it holds."""
+    if b.idx <= a.idx:
+        return None
+    closes = df["close"].to_numpy()[b.idx + 1:]
+    if not closes.size:
+        return None
+    k = np.arange(b.idx + 1, b.idx + 1 + closes.size)
+    line = b.price + (b.price - a.price) / (b.idx - a.idx) * (k - b.idx)
+    beyond = closes > line + 0.1 * atr_v if resistance else closes < line - 0.1 * atr_v
+    hit = np.flatnonzero(beyond)
+    return None if not hit.size else len(df) - 1 - int(k[hit[0]])
+
+
+def _visits(mask: np.ndarray) -> int:
+    """Separate runs of True: visits to a zone, not candles spent in it."""
+    if not mask.size:
+        return 0
+    return int(mask[0]) + int((mask[1:] & ~mask[:-1]).sum())
 
 
 def _dedupe_zones(zones: list[Zone]) -> list[Zone]:
@@ -470,22 +501,42 @@ def higher_timeframes(tf: str, n: int = 2) -> list[str]:
     return list(HTF_LADDER[i + 1:i + 1 + n])
 
 
+HTF_MIN_OVERLAP = 0.3  # of the thinner zone, for a zone to line up with a higher-timeframe one
+HTF_PER_SIDE = 3
+
+
 def htf_zones(df: pd.DataFrame) -> list[Zone]:
-    """S/R and supply/demand zones on a higher-timeframe frame, for confluence checks."""
+    """The higher-timeframe zones that matter, for confluence checks: S/R touched at least twice that held at least as
+    often as it broke, untested or once-tested supply/demand, the HTF_PER_SIDE nearest-strongest above and below."""
     df = df.reset_index(drop=True)
     if len(df) < 30:
         return []
     atr_s = atr(df)
     a = float(atr_s.iloc[-1])
+    last = float(df["close"].iloc[-1])
     highs, lows = find_swings(df, a)
-    return cluster_levels(highs + lows, a, float(df["close"].iloc[-1]), len(df)) + supply_demand_zones(df, atr_s)
+    sr = []
+    for z in cluster_levels(highs + lows, a, last, len(df)):
+        if z.touches < 2:
+            continue
+        rec = zone_record(df, z, a)
+        if rec["broke"] <= rec["held"]:
+            sr.append(z)
+    sd = [z for z in supply_demand_zones(df, atr_s) if z.tests <= 1]
+    return pick_nearest(sr + sd, last, HTF_PER_SIDE)
+
+
+_BULLISH = {"support", "demand"}
 
 
 def mark_confluence(zones: list[Zone], frames: dict[str, list[Zone]]) -> None:
-    """Tag zones that overlap a zone on a higher timeframe and raise their score."""
+    """Tag zones that line up with a higher-timeframe zone of the same polarity (support/demand with support/demand,
+    resistance/supply with resistance/supply), overlapping by at least HTF_MIN_OVERLAP of the thinner one, and raise
+    their score."""
     for z in zones:
+        bull = z.kind in _BULLISH
         hits = [TF_LABEL.get(tf, tf) for tf, hz in frames.items()
-                if any(min(z.price_high, h.price_high) > max(z.price_low, h.price_low) for h in hz)]
+                if any((h.kind in _BULLISH) == bull and z.overlap_ratio(h) >= HTF_MIN_OVERLAP for h in hz)]
         if hits:
             z.meta["htf"] = hits
             z.score = min(1.0, z.score + 0.15 * len(hits))
@@ -773,9 +824,12 @@ def analyze(
             falling = b.price < a.price
             # Only the "meaningful" direction: lower highs or higher lows.
             if (pts is highs and falling) or (pts is lows and not falling):
+                broken = _trendline_break(df, a, b, atr_v, resistance=pts is highs)
+                label = f"{tfl} {name}" + (f" (broken {broken} bar{'s' if broken != 1 else ''} ago)"
+                                           if broken is not None else "")
                 overlays.append(TrendlineOverlay(
-                    time1=a.time, price1=a.price, time2=b.time, price2=b.price, extend_right=True,
-                    color=color, label=f"{tfl} {name}", kind="trendline",
+                    time1=a.time, price1=a.price, time2=b.time, price2=b.price, extend_right=broken is None,
+                    color=color, label=label, kind="trendline", line_style="dashed" if broken is not None else "solid",
                 ))
 
     if "liquidity_sweeps" in feats:
@@ -1045,6 +1099,68 @@ def _break_sentence(br: dict) -> str:
     return f"{lead} {br['direction']} {ago} (a {kind} through {_fmt(br['level'])}), so {who} have the upper hand."
 
 
+def _focus_sentences(pf: dict, last: float) -> list[str]:
+    """The plan the user is asking about: where it is wrong, whether it filled, and whether the higher timeframes
+    agree."""
+    inv = pf.get("invalidation") or {}
+    sd = pf.get("stop_distance") or {}
+    away = f" ({abs(sd['pct']):g}% away)" if sd.get("pct") is not None else ""
+    side = "below" if pf["direction"] == "long" else "above"
+    s = f"The {pf['direction']} plan is wrong on a close {side} {_fmt(inv.get('stop', pf['stop']))}, the stop{away}"
+    if inv.get("structure_level") is not None:
+        s += f"; a close {side} {_fmt(inv['structure_level'])} ({inv.get('why', 'structure')}) is the first warning"
+    out = [s + "."]
+    if pf.get("stop_hit_since"):
+        out.append("Since it was given it filled and the stop has been hit, so the idea is done.")
+    elif pf.get("t1_hit_since"):
+        out.append("Since it was given it filled and reached T1.")
+    elif pf.get("filled_since"):
+        out.append("It has filled since it was given and is still open.")
+    else:
+        ed = pf.get("entry_distance") or {}
+        out.append(f"It hasn't filled yet: the entry {_fmt(pf['entry'])} is "
+                   + (f"{abs(ed['pct']):g}% away." if ed.get("pct") is not None else "still waiting."))
+    verdict, trends = pf.get("htf_verdict"), pf.get("higher_timeframes") or {}
+    if verdict in ("agrees", "disagrees", "mixed") and trends:
+        listing = ", ".join(f"{tf} {t}" for tf, t in trends.items())
+        out.append({"agrees": "The higher timeframes agree", "disagrees": "The higher timeframes disagree",
+                    "mixed": "The higher timeframes are mixed"}[verdict] + f" ({listing}).")
+    return out
+
+
+def _indicator_sentences(ind: dict, prompt: str) -> list[str]:
+    """The indicator the question names, read out whatever its value (not only at extremes)."""
+    out: list[str] = []
+    p = prompt.lower()
+    if "rsi" in p and "stoch" not in p and ind.get("rsi") is not None:
+        r = ind["rsi"]
+        out.append(f"RSI is {r}" + (", overbought." if r >= 70 else ", oversold." if r <= 30 else ", in the middle."))
+    if "stoch" in p and (st := ind.get("stoch_rsi")):
+        out.append(f"Stoch RSI is {st['k']} ({st['zone']}).")
+    if "macd" in p and (m := ind.get("macd")):
+        side = "above" if (m.get("hist") or 0) > 0 else "below"
+        out.append(f"The MACD histogram is {_fmt(m['hist'])}, {side} zero and "
+                   f"{'rising' if m.get('hist_rising') else 'falling'}.")
+    if "ema" in p and ind.get("ema_fast") is not None:
+        out.append(f"Price is {ind.get('price_vs_ema', 'around')} the EMAs ({_fmt(ind['ema_fast'])} / "
+                   f"{_fmt(ind['ema_slow'])}).")
+    if "bollinger" in p and (bb := ind.get("bollinger")):
+        out.append(f"Bollinger bands {_fmt(bb['lower'])}–{_fmt(bb['upper'])}, %B {bb.get('pct_b')}.")
+    if "vwap" in p and isinstance(ind.get("vwap"), dict) and ind["vwap"].get("value") is not None:
+        out.append(f"VWAP is {_fmt(ind['vwap']['value'])}, price {ind['vwap'].get('price', 'near it')}.")
+    return out
+
+
+def _htf_sentences(htf: dict, trend: str | None) -> list[str]:
+    if not htf:
+        return []
+    rows = ", ".join(f"{tf} {r.get('trend')}" + (f" (RSI {r['rsi']})" if r.get("rsi") is not None else "")
+                     for tf, r in htf.items())
+    here = {"up": "up", "down": "down"}.get(trend or "", "mixed")
+    agree = all(r.get("trend") == here for r in htf.values())
+    return [f"Higher timeframes: {rows}" + ("; they agree with this one." if agree else ".")]
+
+
 def _momentum_sentence(mom: dict) -> str | None:
     r = mom.get("rsi")
     if mom.get("divergence"):
@@ -1141,6 +1257,8 @@ def _price_sentences(q: dict, last: float) -> list[str]:
 
 
 _TOPIC_WORDS = (
+    ("indicators", r"\b(rsi|macd|ema|bollinger|stoch|vwap|sar|cvd)\b"),
+    ("htf", r"\b(agree|daily|weekly|htf|higher time ?frames?)\b"),
     ("supply_demand", r"\b(supply|demand)\b"),
     ("windows", r"\b(window|high of|low of|range high|range low|resistance high|support low)\b"),
     ("support_resistance", r"\b(support|resistance|levels?)\b"),
@@ -1164,12 +1282,19 @@ def describe(facts: dict, symbol: str, detail: str = "normal", prompt: str = "")
     body: list[tuple[str, str]] = []  # (topic, sentence), in order of importance
     tail: list[str] = list(facts.get("navigation", []))  # always said
 
+    if facts.get("plan_in_focus"):
+        lead += _focus_sentences(facts["plan_in_focus"], last)
     if facts.get("price_in_question"):
         lead += _price_sentences(facts["price_in_question"], last)
 
     for kind in ("resistance", "support"):
         if facts.get(kind):
             body.append(("support_resistance", _zone_sentence(kind, facts[kind][0], tf)))
+    if "resistance" in facts and not facts["resistance"]:
+        body.append(("support_resistance", f"No resistance above on the {tf}: open space."))
+    body += [("indicators", x) for x in _indicator_sentences(facts.get("indicators") or {}, prompt)]
+    if "htf" in asked and not facts.get("plan_in_focus"):  # "does the daily agree?" (a plan in focus says it)
+        body += [("htf", x) for x in _htf_sentences(facts.get("higher_timeframes") or {}, facts.get("trend"))]
     for kind, side in (("supply", "above"), ("demand", "below")):
         if kind in facts and not facts[kind]:
             body.append(("supply_demand", f"There's no unmitigated {tf} {kind} zone {side} price right now."))

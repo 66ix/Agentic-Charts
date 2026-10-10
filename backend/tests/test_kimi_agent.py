@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from app.kimi_agent import FEATURES, apply_fix, features, forecast_fix, signal_filter
+from app.kimi_agent import FEATURES, apply_fix, features, forecast_fix, signal_filter, verdict_key
 from app.market_data import synthetic_klines
 
 
@@ -76,7 +76,7 @@ def test_the_signal_filter_learns_which_signals_to_take():
     sigs, feats = _signals(informative=True)
     sf = signal_filter(sigs, feats)
     assert sf.active and sf.take_r > 0 > sf.skip_r and sf.take_r > sf.all_r and sf.t >= 1.65
-    taken = [s for s in sigs if sf.verdicts.get(s.bar, ("", 0))[0] == "take"]
+    taken = [s for s in sigs if sf.verdicts.get(verdict_key(s), ("", 0))[0] == "take"]
     assert taken and all(s.typ == 0 for s in taken)
     aligned = np.mean([feats[s.bar, 1] * s.dir > 0 for s in taken])
     assert aligned > 0.8

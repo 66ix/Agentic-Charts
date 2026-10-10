@@ -24,12 +24,18 @@ COMMON = {"BTC", "ETH", "SOL", "BNB", "XRP", "INJ", "DOGE", "ADA", "AVAX", "DOT"
 QUOTES = ("USDT", "USDC", "FDUSD")
 
 
-def find_symbol(text: str, known_bases: set[str] | None = None) -> str | None:
-    """The first coin mentioned in `text`, as a USDT pair, or None."""
+def find_symbol(text: str, known_bases: set[str] | None = None, listed: frozenset[str] | None = None) -> str | None:
+    """The first coin mentioned in `text`, as a USDT pair, or None. `listed` is Binance's live USDT pairs, when
+    known: a typed USDT pair that isn't on it is skipped for the coin names and tickers in the text."""
     bases = COMMON | (known_bases or set())
-    m = re.search(r"\b([A-Za-z0-9]{2,12})(?:/|-)?(USDT|USDC|FDUSD)\b", text, flags=re.I)
-    if m and m.group(1).upper() not in ("THE", "ON", "IN"):
-        return f"{m.group(1).upper()}{m.group(2).upper()}"
+    for m in re.finditer(r"\b([A-Za-z0-9]{2,12})(?:/|-)?(USDT|USDC|FDUSD)\b", text, flags=re.I):
+        base, quote = m.group(1).upper(), m.group(2).upper()
+        # "buy INJ with 500usdt": an amount, not a coin; a base has a letter.
+        if base in ("THE", "ON", "IN") or not re.search(r"[A-Z]", base):
+            continue
+        if listed and quote == "USDT" and f"{base}{quote}" not in listed:
+            continue
+        return f"{base}{quote}"
     low = text.lower()
     for name in sorted(NAMES, key=len, reverse=True):
         if re.search(rf"\b{re.escape(name)}\b", low):

@@ -358,6 +358,8 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
     error: null,
   });
   const [kimiTick, setKimiTick] = useState(0); // bumped when a candle closes, to fetch the next run
+  const [kimiRetry, setKimiRetry] = useState(0); // bumped by the retry timer after a failed fetch
+  const kimiFails = useRef(0);
   const [barCount, setBarCount] = useState(0); // bumped when a bar opens (CVD refresh)
   const [cvdError, setCvdError] = useState<string | null>(null);
   const [compareChange, setCompareChange] = useState<Record<string, number>>({});
@@ -1166,15 +1168,31 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
       loading: true,
       error: null,
     }));
+    let retry: ReturnType<typeof setTimeout> | undefined;
     fetchKimi(symbol, interval, abort.signal)
-      .then((data) => setKimi({ data, loading: false, error: null }))
+      .then((data) => {
+        kimiFails.current = 0;
+        setKimi({ data, loading: false, error: null });
+      })
       .catch((err: Error) => {
         if (err.name === "AbortError") return;
         setKimi((k) => ({ ...k, loading: false, error: err.message }));
+        // Don't wait for the next candle (a day on 1d): try again after 5 s, 20 s, 60 s, then every 5 min.
+        const delays = [5_000, 20_000, 60_000];
+        const wait = delays[kimiFails.current] ?? 300_000;
+        kimiFails.current += 1;
+        retry = setTimeout(() => setKimiRetry((n) => n + 1), wait);
       });
-    return () => abort.abort();
+    return () => {
+      abort.abort();
+      if (retry) clearTimeout(retry);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [kimiOn, props.symbol, props.interval, kimiTick]);
+  }, [kimiOn, props.symbol, props.interval, kimiTick, kimiRetry]);
+  // A new chart starts its retries from the shortest wait.
+  useEffect(() => {
+    kimiFails.current = 0;
+  }, [props.symbol, props.interval]);
 
   const kimiPartsKey = `${kimiParts.sr}${kimiParts.fib}${kimiParts.forecast}${kimiParts.signals}${kimiParts.patterns}${kimiParts.harmonics}`;
   useEffect(() => {
@@ -1184,15 +1202,20 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
     kimiPrimRef.current = null;
     markersRef.current.kimi = [];
     const data = kimi.data ? withAgent(kimi.data, kimiPlain) : null;
+    // Bar replay: today's run knows the future (levels born later, today's Fib and forecast), so its drawing is
+    // hidden and only labels confirmed by the replay candle are shown.
+    const replay = props.replayTime ?? null;
     if (data && !loading && data.symbol === props.symbol && data.interval === props.interval) {
-      const prim = new KimiPrimitive(mapperRef.current, data, kimiParts);
-      series.attachPrimitive(prim);
-      kimiPrimRef.current = prim;
+      if (replay == null) {
+        const prim = new KimiPrimitive(mapperRef.current, data, kimiParts);
+        series.attachPrimitive(prim);
+        kimiPrimRef.current = prim;
+      }
       // Kimi runs on more history than the chart loads; labels older than the first loaded candle are left out.
       const first = candlesRef.current[0]?.time ?? Infinity;
       markersRef.current.kimi = !kimiParts.signals
         ? []
-        : data.signals.filter((s) => s.time >= first).map((s) => {
+        : data.signals.filter((s) => s.time >= first && (replay == null || s.confirm_time <= replay)).map((s) => {
             const style = KIMI_MARKER[s.text] ?? { color: "#9ca3af", shape: "circle" as const };
             // With the agent's signal filter in use, the signals it would skip are greyed and crossed.
             const skip = !kimiPlain && data.agent_filter && s.agent === "skip";
@@ -1208,7 +1231,7 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
     }
     applyMarkers();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [kimi.data, loading, props.symbol, props.interval, applyMarkers, kimiPartsKey, kimiPlain]);
+  }, [kimi.data, loading, props.symbol, props.interval, applyMarkers, kimiPartsKey, kimiPlain, props.replayTime]);
 
   // Room on the right for the forecast and its label while Kimi Cooked is on.
   const kimiHorizon = kimiOn && kimiParts.forecast ? (kimi.data?.forecast?.horizon ?? 0) : 0;
@@ -1623,7 +1646,7 @@ const AgenticChart = forwardRef<AgenticChartHandle, Props>(function AgenticChart
           {eventTip.item.title ?? eventTip.item.label}
         </div>
       )}
-      {kimiOn && <KimiPanel data={kimi.data} loading={kimi.loading} error={kimi.error} plain={kimiPlain} onPlain={setKimiPlain} />}
+      {kimiOn && <KimiPanel data={kimi.data} loading={kimi.loading} error={kimi.error} plain={kimiPlain} onPlain={setKimiPlain} timezone={props.layout.timezone} />}
       {loading && (
         <div className="pointer-events-none absolute inset-0 z-10 grid place-items-center text-sm text-mute">
           Loading candles…

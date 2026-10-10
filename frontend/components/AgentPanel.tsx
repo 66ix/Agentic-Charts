@@ -24,6 +24,7 @@ import {
   Trash2,
   User,
   ImagePlus,
+  X,
 } from "lucide-react";
 import { Fragment, useEffect, useImperativeHandle, useRef, useState, type ReactNode, type Ref } from "react";
 
@@ -49,6 +50,8 @@ import {
   type SellWatch,
   type TopDownResult,
   type TradePlan,
+  type Focus,
+  type Suggestion,
   type TriggerInterval,
 } from "@/lib/types";
 
@@ -90,6 +93,8 @@ export interface AgentMessage {
   lastPrice?: number;
   /** When it was answered (ms); older messages lack it. */
   at?: number;
+  /** Next steps built from what the answer found (backend suggest.py); the fixed follow-ups are the fallback. */
+  suggestions?: Suggestion[];
 }
 
 export interface AgentPanelHandle {
@@ -271,11 +276,14 @@ function emphasize(text: string, last: number | undefined): ReactNode {
 function PlanCard({
   plan,
   symbol,
+  spotOnly,
   onLog,
   onTrigger,
 }: {
   plan: TradePlan;
   symbol?: string;
+  /** No leverage: the size is capped at the cash, and no "needs Nx" is shown. */
+  spotOnly?: boolean;
   onLog?(): Promise<boolean>;
   /** Arms a trigger alert: a `tf` confirmation inside the plan's entry zone. */
   onTrigger?(tf: TriggerInterval): Promise<boolean>;
@@ -287,7 +295,7 @@ function PlanCard({
   const [armed, setArmed] = useState<"idle" | "busy" | "done" | "error">("idle");
   const zone = plan.zone_low != null && plan.zone_high != null ? [plan.zone_low, plan.zone_high] : null;
   const long = plan.direction === "long";
-  const sized = sizePlan(plan, sizing);
+  const sized = sizePlan(plan, sizing, { spotOnly });
   return (
     <div className="mt-1.5 rounded-md border border-line bg-base/60 p-2 text-[11px]">
       <div className="mb-1 flex items-center gap-1.5">
@@ -316,8 +324,8 @@ function PlanCard({
       {sized && symbol && (
         <div className="mt-1.5 border-t border-line pt-1.5 text-mute">
           Size <span className="font-mono text-ink">{qtyText(sized.qty)}</span> (~${sized.notional.toFixed(0)}) for{" "}
-          {sizing.riskPct}% risk of ${sizing.account.toLocaleString()}
-          {sized.leverage > 1 && <> · needs {sized.leverage.toFixed(1)}x</>} · fees ~${sized.feesUsd.toFixed(2)}
+          {sized.capped ? `${sized.effectiveRiskPct.toFixed(2)}% (capped by cash)` : `${sizing.riskPct}%`} risk of ${sizing.account.toLocaleString()}
+          {!spotOnly && sized.leverage > 1 && <> · needs {sized.leverage.toFixed(1)}x</>} · fees ~${sized.feesUsd.toFixed(2)}
         </div>
       )}
       {sized?.warnings.map((w) => (
@@ -334,7 +342,7 @@ function PlanCard({
             className="btn-ghost h-6 border border-line px-1.5 text-[11px]"
             title="Copy entry, stop, targets and size as one line"
             onClick={() => {
-              void navigator.clipboard?.writeText(orderText(plan, symbol, sized, sizing)).then(() => {
+              void navigator.clipboard?.writeText(orderText(plan, symbol, sized)).then(() => {
                 setCopied(true);
                 setTimeout(() => setCopied(false), 1500);
               });
@@ -640,6 +648,9 @@ interface Props {
   /** How long answers are. */
   detail?: AnswerDetail;
   onDetail?(d: AnswerDetail): void;
+  /** What "this" means in the next question (lib/focus.ts), shown as a removable chip. */
+  focus?: Focus | null;
+  onClearFocus?(): void;
 }
 
 /** The chart agent as a dock tab: the conversation fills the height, the prompt sits at the bottom. */
@@ -771,6 +782,7 @@ export default function AgentPanel(p: Props) {
                       <PlanCard
                         plan={m.plan}
                         symbol={m.symbol}
+                        spotOnly={p.spotOnly}
                         onLog={p.onLogTrade ? () => p.onLogTrade!(m) : undefined}
                         onTrigger={p.onPlanTrigger ? (tf) => p.onPlanTrigger!(m, tf) : undefined}
                       />
@@ -881,19 +893,37 @@ export default function AgentPanel(p: Props) {
           </div>
           {!p.busy && (
             <div className="flex shrink-0 flex-wrap gap-1.5 px-3 pt-2">
-              {(p.messages.length === 0 ? SUGGESTIONS : followUps(lastAgent, p.spotOnly)).map((s) => (
+              {(p.messages.length === 0
+                ? SUGGESTIONS.map((x) => ({ label: x, prompt: x, reason: "" }))
+                : lastAgent?.suggestions?.length
+                  ? lastAgent.suggestions
+                  : followUps(lastAgent, p.spotOnly).map((x) => ({ label: x, prompt: x, reason: "" }))
+              ).map((s) => (
                 <button
-                  key={s}
+                  key={s.label}
                   type="button"
-                  onClick={() => submit(s)}
+                  title={s.reason || undefined}
+                  onClick={() => submit(s.prompt)}
                   className="rounded-full border border-line px-2.5 py-1 text-[11px] text-mute transition-colors hover:border-accent/50 hover:text-ink"
                 >
-                  {s}
+                  {s.label}
                 </button>
               ))}
             </div>
           )}
 
+          {p.focus && !p.busy && (
+            <div className="flex shrink-0 items-center gap-1 px-3 pt-2 text-[11px] text-mute">
+              <span className="truncate rounded-full border border-accent/30 bg-accent/5 px-2 py-0.5" title="Questions like 'what would invalidate this?' are about this">
+                About: <span className="text-ink">{p.focus.label}</span>
+              </span>
+              {p.onClearFocus && (
+                <button type="button" className="btn-ghost h-5 w-5 p-0" aria-label="Ask without this context" title="Ask without this context" onClick={p.onClearFocus}>
+                  <X className="h-3 w-3" />
+                </button>
+              )}
+            </div>
+          )}
           <form
             className="flex shrink-0 items-end gap-2 p-3"
             onSubmit={(e) => {

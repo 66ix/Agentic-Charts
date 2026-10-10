@@ -76,6 +76,10 @@ class Settings:
     llm_choice_store: str = field(default_factory=lambda: _env(
         "LLM_CHOICE_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "llm_choice.json")))
     agent_mode: str = field(default_factory=lambda: _env("AGENT_MODE", "tools").lower())
+    # Who plans a request: "rules_first" (the rule parser when it is sure, the model only when it is unsure; fastest,
+    # the default with a local model) or "llm_first" (the model plans every request).
+    agent_router: str = field(default_factory=lambda: (_env("AGENT_ROUTER", "") or (
+        "rules_first" if _env("LLM_PROVIDER", "ollama").lower() == "ollama" else "llm_first")).lower())
     agent_max_steps: int = field(default_factory=lambda: int(_env("AGENT_MAX_STEPS", "4")))
     # Rate limits per client ("N/second|minute|hour|day", or 0 to disable) and a global daily agent cap.
     agent_rate_limit: str = field(default_factory=lambda: _env("AGENT_RATE_LIMIT", "20/minute"))
@@ -163,6 +167,11 @@ class Settings:
         default_factory=lambda: max(1, min(int(_env("MARKET_SCAN_CONCURRENCY", "4")), 16)))
     market_scan_schedule: str = field(default_factory=lambda: _env("MARKET_SCAN_SCHEDULE", ""))
     market_scan_notify_top: int = field(default_factory=lambda: max(0, int(_env("MARKET_SCAN_NOTIFY_TOP", "0"))))
+    # Which setups a timed scan sends: "spot" (longs at higher-timeframe demand, the default), "long" or "both".
+    market_scan_notify_side: str = field(default_factory=lambda: _env("MARKET_SCAN_NOTIFY_SIDE", "spot").lower())
+    # A setup (coin and entry) already sent is not sent again for this many hours.
+    market_scan_resend_hours: float = field(
+        default_factory=lambda: max(0.0, float(_env("MARKET_SCAN_RESEND_HOURS", "12"))))
     market_scan_store: str = field(default_factory=lambda: _env(
         "MARKET_SCAN_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "market_scan.json")))
 

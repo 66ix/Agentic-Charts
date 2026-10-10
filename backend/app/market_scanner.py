@@ -48,6 +48,7 @@ from .market_data import FALLBACK_SYMBOLS, INTERVAL_SECONDS, MarketData, candles
 from .pricefmt import _fmt
 from .scanner import change_24h
 from .schemas import INTERVALS, AnalysisIntent, GridCoin, Interval, MarketSetup, SetupAgreement, TrackRecord
+from .ta_agent import ZONE_BARS
 from .ta_agent import analyze, atr, ema, higher_timeframes
 from .track_record import TrackRecordService
 from .trade_plan import build_plan, plan_overlays
@@ -58,7 +59,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 PLAN_INTENT = AnalysisIntent(features=["support_resistance", "supply_demand"], max_zones=2)
-CANDLES = 300
+CANDLES = ZONE_BARS
 MIN_CANDLES = 60
 MIN_RR = 1.0
 KEEP = 25            # setups kept per side
@@ -313,6 +314,7 @@ class MarketScanner:
         self._lock = asyncio.Lock()  # one scan at a time, whatever the timeframe: Binance weight limits
         self._universe: Optional[tuple[float, int, list[dict], str]] = None
         self._task: Optional[asyncio.Task] = None
+        self._sent: dict[str, float] = {}  # setups sent by timed scans → when
 
     # ------------------------------------------------------------- reads
     def latest(self, interval: str) -> Optional[MarketScanResult]:
@@ -403,6 +405,14 @@ class MarketScanner:
                     return None
 
             found = [r for r in await asyncio.gather(*(one(c) for c in coins)) if r is not None]
+            demo_dropped = 0
+            if "binance" in sources and "synthetic" in sources:
+                # Some coins fell back to demo candles mid-scan: leave them out rather than rank fake setups.
+                live = [r for r in found if not any(s.data_source == "synthetic" for s in r[0])
+                        and (r[1] is None or r[1].data_source != "synthetic")]
+                demo_dropped = len(found) - len(live)
+                found = live
+                sources.discard("synthetic")
             setups = [s for rows, _ in found for s in rows]
             grid = sorted((g for _, g in found if g is not None), key=lambda g: -g.score)[:KEEP]
             longs = sorted((s for s in setups if s.direction == "long"), key=lambda s: -s.score)[:KEEP]
@@ -422,6 +432,10 @@ class MarketScanner:
                              f"coins instead of the top {top} by volume.")
             if "synthetic" in sources:
                 notes.append("Synthetic demo data: these setups are not real prices.")
+            if demo_dropped:
+                many = demo_dropped != 1
+                notes.append(f"{demo_dropped} coin{'s' if many else ''} fell back to demo candles and "
+                             f"{'were' if many else 'was'} left out.")
             if len(found) < len(coins):
                 notes.append(f"{len(coins) - len(found)} of {len(coins)} coins could not be loaded and were skipped.")
             result = MarketScanResult(
@@ -446,18 +460,48 @@ class MarketScanner:
                 log.info("Market scan: no track record for %s %s: %s", row.symbol, row.direction, res)
 
     # ---------------------------------------------------------- notifying
-    def message(self, result: MarketScanResult, n: int) -> str:
-        """The best `n` setups of a scan as a plain-text message for Telegram / Discord."""
+    def picks(self, result: MarketScanResult, n: int, side: Optional[str] = None) -> list[MarketSetup]:
+        """The setups a timed scan sends: spot buys by default (MARKET_SCAN_NOTIFY_SIDE), longs, or both sides."""
+        side = side or self.s.market_scan_notify_side
+        if side == "both":
+            return result.best(n)
+        if side == "long":
+            return result.best(n, "long")
+        return result.best_spot(n)
+
+    def message(self, result: MarketScanResult, n: int, rows: Optional[list[MarketSetup]] = None) -> str:
+        """The best `n` setups of a scan (or `rows`) as a plain-text message for Telegram / Discord."""
         lines = [f"Market scan {result.interval}: best setups across {result.scanned} coins"
                  + (" (DEMO DATA)" if result.data_source == "synthetic" else "")]
-        for s in result.best(n):
+        for s in self.picks(result, n) if rows is None else rows:
             agree = f"{s.agreement.aligned:g}/{s.agreement.total} timeframes agree" if s.agreement.total else ""
             tr = f" | {s.track_record.summary}" if s.track_record and s.track_record.summary else ""
+            demo = " (demo data)" if s.data_source == "synthetic" and result.data_source != "synthetic" else ""
             lines.append(f"{s.direction.upper()} {s.symbol}: entry {_fmt(s.entry)}, stop {_fmt(s.stop)}, T1 "
-                         f"{_fmt(s.target)} ({s.rr:g}R), {s.distance_pct:g}% away, {agree}{tr}")
+                         f"{_fmt(s.target)} ({s.rr:g}R), {s.distance_pct:g}% away, {agree}{tr}{demo}")
         if len(lines) == 1:
             lines.append("No setups right now.")
         return "\n".join(lines)
+
+    def to_send(self, result: MarketScanResult, n: int, now: Optional[float] = None) -> Optional[str]:
+        """The message a timed scan sends, or None: nothing from demo or mixed data (unless DATA_SOURCE=synthetic),
+        and no setup (coin and entry) sent in the last MARKET_SCAN_RESEND_HOURS."""
+        now = time.time() if now is None else now
+        if result.data_source != "binance" and not (result.data_source == "synthetic"
+                                                    and self.s.data_source == "synthetic"):
+            return None
+        window = self.s.market_scan_resend_hours * 3600
+        self._sent = {k: t for k, t in self._sent.items() if now - t < window}
+        rows = []
+        for s in self.picks(result, n):
+            key = f"{result.interval}:{s.direction}:{s.symbol}:{s.entry:.6g}"
+            if key not in self._sent:
+                rows.append(s)
+        if not rows:
+            return None
+        for s in rows:
+            self._sent[f"{result.interval}:{s.direction}:{s.symbol}:{s.entry:.6g}"] = now
+        return self.message(result, n, rows)
 
     # ---------------------------------------------------------- scheduler
     def due(self, now: Optional[float] = None) -> list[str]:
@@ -477,7 +521,9 @@ class MarketScanner:
             ran.append(tf)
             n = self.s.market_scan_notify_top
             if n > 0 and self.alerts is not None and self.alerts.channels:
-                await self.alerts.send_text(self.message(result, n))
+                text = self.to_send(result, n, now)
+                if text:
+                    await self.alerts.send_text(text)
         return ran
 
     def start(self) -> None:

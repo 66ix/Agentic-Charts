@@ -46,8 +46,9 @@ FEE_PCT = 0.1           # per side, Binance spot without BNB
 MAX_DIST_ATR = 4.0      # buy zones further below price than this aren't called
 MIN_RR = 1.0            # take-profit at least 1R away
 MIN_EXPECTED_R = 0.1    # a call needs this much expected R after fees
-SIZE_SCALE = 0.25       # paper position = Kelly fraction x this, as a share of the wallet ...
-MAX_POSITION_PCT = 15.0  # ... capped here
+SIZE_SCALE = 0.025      # paper risk = net Kelly x this, as a share of the wallet (a net Kelly of 0.4 risks 1%) ...
+MAX_RISK_PCT = 1.0      # ... at most this much of the wallet lost at the invalidation
+MAX_POSITION_PCT = 15.0  # and the position at most this share of the wallet
 MIN_NOTIONAL = 10.0     # Binance's minimum order is about this, in USDT
 DESK_INTENT = AnalysisIntent(features=["support_resistance", "supply_demand"], max_zones=3)
 SPOT_KINDS = ("support", "demand")
@@ -65,6 +66,8 @@ class DeskCall(BaseModel):
     interval: str
     shadow: bool = Field(False, description="A zone the desk watched but didn't call: scored and learned from, never "
                                             "traded or announced")
+    skip_reason: str = Field("", description="Watched zones: why it wasn't called (confidence, capacity, "
+                                             "running call, one call per run)")
     created_at: int = Field(..., description="UNIX s: when it was made, just after its candle closed")
     bar_time: int = Field(..., description="Open time of the closed candle it was made on")
     data_source: str = "binance"
@@ -152,10 +155,13 @@ def agree_level(ratio: float) -> str:
     return "with" if ratio >= 0.67 else "against" if ratio < 0.34 else "mixed"
 
 
+ZONES_VERSION = 2  # bumped when zone detection changes what fresh / htf mean, so old statistics don't mix in
+
+
 def bucket_of(interval: str, kind: str, fresh: Optional[bool], htf: bool, agree: str) -> str:
-    """The group a call learns with: 4h|demand|fresh|htf|with."""
+    """The group a call learns with: 4h|demand|fresh|htf2|with (the HTF token carries ZONES_VERSION)."""
     return "|".join((interval, kind, "fresh" if fresh else "tested" if fresh is False else "-",
-                     "htf" if htf else "nohtf", agree))
+                     f"{'htf' if htf else 'nohtf'}{ZONES_VERSION}", agree))
 
 
 def describe_setup(interval: str, kind: str, fresh: Optional[bool], htf: list[str], agree: str) -> str:
@@ -220,25 +226,33 @@ def expected_r(p: float, rr: float, risk_pct: float) -> float:
     return p * rr - (1 - p) - fee_r(risk_pct)
 
 
-def kelly(p: float, rr: float) -> float:
-    """Kelly fraction for a bet that wins rr or loses 1: p - (1 - p) / rr (negative = no edge)."""
-    return p - (1 - p) / rr if rr > 0 else -1.0
+def kelly(p: float, rr: float, risk_pct: float = 0.0) -> float:
+    """Kelly fraction of the risk for a bet that wins rr or loses 1, after both sides' fees (which shrink the win
+    and grow the loss): p / L - (1 - p) / W with W = rr - fees, L = 1 + fees (negative = no edge)."""
+    f = fee_r(risk_pct)
+    win, loss = rr - f, 1 + f
+    if win <= 0:
+        return -1.0
+    return p / loss - (1 - p) / win
 
 
-def size_for(p: float, rr: float, equity: float, free_cash: float) -> tuple[float, float, Optional[float], str]:
-    """Paper position for a call → (kelly, size % of the wallet, notional USDT or None, note). The more confident
-    the call and the better its reward-to-risk, the bigger: Kelly x SIZE_SCALE of the wallet, at most
-    MAX_POSITION_PCT, and never more than the free cash."""
-    k = kelly(p, rr)
-    pct = max(0.0, min(MAX_POSITION_PCT, k * SIZE_SCALE * 100))
-    if pct <= 0 or equity <= 0:
-        return k, 0.0, None, "No edge after the confidence: nothing placed."
+def size_for(p: float, rr: float, risk_pct: float, equity: float,
+             free_cash: float) -> tuple[float, float, Optional[float], str]:
+    """Paper position for a call → (net kelly, size % of the wallet, notional USDT or None, note). The position is
+    sized from what it risks: net Kelly x SIZE_SCALE of the wallet (at most MAX_RISK_PCT) is lost at the
+    invalidation, so a wide stop buys fewer coins than a tight one. Then at most MAX_POSITION_PCT of the wallet, and
+    never more than the free cash."""
+    k = kelly(p, rr, risk_pct)
+    risk = max(0.0, min(MAX_RISK_PCT, k * SIZE_SCALE * 100))
+    if risk <= 0 or equity <= 0 or risk_pct <= 0:
+        return k, 0.0, None, "No edge after the confidence and fees: nothing placed."
+    pct = min(MAX_POSITION_PCT, risk / risk_pct * 100)
     want = equity * pct / 100
-    note = ""
+    note = f"Risks {pct * risk_pct / 100:.2f}% of the wallet at the invalidation."
     if want > free_cash:
         want, note = free_cash, f"Trimmed to the free cash ({free_cash:,.2f} USDT)."
     if want < MIN_NOTIONAL:
-        return k, pct, None, "Not enough free cash in the agent's wallet: nothing placed."
+        return k, round(pct, 2), None, "Not enough free cash in the agent's wallet: nothing placed."
     return k, round(pct, 2), round(want, 2), note
 
 
@@ -333,7 +347,7 @@ def new_call(c: Candidate, symbol: str, interval: str, bar_time: int, now: int, 
         zone_high=float(f"{c.zone.high:.6g}"),
         stop=plan.stop, tp=float(f"{tp:.6g}"), tp_label=c.tp_label, tp_level=c.tp_level, tp_fraction=tp_fraction,
         rr=rr, risk_pct=plan.risk_pct, confidence=round(confidence, 4), confidence_basis=basis,
-        expected_r=round(expected_r(confidence, rr, plan.risk_pct), 3), kelly=round(kelly(confidence, rr), 4),
+        expected_r=round(expected_r(confidence, rr, plan.risk_pct), 3), kelly=round(kelly(confidence, rr, plan.risk_pct), 4),
         setup=c.setup, kind=c.zone.kind, bucket=c.bucket, features=c.features,
         expires_at=bar_time + step + ENTRY_BARS[interval] * step, hold_seconds=HOLD_BARS[interval] * step,
         notes=c.notes, updated_at=now)

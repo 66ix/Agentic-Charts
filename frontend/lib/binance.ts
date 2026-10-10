@@ -180,6 +180,27 @@ export interface EarnPosition {
   auto_renew?: boolean;
 }
 
+/** One coin you own, the spot wallet and Simple Earn together (binance_import.merge_holdings). */
+export interface MergedHolding {
+  /** "holding:spot:INJ": the same key as the spot holding, so a managed trade survives a move to Earn. */
+  key: string;
+  asset: string;
+  symbol: string;
+  qty: number;
+  spot_qty: number;
+  earn_qty: number;
+  locked_qty: number;
+  /** Earliest end of a locked Earn term (UNIX s). */
+  redeem_at: number | null;
+  /** Coins Earn paid as rewards: counted in the value, not the cost. */
+  rewards_qty: number;
+  avg_entry: number | null;
+  price: number | null;
+  value: number | null;
+  unrealized_pnl: number | null;
+  sources: ("spot" | "earn")[];
+}
+
 /** GET /api/binance/positions: the user's own positions, and the bots' separately. */
 export interface AccountPositions {
   manual: {
@@ -188,6 +209,8 @@ export interface AccountPositions {
     cash: { asset: string; qty: number }[];
     /** Absent from servers older than the Simple Earn support. */
     earn?: EarnPosition[];
+    /** Every coin owned, spot and Earn merged; absent from older servers. */
+    holdings?: MergedHolding[];
   };
   bots: {
     /** The "Trading Bots" wallet's total (Binance reports only the total, not the coins). */

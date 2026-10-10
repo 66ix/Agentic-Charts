@@ -16,6 +16,8 @@ export interface DeskCall {
   interval: DeskTimeframe;
   /** A zone the desk watched but didn't call: scored and learned from, never traded or announced. */
   shadow: boolean;
+  /** Watched zones: why it wasn't called ("confidence", "capacity", "running call", "one call per run"). */
+  skip_reason?: string;
   created_at: number;
   bar_time: number;
   data_source: string;
@@ -129,7 +131,8 @@ export interface DeskSummary {
   verdict: string;
   setups: DeskSetupRow[];
   /** Setups by how their zones did in the last `recent_days` days, best first. */
-  working_now: { bucket: string; setup: string; zones: number; hits: number; expected: number; lift: number; verdict: string }[];
+  /** `p`: how often random odds alone would do as well (or as badly); `verdict` says "too early" under 12 zones. */
+  working_now: { bucket: string; setup: string; zones: number; hits: number; expected: number; lift: number; p?: number; verdict: string }[];
   recent_days: number;
 }
 

@@ -229,7 +229,7 @@ def test_notifiers_send_expected_payloads():
     text = "INJUSDT: price entered 24.10–24.60 (H4 Demand) at 24.32"
     assert tg.method == "POST" and str(tg.url) == f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     assert json.loads(tg.content) == {"chat_id": "42", "text": text, "disable_web_page_preview": True}
-    assert str(dc.url) == WEBHOOK and json.loads(dc.content) == {"content": text}
+    assert str(dc.url) == WEBHOOK and json.loads(dc.content) == {"content": text, "allowed_mentions": {"parse": []}}
 
 
 def test_notifier_failures_are_logged_without_secrets(caplog):

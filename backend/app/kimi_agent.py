@@ -117,11 +117,15 @@ class ForecastFix:
     evals: int = 0
     kimi_err: Optional[float] = None    # average end error, % of price
     agent_err: Optional[float] = None
-    kimi_dir: Optional[float] = None    # share of forecasts whose end pointed the right way
-    agent_dir: Optional[float] = None
+    kimi_dir: Optional[float] = None    # of the forecasts that called a direction, the share that was right
+    agent_dir: Optional[float] = None   # ... and of Kimi + Agent, on the same forecasts
+    kimi_called: Optional[float] = None  # share of forecasts that called a direction (the rest end flat)
     t: Optional[float] = None
     weights: dict = field(default_factory=dict)
     now: dict = field(default_factory=dict)
+
+
+FLAT_END = 1e-4  # a forecast ending within 0.01% of where it started calls no direction (as the headline says)
 
 
 def _vol(atr_i: float, born: float, H: int) -> float:
@@ -160,8 +164,9 @@ def forecast_fix(records: list[dict], feats: np.ndarray, atr: np.ndarray, last_b
         real_end = (r["out"]["close_at_H"] - r["born"]) / r["born"]
         errs_k.append(abs(real_end - kimi_end))
         errs_a.append(abs(real_end - kimi_end - nudge))
-        dir_k.append(np.sign(kimi_end) == np.sign(real_end))
-        dir_a.append(np.sign(kimi_end + nudge) == np.sign(real_end))
+        called = abs(kimi_end) > FLAT_END  # a flat line (learned gains off) calls nothing: not 'wrong'
+        dir_k.append(np.sign(kimi_end) == np.sign(real_end) if called else None)
+        dir_a.append(np.sign(kimi_end + nudge) == np.sign(real_end) if called else None)
     # The fit as it stands now, from every finished forecast.
     while k < len(pending):
         p = pending[k]
@@ -184,7 +189,11 @@ def forecast_fix(records: list[dict], feats: np.ndarray, atr: np.ndarray, last_b
     sd = float(diff.std(ddof=1)) if len(diff) > 1 else 0.0
     t = float(diff.mean() / (sd / math.sqrt(len(diff)))) if sd > 0 else 0.0
     out.kimi_err, out.agent_err = round(float(ek.mean()) * 100, 3), round(float(ea.mean()) * 100, 3)
-    out.kimi_dir, out.agent_dir = round(float(np.mean(dir_k)), 3), round(float(np.mean(dir_a)), 3)
+    called_k = [d for d in dir_k if d is not None]
+    called_a = [d for d in dir_a if d is not None]
+    out.kimi_called = round(len(called_k) / len(dir_k), 3)
+    if called_k:
+        out.kimi_dir, out.agent_dir = round(float(np.mean(called_k)), 3), round(float(np.mean(called_a)), 3)
     out.t = round(t, 2)
     gain = 1 - ea.mean() / ek.mean() if ek.mean() > 0 else 0.0
     out.active = gain >= MIN_GAIN and t >= MIN_T
@@ -217,7 +226,7 @@ def apply_fix(fix: ForecastFix, path: list[float], band_high: list[float], band_
 class SignalFilter:
     active: bool
     reason: str
-    verdicts: dict = field(default_factory=dict)   # signal bar -> ("take" | "skip", predicted R)
+    verdicts: dict = field(default_factory=dict)   # (bar, typ, dir) -> ("take" | "skip", predicted R)
     judged: int = 0
     all_r: Optional[float] = None
     take_r: Optional[float] = None
@@ -226,6 +235,11 @@ class SignalFilter:
     take_win: Optional[float] = None
     all_win: Optional[float] = None
     t: Optional[float] = None
+
+
+def verdict_key(s) -> tuple[int, int, int]:
+    """A signal's verdict key: two signals can confirm on one candle (a B+? and a B-?, a DIV and a Pat BO)."""
+    return int(s.bar), int(s.typ), int(s.dir)
 
 
 RANDOM_TYPES = 15  # the engine's random-entry controls (types 15 and 16) are its baseline, not signals
@@ -255,7 +269,7 @@ def signal_filter(signals: list, feats: np.ndarray, n_types: int = RANDOM_TYPES)
         if fit.count < MIN_SIG_TRAIN:
             continue
         pred = fit.predict(x_of(s))
-        out.verdicts[s.bar] = ("take" if pred > 0 else "skip", round(pred, 3))
+        out.verdicts[verdict_key(s)] = ("take" if pred > 0 else "skip", round(pred, 3))
         if s.result in (1, 2, 3) and not math.isnan(s.r):
             judged.append((float(s.r), pred, s.result == 1))
     out.judged = len(judged)

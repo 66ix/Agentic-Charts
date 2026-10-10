@@ -67,6 +67,8 @@ log = logging.getLogger(__name__)
 
 DAY_MS = 86_400_000
 STABLES = {"USDT", "USDC", "FDUSD", "TUSD", "BUSD", "DAI", "USDP", "EUR", "TRY"}
+USD_QUOTES = {"USDT", "USDC", "FDUSD", "TUSD", "BUSD", "DAI", "USDP"}  # quotes an average entry in USD can mix
+FEE_PRICES_PER_RUN = 200  # fill-hours whose fee asset (BNB) is priced per import run
 MAX_SYMBOLS = 40
 MAX_FILLS = 20_000
 MAX_PAGES = 10
@@ -107,6 +109,8 @@ class AccountFill(BaseModel):
     quote_qty: float
     commission: float = 0.0
     commission_asset: str = ""
+    commission_quote: Optional[float] = Field(None, description="A fee paid in another asset (BNB), valued in the "
+                                              "fill's quote asset at the fill hour; None until priced")
     maker: bool = False
     realized_pnl: Optional[float] = Field(None, description="Futures: Binance's realized PnL of this fill")
     position_side: str = Field("BOTH", description="Futures hedge mode: LONG / SHORT; BOTH in one-way mode")
@@ -291,8 +295,8 @@ def _quote_of(f: AccountFill) -> str:
 
 
 def _fee(f: AccountFill) -> tuple[float, float, bool]:
-    """(fee paid in the quote asset, fee taken in the coin itself (in coins), fee in another asset such as BNB,
-    which is not counted)."""
+    """(fee paid in the quote asset, fee taken in the coin itself (in coins), fee in another asset such as BNB that
+    could not be priced, so is not counted). A BNB fee priced at the fill hour counts as paid in the quote asset."""
     base, quote = split_symbol(f.symbol)
     a = f.commission_asset.upper()
     if not f.commission:
@@ -301,7 +305,23 @@ def _fee(f: AccountFill) -> tuple[float, float, bool]:
         return f.commission, 0.0, False
     if a == base and f.market == "spot":
         return 0.0, f.commission, False
+    if f.commission_quote is not None:
+        return f.commission_quote, 0.0, False
     return 0.0, 0.0, True
+
+
+def _fee_pair(f: AccountFill) -> Optional[str]:
+    """The pair that prices a fill's other-asset fee in its quote (BNBUSDT for a BNB fee on INJUSDT), or None."""
+    if not f.commission or f.commission_quote is not None:
+        return None
+    if _fee(f)[2] is False:
+        return None
+    quote = _quote_of(f)
+    if not quote:
+        return None
+    if quote in USD_QUOTES:
+        quote = "USDT"  # stablecoins are close enough to a dollar for a fee
+    return f"{f.commission_asset.upper()}{quote}"
 
 
 class _Trip:
@@ -418,18 +438,70 @@ def journal_entry(t: RoundTrip) -> NewJournalEntry:
 
 
 def average_entry(fills: list[AccountFill]) -> tuple[float, Optional[float]]:
-    """(coins held, average cost) from spot fills, oldest first; sells take coins out at the average cost."""
+    """(coins held, average cost in USD) from spot fills against a USD quote, oldest first; quote-asset fees (and
+    BNB fees once priced) are part of the cost, sells take coins out at the average cost. Fills against BTC, ETH or
+    BNB are left out: their prices are in another unit."""
     qty = cost = 0.0
     for f in sorted(fills, key=lambda f: (f.time_ms, f.trade_id)):
-        _, fee_base, _ = _fee(f)
+        if split_symbol(f.symbol)[1] not in USD_QUOTES:
+            continue
+        fee_q, fee_base, _ = _fee(f)
         if f.side == "buy":
             qty += f.qty - fee_base
-            cost += f.qty * f.price
+            cost += f.qty * f.price + fee_q
         elif qty > 0:
             sold = min(f.qty, qty)
             cost -= cost / qty * sold
             qty -= sold
     return qty, (cost / qty if qty > 1e-12 else None)
+
+
+def merge_holdings(spot_rows: list[dict], earn_rows: list[dict], fills: list[AccountFill]) -> list[dict]:
+    """One row per coin you own, the spot wallet and Simple Earn together (stablecoins are cash, not holdings):
+    {key, asset, symbol, qty, spot_qty, earn_qty, locked_qty, redeem_at, rewards_qty, avg_entry, price, value,
+    unrealized_pnl, sources}. The average entry is over coins bought (USD-quoted fills); Earn rewards are coins
+    that cost nothing, so they are counted in the value but not in the cost."""
+    rows: dict[str, dict] = {}
+
+    def row(asset: str) -> dict:
+        return rows.setdefault(asset, {"key": f"holding:spot:{asset}", "asset": asset, "symbol": f"{asset}USDT",
+                                       "spot_qty": 0.0, "earn_qty": 0.0, "locked_qty": 0.0, "redeem_at": None,
+                                       "rewards_qty": 0.0, "price": None, "sources": []})
+
+    for r in spot_rows:
+        if r.get("own_qty", 0) <= 0 or r["asset"] in STABLES:
+            continue
+        h = row(r["asset"])
+        h["spot_qty"] += r["own_qty"]
+        h["price"] = h["price"] or r.get("price")
+        h["sources"].append("spot")
+    for r in earn_rows:
+        if r["asset"] in STABLES or r.get("qty", 0) <= 0:
+            continue
+        h = row(r["asset"])
+        h["earn_qty"] += r["qty"]
+        h["price"] = h["price"] or r.get("price")
+        h["rewards_qty"] += r.get("rewards_total") or 0.0
+        if r.get("product") == "locked":
+            h["locked_qty"] += r["qty"]
+            if r.get("redeem_at"):
+                h["redeem_at"] = min(h["redeem_at"] or r["redeem_at"], r["redeem_at"])
+        if "earn" not in h["sources"]:
+            h["sources"].append("earn")
+    out = []
+    for asset, h in rows.items():
+        qty = h["spot_qty"] + h["earn_qty"]
+        mine = [f for f in fills if f.market == "spot" and f.kind == "manual" and split_symbol(f.symbol)[0] == asset]
+        tracked, avg = average_entry(mine)
+        bought = max(0.0, qty - h["rewards_qty"])  # rewards cost nothing
+        covered = min(tracked, bought)
+        price = h["price"]
+        out.append({**h, "qty": round(qty, 12), "rewards_qty": round(h["rewards_qty"], 12), "avg_entry": avg,
+                    "from_fills_qty": round(covered, 12),
+                    "value": round(qty * price, 2) if price else None,
+                    "unrealized_pnl": round(covered * (price - avg) + h["rewards_qty"] * price, 2)
+                    if price and avg else None})
+    return sorted(out, key=lambda r: -(r["value"] or 0))
 
 
 # ---------------------------------------------------------------- service --
@@ -537,7 +609,18 @@ class BinanceImportService:
                 balances = await self.account.spot_balances()
             except (BinanceApiError, httpx.HTTPError) as exc:
                 notes.append(f"Spot balances: {exc}")
-            spot_syms = self._spot_symbols(symbols or [], balances)
+            try:  # coins in Simple Earn were bought too: their fills count for the average entry
+                for r in await self.account.earn_positions():
+                    balances.setdefault(r["asset"], 0.0)
+            except (BinanceApiError, httpx.HTTPError):
+                pass
+            pairs: frozenset[str] = frozenset()
+            try:
+                await self.market.list_symbols()
+                pairs = getattr(self.market, "usd_pairs", frozenset())
+            except Exception:
+                pass
+            spot_syms = self._spot_symbols(symbols or [], balances, pairs)
             for sym in spot_syms:
                 try:
                     new += await self._spot_fills(sym)
@@ -555,6 +638,7 @@ class BinanceImportService:
             for f in new:
                 self._fills[f.key] = f
             self._trim()
+            await self._price_fees(notes)
             sync = await self._reclassify()
             self._positions = None
             self.last = {"at": int(started), "auto": auto, "new_fills": len(new), "symbols": len(spot_syms),
@@ -563,12 +647,44 @@ class BinanceImportService:
             self._save()
             return self.last
 
-    def _spot_symbols(self, extra: list[str], balances: dict[str, float]) -> list[str]:
+    async def _price_fees(self, notes: list[str]) -> None:
+        """Value fees paid in another asset (BNB) in each fill's quote at the fill hour, so the journal, PnL
+        calendar and coach count them. A few hundred fill-hours per run; the rest are priced on later runs."""
+        want: dict[tuple[str, int], list[AccountFill]] = {}
+        for f in self._fills.values():
+            pair = _fee_pair(f)
+            if pair:
+                want.setdefault((pair, f.time - f.time % 3600), []).append(f)
+        failed = 0
+        for (pair, hour), rows in sorted(want.items(), key=lambda kv: -kv[0][1])[:FEE_PRICES_PER_RUN]:
+            try:
+                df, source = await self.market.get_range(pair, "1h", hour, hour)
+            except Exception:
+                failed += 1
+                continue
+            if source != "binance" or df.empty:
+                failed += 1
+                continue
+            price = float(df["close"].iloc[-1])
+            for f in rows:
+                self._fills[f.key] = f.model_copy(update={"commission_quote": f.commission * price})
+        if failed:
+            notes.append(f"Fees paid in BNB (or another coin) could not be priced for {failed} fill hour"
+                         f"{'s' if failed != 1 else ''}; those fees are left out of the PnL for now.")
+
+    def _spot_symbols(self, extra: list[str], balances: dict[str, float],
+                      pairs: frozenset[str] = frozenset()) -> list[str]:
+        """The pairs to import fills of: asked for, set in settings, the bots', every held coin's USDT pair, pairs
+        imported before, then held coins' USDC and FDUSD pairs where Binance lists them (after the rest, so they
+        never push a held coin out of MAX_SYMBOLS)."""
         out: list[str] = []
-        held = [f"{a}USDT" for a in balances if a not in STABLES]
+        coins = [a.removeprefix("LD") if a.startswith("LD") and len(a) > 2 else a for a in balances]
+        coins = [a for a in dict.fromkeys(coins) if a not in STABLES]
+        held = [f"{a}USDT" for a in coins]
+        other_quotes = [f"{a}{q}" for a in coins for q in ("USDC", "FDUSD") if f"{a}{q}" in pairs]
         bots = [b.params.symbol for b in self.gridbots.list()]
         cursors = [k.split(":", 1)[1] for k in self._cursors if k.startswith("spot:")]
-        for s in [*extra, *self.settings.symbols, *bots, *held, *cursors]:
+        for s in [*extra, *self.settings.symbols, *bots, *held, *cursors, *other_quotes]:
             s = s.upper()
             if s not in out and s not in self._invalid and s.isalnum():
                 out.append(s)
@@ -708,6 +824,13 @@ class BinanceImportService:
             earn_rows = await self.account.earn_positions()
         except (BinanceApiError, httpx.HTTPError) as exc:
             notes.append(f"Simple Earn unavailable: {exc}")
+        # Simple Earn Flexible can also show in the spot account as LD-prefixed assets (LDINJ, LDUSDT): those coins
+        # are Earn's, so they leave the spot rows (and become an Earn row when the Earn API gave none).
+        earn_assets = {r["asset"] for r in earn_rows}
+        for a in [a for a in balances if a.startswith("LD") and len(a) > 2]:
+            qty = balances.pop(a)
+            if a[2:] not in earn_assets:
+                earn_rows.append({"product": "flexible", "asset": a[2:], "qty": qty, "apr_pct": None})
         fills = list(self._fills.values())
         coins = [a for a in balances if a not in STABLES]
         earn_coins = [r["asset"] for r in earn_rows if r["asset"] not in STABLES]
@@ -726,6 +849,7 @@ class BinanceImportService:
                     by_bot[f.bot_id] = by_bot.get(f.bot_id, 0.0) + (f.qty if f.side == "buy" else -f.qty)
             bot_qty = sum(max(0.0, q) for q in by_bot.values())
             tracked, avg = average_entry([f for f in mine if f.kind == "manual"])
+            other_quotes = sorted({split_symbol(f.symbol)[1] for f in mine if f.kind == "manual"} - USD_QUOTES)
             own = max(0.0, qty - bot_qty)
             price = prices.get(sym)
             key = f"holding:spot:{asset}"
@@ -739,7 +863,8 @@ class BinanceImportService:
                    "overridden": ov is not None,
                    "reason": ("You marked it " + ov.kind) if ov else (
                        "In the spot wallet (bots hold their coins in the Trading Bots wallet)"
-                       + ("; average entry from your own fills" if avg else "; no own buys imported for it"))}
+                       + ("; average entry from your own fills" if avg else "; no own buys imported for it")
+                       + (f" (fills against {', '.join(other_quotes)} left out of it)" if other_quotes else ""))}
             for bid, bq in by_bot.items():
                 if bq > 0:
                     bot_spot.append({"bot_id": bid, "asset": asset, "symbol": sym, "qty": round(bq, 12),
@@ -784,8 +909,10 @@ class BinanceImportService:
                          "symbol": f"{r['asset']}USDT", "price": price,
                          "value": round(r["qty"] * price, 2) if price else None})
         earn.sort(key=lambda r: -(r["value"] or 0))
+        holdings = merge_holdings(manual_spot, earn, fills)
         bot_wallet = next((w for w in wallets if w["wallet"].lower().replace(" ", "") == "tradingbots"), None)
-        out = {"manual": {"spot": manual_spot, "futures": manual_fut, "cash": cash, "earn": earn},
+        out = {"manual": {"spot": manual_spot, "futures": manual_fut, "cash": cash, "earn": earn,
+                          "holdings": holdings},
                "bots": {"wallet": bot_wallet, "spot": bot_spot, "futures": bot_fut, "tracked": tracked_bots},
                "wallets": wallets, "notes": notes, "updated_at": int(time.time())}
         self._positions = (time.monotonic(), out)
@@ -802,8 +929,9 @@ class BinanceImportService:
         except Exception as exc:
             log.info("Open positions for the trade manager failed: %s", exc)
             return None
-        spot = {r["key"] for r in pos["manual"]["spot"]
-                if r["own_qty"] > 0 and (r["value"] is None or r["value"] >= MIN_OPEN_VALUE)}
+        # A coin moved to Simple Earn is still held: its spot key stays open, so its managed trade isn't closed.
+        spot = {r["key"] for r in pos["manual"].get("holdings", [])
+                if r["qty"] > 0 and (r["value"] is None or r["value"] >= MIN_OPEN_VALUE)}
         return spot | {r["key"] for r in pos["manual"]["futures"] if r["qty"] > 0}
 
     async def _prices(self, symbols: list[str]) -> dict[str, float]:

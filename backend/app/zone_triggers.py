@@ -42,6 +42,7 @@ if TYPE_CHECKING:
 
 TOUCH_GAP = 12          # candles away from the zone before a touch is over
 NEAR_ATR = 3.0          # the confirming close must be this close to the zone (LTF ATRs)
+CONFIRM_SWING_DISTANCE = 5  # bars between swing points for the lower-timeframe confirmation (finer than zones)
 STOP_BUFFER_ATR = 0.1   # the suggested stop's distance beyond the touch's extreme
 MIN_BARS = 40           # fewer LTF candles and the swing detectors have nothing to work with
 MIN_ENGULF_ATR = 0.3    # an engulfing body smaller than this is noise
@@ -121,7 +122,7 @@ def _confirmation(df: pd.DataFrame, atr_v: float, long: bool, which: str, tfl: s
     highs: list = []
     lows: list = []
     if which in ("choch", "sweep", "any"):
-        highs, lows = find_swings(df, atr_v)
+        highs, lows = find_swings(df, atr_v, CONFIRM_SWING_DISTANCE)
     if which in ("choch", "any"):
         hits = [b for b in structure_breaks(df, highs, lows) if b["idx"] == n - 1 and b["direction"] == direction]
         if hits:

@@ -98,6 +98,10 @@ SIGNALS: dict[str, SignalInfo] = {
 KIMI_SIGNALS = frozenset({"kimi_buy", "kimi_sell", "kimi_any"})
 SELL_SIGNALS = frozenset({"lost_support", "at_resistance"})  # sell_check.py's checks, for spot holders
 KIMI_LABELS = {"kimi_buy": {"B+"}, "kimi_sell": {"B-"}}
+# Which way each signal points, for drawing it (kimi_any: each hit's own direction). Mirrors SIGNAL_SIDE in
+# frontend/lib/alerts.ts.
+SHORT_SIGNALS = frozenset({"kimi_sell", "rsi_bear_div", "sweep_high", "new_supply", "bos_bear", "rsi_overbought",
+                           "lost_support", "at_resistance"})
 
 WINDOW = 300          # closed candles the detectors see, like the watchlist scan
 MIN_BARS = 60         # fewer than this and the detectors have nothing to work with
@@ -105,6 +109,9 @@ MAX_SIGNAL_ALERTS = 200
 CLOSE_DELAY = 2.0     # seconds to let Binance settle the closed candle before fetching it
 RETRY_DELAY = 6.0     # longer than MarketData's 5 s klines cache, so a retry sees new data
 RETRIES = 4
+RECHECK_DELAY = 60.0  # a close whose live candles (or Kimi) weren't there is tried again this often...
+RECHECK_FOR = 1800.0  # ...for this long, then reported; the next live tick queues it once more
+FEED_DOWN_AFTER = 300.0  # seconds a watched stream may stream synthetic candles before the status panel says so
 ZONE_RETRY = 30.0     # seconds before looking up a detected zone again when the higher timeframe lags
 
 
@@ -337,6 +344,9 @@ class SignalAlertService:
         self._seen: dict[tuple[str, str], int] = {}       # newest open time seen per stream
         self._scheduled: dict[tuple[str, str], int] = {}  # newest closed candle queued for a check per stream
         self._done: dict[tuple[str, str], int] = {}       # newest closed candle checked per stream
+        self._missed: dict[tuple[str, str], int] = {}     # a close given up on while Binance was unreachable
+        self._off_since: dict[tuple[str, str], float] = {}  # when a watched stream went synthetic
+        self._off_reported: set[tuple[str, str]] = set()
         self._tasks: set[asyncio.Task] = set()
         self._lock = asyncio.Lock()
         self._preview_sem = asyncio.Semaphore(1)       # previews are CPU-bound: one at a time
@@ -453,7 +463,7 @@ class SignalAlertService:
     # ----------------------------------------------------------- preview
     async def preview(self, symbol: str, interval: str, signal: str, bars: int = 300) -> dict:
         """When `signal` would have fired on the last `bars` closed candles → {symbol, interval, signal, name,
-        bars, data_source, hits: [{time, price, text}] newest first, note?}."""
+        bars, data_source, hits: [{time, price, text, direction}] newest first, note?}."""
         if signal not in SIGNALS or signal == "zone_trigger":
             raise ValueError(f"signal must be one of {', '.join(SIGNAL_IDS[:-1])}")
         bars = max(10, min(bars, 1000))
@@ -476,7 +486,12 @@ class SignalAlertService:
             out["note"] = f"{demo} {out['note']}" if out.get("note") else demo
         async with self._preview_sem:
             hits = await asyncio.to_thread(scan_history, signal, candles_to_df(closed), bars, kimi)
-        out["hits"] = [{"time": h.time, "price": h.price, "text": h.text} for h in reversed(hits)]
+        def side(h: SignalHit) -> str:
+            if signal == "kimi_any":
+                return "short" if h.key.startswith("kimi:B-") or "(short)" in h.text else "long"
+            return "short" if signal in SHORT_SIGNALS else "long"
+
+        out["hits"] = [{"time": h.time, "price": h.price, "text": h.text, "direction": side(h)} for h in reversed(hits)]
         return out
 
     # ---------------------------------------------------- trigger alerts
@@ -635,11 +650,21 @@ class SignalAlertService:
                 continue
             source = msg.get("source", "")
             if source == "synthetic" and self.s.data_source != "synthetic":
-                continue  # fallback feed during a Binance outage: not real candles
+                # Fallback feed during a Binance outage: not real candles. Say so once it lasts.
+                since = self._off_since.setdefault(key, time.monotonic())
+                if time.monotonic() - since >= FEED_DOWN_AFTER and key not in self._off_reported:
+                    self._off_reported.add(key)
+                    jobs.fail("signal_alerts", f"{symbol} {interval}: live feed down, signal checks paused")
+                continue
+            self._off_since.pop(key, None)
+            self._off_reported.discard(key)
             try:
                 t = int(msg["candle"]["time"])
             except (KeyError, TypeError, ValueError):
                 continue
+            missed = self._missed.pop(key, None)
+            if missed is not None and self._done.get(key, -1) < missed:
+                self._spawn(self._after_close(symbol, interval, missed))  # given up on while Binance was away
             seen = self._seen.get(key)
             # Binance marks a candle's last update closed; a newer open time means the previous one closed too.
             closed_bar = t if msg.get("closed") else seen if seen is not None and t > seen else None
@@ -649,32 +674,63 @@ class SignalAlertService:
                 self._spawn(self._after_close(symbol, interval, closed_bar))
 
     async def _after_close(self, symbol: str, interval: str, bar_time: int) -> None:
+        """Judge the candle that just closed; while its live candles (or Kimi) aren't there, try again every
+        RECHECK_DELAY for RECHECK_FOR, then report it and leave it for the next live tick."""
         await asyncio.sleep(self.close_delay)
-        try:
-            await self.on_bar_close(symbol, interval, bar_time)
-            jobs.ok("signal_alerts", f"last check {symbol} {interval}")
-        except Exception as exc:
-            jobs.fail("signal_alerts", exc)
-            log.exception("Signal check failed for %s %s", symbol, interval)
+        give_up = time.monotonic() + RECHECK_FOR
+        while True:
+            try:
+                fired = await self._judge(symbol, interval, bar_time)
+            except Exception as exc:
+                jobs.fail("signal_alerts", exc)
+                log.exception("Signal check failed for %s %s", symbol, interval)
+                return
+            if fired is not None:
+                jobs.ok("signal_alerts", f"last check {symbol} {interval}")
+                return
+            if time.monotonic() >= give_up:
+                key = (symbol, interval)
+                self._missed[key] = max(bar_time, self._missed.get(key, bar_time))
+                jobs.fail("signal_alerts", f"{symbol} {interval}: no live candles for the close at {bar_time}; "
+                                           "checked again on the next live tick")
+                return
+            await asyncio.sleep(RECHECK_DELAY)
 
     async def on_bar_close(self, symbol: str, interval: str, bar_time: int) -> list[SignalAlert]:
         """Judge the armed alerts on (symbol, interval) on the candle that opened at `bar_time` and has just closed
-        → the alerts that fired. Each candle is judged once."""
+        → the alerts that fired. Each candle is judged once, and only on live candles: when Binance isn't there it
+        is left unjudged (and [] returned) so a later call can judge it."""
+        return await self._judge(symbol, interval, bar_time) or []
+
+    async def _judge(self, symbol: str, interval: str, bar_time: int) -> Optional[list[SignalAlert]]:
+        """on_bar_close, but None when the candle couldn't be judged yet (demo candles, Kimi not there)."""
         key = (symbol, interval)
         if self._done.get(key, -1) >= bar_time:
             return []
-        self._done[key] = bar_time
+        before = self._done.get(key)
+        self._done[key] = bar_time  # claimed, so a second check of the same close doesn't run alongside
+
+        def unjudged() -> None:
+            if self._done.get(key) == bar_time:
+                if before is None:
+                    self._done.pop(key, None)
+                else:
+                    self._done[key] = before
+            return None
+
         targets = [a for a in self._alerts.values()
                    if a.armed and (a.symbol, a.interval) == key and a.last_bar != bar_time]
         if not targets:
             return []
         frames = await self._frames(symbol, interval, bar_time)
         if frames is None:
-            return []
+            return unjudged()
         frame, prev, source = frames
         kimi: Optional[list[KimiSignal]] = None
-        if any(a.signal in KIMI_SIGNALS for a in targets):
+        if any(a.signal in KIMI_SIGNALS for a in targets) and self.kimi is not None:
             kimi = await self._kimi_signals(symbol, interval, bar_time)
+            if kimi is None:
+                return unjudged()
         hits: dict[str, Optional[SignalHit]] = {}
         fired: list[SignalAlert] = []
         moved = False

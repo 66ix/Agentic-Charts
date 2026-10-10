@@ -72,3 +72,17 @@
 {"prompt": "plan a grid bot on SOL", "expect": {"grid_plan": true, "symbol": "SOLUSDT", "trade_plan": null}}
 {"prompt": "what grid settings would you use here?", "expect": {"grid_plan": true, "trade_plan": null}}
 {"prompt": "hide the grid lines", "expect": {"grid_plan": false}}
+{"prompt": "What would invalidate this?", "previous": {"features": [], "trade_plan": "long"}, "expect": {"features": [], "keep_existing": true, "timeframe": null, "trade_plan": null, "symbol": null}}
+{"prompt": "Does the daily agree?", "previous": {"features": [], "trade_plan": "long"}, "expect": {"features": [], "keep_existing": true, "timeframe": null, "trade_plan": null, "symbol": null}}
+{"prompt": "Does the weekly agree?", "previous": {"features": [], "trade_plan": "long"}, "expect": {"features": [], "keep_existing": true, "timeframe": null, "trade_plan": null, "symbol": null}}
+{"prompt": "Is RSI overbought here?", "previous": {"features": [], "trade_plan": "long"}, "expect": {"features": [], "keep_existing": true, "timeframe": null, "indicators_on": [], "symbol": null}}
+{"prompt": "why?", "previous": {"features": [], "trade_plan": "long"}, "expect": {"features": [], "keep_existing": true, "timeframe": null, "trade_plan": null, "symbol": null}}
+{"prompt": "is that a good entry?", "previous": {"features": [], "trade_plan": "long"}, "expect": {"features": [], "keep_existing": true, "timeframe": null, "trade_plan": null, "symbol": null}}
+{"prompt": "buy SOL with 500usdt", "expect": {"symbol": "SOLUSDT"}}
+{"prompt": "plan a 200USDT buy of ETH", "expect": {"symbol": "ETHUSDT"}}
+{"prompt": "Alert me if INJ breaks below 7.53", "expect": {"alert_prices": [7.53], "trade_plan": null}}
+{"prompt": "Give me a long plan on INJ", "expect": {"trade_plan": "long"}}
+{"prompt": "Where should I take profit on INJ?", "expect": {"take_profit": true, "trade_plan": null}}
+{"prompt": "Does the D1 agree?", "previous": {"features": [], "trade_plan": "long"}, "expect": {"features": [], "keep_existing": true, "timeframe": null}}
+{"prompt": "Show swings and RSI divergence on INJ", "expect": {"features": ["swings"]}}
+{"prompt": "Any news on INJ?", "expect": {"trade_plan": null}}

@@ -1,7 +1,7 @@
 """Holdings watch: sell-or-trim alerts on the coins you actually hold, kept in step with your Binance account.
 
 When it is on, every CHECK_EVERY seconds (and when settings change) it reads your own spot holdings through the
-read-only key (binance_import.positions: coins in the spot wallet worth MIN_VALUE or more, without the ones you
+read-only key (binance_import.positions: coins in the spot wallet and Simple Earn worth MIN_VALUE or more, without the ones you
 marked as a bot's) and makes the signal alerts `lost_support` and `at_resistance` on the chosen timeframe exactly
 those coins: a coin you buy gets them, a coin you sell loses them. The alerts it adds carry owner="holdings", so
 alerts you made yourself are never touched or duplicated.
@@ -77,8 +77,11 @@ class HoldingsWatch:
             jobs.set_enabled("holdings_watch", self.settings.enabled)
             if self.settings.enabled:
                 try:
-                    await self.run()
-                    jobs.ok("holdings_watch")
+                    last = await self.run()
+                    if last.get("error"):
+                        jobs.fail("holdings_watch", last["error"])
+                    else:
+                        jobs.ok("holdings_watch")
                 except Exception as exc:
                     jobs.fail("holdings_watch", exc)
             await asyncio.sleep(CHECK_EVERY)
@@ -96,13 +99,28 @@ class HoldingsWatch:
     def coins(positions: dict, min_value: float, include_bots: bool) -> tuple[list[dict], list[str]]:
         """Your own holdings worth `min_value`+ → [{symbol, value, source}], and notes. Pure."""
         rows: dict[str, dict] = {}
-        for r in positions.get("manual", {}).get("spot", []):
-            if r.get("own_qty", 0) <= 0:
-                continue
+        manual = positions.get("manual", {})
+        # Spot and Simple Earn together (binance_import.merge_holdings): a coin moved to Earn is still yours.
+        held = manual.get("holdings")
+        if held is None:  # positions without merged rows: spot rows, plus Earn per coin
+            by: dict[str, dict] = {}
+            for r in manual.get("spot", []):
+                if r.get("own_qty", 0) > 0:
+                    by[r["symbol"]] = {"symbol": r["symbol"], "qty": r["own_qty"], "value": r.get("value"),
+                                       "sources": ["spot"]}
+            for r in manual.get("earn", []):
+                if r.get("qty", 0) <= 0 or r.get("asset") in ("USDT", "USDC", "FDUSD", "TUSD", "BUSD", "DAI", "USDP"):
+                    continue
+                h = by.setdefault(r["symbol"], {"symbol": r["symbol"], "qty": 0.0, "value": 0.0, "sources": []})
+                h["qty"] += r["qty"]
+                h["value"] = None if h["value"] is None or r.get("value") is None else h["value"] + r["value"]
+                h["sources"].append("earn")
+            held = list(by.values())
+        for r in held:
             value = r.get("value")
-            if value is not None and value < min_value:
+            if r.get("qty", 0) <= 0 or (value is not None and value < min_value):
                 continue
-            rows[r["symbol"]] = {"symbol": r["symbol"], "value": value, "source": "spot"}
+            rows[r["symbol"]] = {"symbol": r["symbol"], "value": value, "source": "+".join(r.get("sources") or [])}
         if include_bots:
             bots = positions.get("bots", {})
             for r in bots.get("tracked", []) + bots.get("spot", []):

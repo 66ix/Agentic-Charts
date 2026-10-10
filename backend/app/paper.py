@@ -16,7 +16,9 @@ simply re-plays the wallet and it never drifts from the market. The rules are co
 * Orders placed together (a plan's buy, stop and targets, a ladder's rungs and take profit) share a `group`. A group
   with buys only sells what its own buys bought, so a plan's stop never sells coins held for another plan. When a
   sell leaves the group holding nothing and none of its buys is still waiting, its other pending sells are cancelled
-  ("position closed"), so a stop and its targets act like an OCO order.
+  ("position closed"), so a stop and its targets act like an OCO order. A sell from outside a group (a manual sell,
+  'Sell all') takes coins no group owns first, then the groups' coins oldest first, and closes the groups it
+  empties; a group whose buys were all cancelled before filling has its sells cancelled too.
 * Fees (`fee_pct`, 0.1% like Binance spot) are charged on every fill in USDT.
 * Cash for a buy is set aside when it is placed (the order is refused when there isn't enough), and given back if
   it is cancelled.
@@ -218,6 +220,18 @@ def simulate_symbol(orders: list[PaperOrder], df: pd.DataFrame, fee: float) -> t
 
     def group_held(g: str, t: int, strict: bool) -> float:
         return max(0.0, sum(q for ft, q in gfills[g] if (ft < t if strict else ft <= t)))
+
+    def group_buys_pending(g: str, t: int) -> bool:
+        return any(b.group == g and b.side == "buy" and b.id not in results
+                   and (b.cancelled_at is None or b.cancelled_at > t) for b in pending)
+
+    def close_group(g: str, t: int) -> None:
+        """The group holds nothing and waits for no buy: its stop and targets are done ("position closed")."""
+        for other in pending:
+            if (other.group == g and other.side == "sell" and other.id not in results
+                    and other.cancelled_at is None):
+                results[other.id] = OrderResult(status="cancelled", filled_at=t, reason="position closed")
+                waiting.discard(other.id)
     while True:
         best: Optional[tuple[int, int, int, str, float]] = None
         by_id = {}
@@ -280,17 +294,32 @@ def simulate_symbol(orders: list[PaperOrder], df: pd.DataFrame, fee: float) -> t
         if mine:
             gfills[o.group].append((t, -qty))
             left = min(left, group_held(o.group, t, False))
-            pending_buys = any(b.group == o.group and b.side == "buy" and b.id not in results
-                               and (b.cancelled_at is None or b.cancelled_at > t) for b in pending)
-            if pending_buys:
+            if group_buys_pending(o.group, t):
                 left = 1.0  # a ladder rung still to fill: its take profit stays
         results[oid] = OrderResult(status="filled", filled_at=t, fill_price=px, fill_qty=qty, fee=f, pnl=pnl,
                                    reason="" if o.qty is None or qty >= o.qty else f"only {qty:g} held")
         if left <= EPS * max(1.0, qty) and o.group:
-            for other in pending:
-                if (other.group == o.group and other.side == "sell" and other.id not in results
-                        and other.cancelled_at is None):
-                    results[other.id] = OrderResult(status="cancelled", filled_at=t, reason="position closed")
+            close_group(o.group, t)
+        if not mine:
+            # A sell from outside the groups (a manual sell, 'Sell all') takes the coins no group owns first, then
+            # the groups' coins, oldest first, so a plan's stop never later sells coins from a different buy.
+            before = {g: group_held(g, t, False) for g in gfills}
+            take = qty - max(0.0, book.held + qty - sum(before.values()))
+            for g in sorted(gfills, key=lambda g: gfills[g][0][0] if gfills[g] else float("inf")):
+                if take <= EPS or before[g] <= EPS:
+                    continue
+                d = min(take, before[g])
+                gfills[g].append((t, -d))
+                take -= d
+                if before[g] - d <= EPS * max(1.0, d) and not group_buys_pending(g, t):
+                    close_group(g, t)
+    for g in owned:  # a plan whose buy was cancelled before it filled: its stop and targets go with it
+        buys = [b for b in pending if b.group == g and b.side == "buy"]
+        if all(b.cancelled_at is not None and results.get(b.id) is None for b in buys):
+            gone = max(int(b.cancelled_at or 0) for b in buys)
+            for o in pending:
+                if o.group == g and o.side == "sell" and o.id not in results and o.cancelled_at is None:
+                    results[o.id] = OrderResult(status="cancelled", filled_at=gone, reason="its buy was cancelled")
     for o in pending:
         if o.id not in results:
             if o.cancelled_at is not None:

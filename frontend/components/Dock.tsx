@@ -37,6 +37,21 @@ const MAX_W = 720;
 export default function Dock<T extends string>(p: Props<T>) {
   const [mounted, setMounted] = useState<Set<T>>(() => new Set(p.open ? [p.tab] : []));
   const drag = useRef<{ x: number; w: number } | null>(null);
+  // The rail scrolls when the window is too short for every tab (a 768 px laptop): fade the edge that has more.
+  const rail = useRef<HTMLElement | null>(null);
+  const [more, setMore] = useState({ up: false, down: false });
+  const measure = () => {
+    const el = rail.current;
+    if (!el) return;
+    const up = el.scrollTop > 2;
+    const down = el.scrollTop + el.clientHeight < el.scrollHeight - 2;
+    setMore((m) => (m.up === up && m.down === down ? m : { up, down }));
+  };
+  useEffect(() => {
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, [p.tabs.length]);
   const onWidth = useRef(p.onWidth);
   onWidth.current = p.onWidth;
 
@@ -110,7 +125,17 @@ export default function Dock<T extends string>(p: Props<T>) {
   return (
     <>
       {panel}
-      <nav aria-label="Panels" className="flex w-11 shrink-0 flex-col items-center gap-0.5 border-l border-line bg-panel py-2">
+      <nav
+        ref={rail}
+        aria-label="Panels"
+        onScroll={measure}
+        className="flex min-h-0 w-11 shrink-0 flex-col items-center gap-0.5 overflow-y-auto overflow-x-hidden border-l border-line bg-panel py-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        style={{
+          maskImage: more.up || more.down
+            ? `linear-gradient(to bottom, ${more.up ? "transparent, black 24px" : "black"}, ${more.down ? "black calc(100% - 24px), transparent" : "black"})`
+            : undefined,
+        }}
+      >
         {p.tabs.map((t) => {
           const on = p.open && p.tab === t.id;
           return (
@@ -122,7 +147,7 @@ export default function Dock<T extends string>(p: Props<T>) {
               aria-pressed={on}
               onClick={() => (on ? p.onClose() : p.onSelect(t.id))}
               className={clsx(
-                "relative grid h-9 w-9 place-items-center rounded-md transition-colors",
+                "relative grid h-9 w-9 shrink-0 place-items-center rounded-md transition-colors",
                 on ? "bg-accent/15 text-accent" : "text-mute hover:bg-panel2 hover:text-ink",
               )}
             >

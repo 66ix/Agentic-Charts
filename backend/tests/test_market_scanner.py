@@ -115,8 +115,9 @@ def test_demo_fallback_scan_ranks_both_sides():
             assert (r.stop < r.entry < r.target) if side == "long" else (r.target < r.entry < r.stop)
             assert r.agreement.total == 3 and set(r.agreement.frames) == {"4h", "1d", "1w"}
             assert {o.kind for o in r.overlays} >= {"plan_entry", "plan_stop", "plan_target"}
-    # only the best few per side get a (costly) track record
-    assert len(track.calls) == min(8, len(res.longs)) + min(8, len(res.shorts))
+    # only the best few per side (and of the spot buys) get a (costly) track record
+    sides = min(8, len(res.longs)) + min(8, len(res.shorts))
+    assert sides <= len(track.calls) <= sides + min(8, len(res.spot_buys))
     assert res.longs[0].track_record and res.longs[0].plan.track_record.summary.startswith("stub record")
     assert scanner.latest("4h") is res
     best = res.best(3)

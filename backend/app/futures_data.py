@@ -34,6 +34,7 @@ import numpy as np
 from scipy.signal import find_peaks
 
 from .config import Settings, get_settings
+from .perp_map import PerpMap
 from .derivatives import DerivativesService
 from .market_data import DERIVED_INTERVALS, INTERVAL_SECONDS, BINANCE_MAX_LIMIT, MarketData, synthetic_klines
 
@@ -404,6 +405,7 @@ class FuturesDataService:
                                          headers={"User-Agent": "agentic-charts/1.0"})
         self._cache: dict[tuple, tuple[float, dict]] = {}
         self._blocked_until = 0.0
+        self.perps = PerpMap(lambda: self._fapi("/fapi/v1/exchangeInfo", {}))  # a 451 here blocks like any other
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -463,9 +465,14 @@ class FuturesDataService:
         limit = max(1, min(limit, 1000))
 
         async def live() -> dict:
-            prem, hist = await _gather(self._fapi("/fapi/v1/premiumIndex", {"symbol": symbol}),
-                                       self._fapi("/fapi/v1/fundingRate", {"symbol": symbol, "limit": limit}))
-            return parse_funding(prem, hist)
+            perp, mult = await self.perps.resolve(symbol)
+            prem, hist = await _gather(self._fapi("/fapi/v1/premiumIndex", {"symbol": perp}),
+                                       self._fapi("/fapi/v1/fundingRate", {"symbol": perp, "limit": limit}))
+            out = parse_funding(prem, hist)
+            for k in ("mark_price", "index_price"):  # per contract unit (1000 coins) → per coin
+                if out["current"][k]:
+                    out["current"][k] = out["current"][k] / mult
+            return {**out, **({"perpetual": perp} if perp != symbol else {})}
 
         return await self._cached(("funding", symbol, limit), TTL_FUNDING, live,
                                   lambda: synthetic_funding(symbol, limit), self.futures_live, symbol, "perpetual")
@@ -476,13 +483,17 @@ class FuturesDataService:
         limit = max(2, min(limit, 500))
 
         async def live() -> dict:
+            perp, mult = await self.perps.resolve(symbol)
             out = parse_open_interest(await self._fapi("/futures/data/openInterestHist",
-                                                       {"symbol": symbol, "period": period, "limit": limit}))
+                                                       {"symbol": perp, "period": period, "limit": limit}))
             if out["change_24h_pct"] is None and out["rows"]:  # the window is shorter than a day
                 day = parse_open_interest(await self._fapi("/futures/data/openInterestHist",
-                                                           {"symbol": symbol, "period": "1h", "limit": 25}))
+                                                           {"symbol": perp, "period": "1h", "limit": 25}))
                 out["change_24h_pct"] = day["change_24h_pct"]
-            return {"period": period, **out}
+            if mult != 1:  # contracts of 1000 coins → coins
+                out["rows"] = [{**r, "oi": r["oi"] * mult} for r in out["rows"]]
+                out["oi"] = out["oi"] * mult if out["oi"] is not None else None
+            return {"period": period, **out, **({"perpetual": perp} if perp != symbol else {})}
 
         return await self._cached(("oi", symbol, period, limit), TTL_SLOW, live,
                                   lambda: {"period": period, **synthetic_open_interest(symbol, period, limit)},
@@ -503,7 +514,7 @@ class FuturesDataService:
                     "change_24h": _change_24h(accounts, "ratio", pct=False)}
 
         async def live() -> dict:
-            params = {"symbol": symbol, "period": period, "limit": limit}
+            params = {"symbol": (await self.perps.resolve(symbol))[0], "period": period, "limit": limit}
             acc, top = await _gather(self._fapi("/futures/data/globalLongShortAccountRatio", params),
                                      self._fapi("/futures/data/topLongShortPositionRatio", params))
             return shape(parse_ratio_rows(acc), parse_ratio_rows(top))
@@ -577,7 +588,11 @@ class FuturesDataService:
 
         async def live() -> dict:
             if market == "futures":
-                book = await self._fapi("/fapi/v1/depth", {"symbol": symbol, "limit": 1000})
+                perp, mult = await self.perps.resolve(symbol)
+                book = await self._fapi("/fapi/v1/depth", {"symbol": perp, "limit": 1000})
+                if mult != 1:  # per 1000 coins → per coin
+                    book = {side: [(float(p) / mult, float(q) * mult) for p, q in book.get(side, [])]
+                            for side in ("bids", "asks")}
             else:
                 resp = await self.market._binance_get("/api/v3/depth", {"symbol": symbol, "limit": 1000})
                 if resp.status_code == 400:
