@@ -37,6 +37,7 @@ import {
   expiryLabel,
   fetchLevelReview,
   formatWhen,
+  SIGNAL_SIDE,
   signalName,
   timeAgo,
   timeZones,
@@ -732,12 +733,15 @@ function SignalsTab({ p, api }: { p: AlertsPanelProps; api: AlertsApi }) {
       setPreview(res);
       const onChartOverlays = overlaysRef.current;
       if (onChartOverlays && coin === symbol && interval === p.interval) {
-        const long = !["kimi_sell", "rsi_bear_div", "sweep_high", "new_supply", "bos_bear", "rsi_overbought"].includes(signal);
-        const markers: Overlay[] = res.hits.slice(0, 50).map((h, i) => ({
-          type: "marker", id: `signal-preview-${i}`, kind: "signal_preview", time: h.time, price: h.price,
-          position: long ? "below" : "above", shape: long ? "arrowUp" : "arrowDown", label: signalName(signal),
-          color: "#60a5fa",
-        }));
+        const fixed = signal in SIGNAL_SIDE ? SIGNAL_SIDE[signal as keyof typeof SIGNAL_SIDE] : null;
+        const markers: Overlay[] = res.hits.slice(0, 50).map((h, i) => {
+          const long = (h.direction ?? fixed ?? "long") === "long";
+          return {
+            type: "marker", id: `signal-preview-${i}`, kind: "signal_preview", time: h.time, price: h.price,
+            position: long ? "below" : "above", shape: long ? "arrowUp" : "arrowDown", label: signalName(signal),
+            color: "#60a5fa",
+          };
+        });
         onChartOverlays(PREVIEW_KEY, coin, markers);
         markedSymbol.current = coin;
       }

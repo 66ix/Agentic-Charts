@@ -271,11 +271,14 @@ function emphasize(text: string, last: number | undefined): ReactNode {
 function PlanCard({
   plan,
   symbol,
+  spotOnly,
   onLog,
   onTrigger,
 }: {
   plan: TradePlan;
   symbol?: string;
+  /** No leverage: the size is capped at the cash, and no "needs Nx" is shown. */
+  spotOnly?: boolean;
   onLog?(): Promise<boolean>;
   /** Arms a trigger alert: a `tf` confirmation inside the plan's entry zone. */
   onTrigger?(tf: TriggerInterval): Promise<boolean>;
@@ -287,7 +290,7 @@ function PlanCard({
   const [armed, setArmed] = useState<"idle" | "busy" | "done" | "error">("idle");
   const zone = plan.zone_low != null && plan.zone_high != null ? [plan.zone_low, plan.zone_high] : null;
   const long = plan.direction === "long";
-  const sized = sizePlan(plan, sizing);
+  const sized = sizePlan(plan, sizing, { spotOnly });
   return (
     <div className="mt-1.5 rounded-md border border-line bg-base/60 p-2 text-[11px]">
       <div className="mb-1 flex items-center gap-1.5">
@@ -316,8 +319,8 @@ function PlanCard({
       {sized && symbol && (
         <div className="mt-1.5 border-t border-line pt-1.5 text-mute">
           Size <span className="font-mono text-ink">{qtyText(sized.qty)}</span> (~${sized.notional.toFixed(0)}) for{" "}
-          {sizing.riskPct}% risk of ${sizing.account.toLocaleString()}
-          {sized.leverage > 1 && <> · needs {sized.leverage.toFixed(1)}x</>} · fees ~${sized.feesUsd.toFixed(2)}
+          {sized.capped ? `${sized.effectiveRiskPct.toFixed(2)}% (capped by cash)` : `${sizing.riskPct}%`} risk of ${sizing.account.toLocaleString()}
+          {!spotOnly && sized.leverage > 1 && <> · needs {sized.leverage.toFixed(1)}x</>} · fees ~${sized.feesUsd.toFixed(2)}
         </div>
       )}
       {sized?.warnings.map((w) => (
@@ -334,7 +337,7 @@ function PlanCard({
             className="btn-ghost h-6 border border-line px-1.5 text-[11px]"
             title="Copy entry, stop, targets and size as one line"
             onClick={() => {
-              void navigator.clipboard?.writeText(orderText(plan, symbol, sized, sizing)).then(() => {
+              void navigator.clipboard?.writeText(orderText(plan, symbol, sized)).then(() => {
                 setCopied(true);
                 setTimeout(() => setCopied(false), 1500);
               });
@@ -771,6 +774,7 @@ export default function AgentPanel(p: Props) {
                       <PlanCard
                         plan={m.plan}
                         symbol={m.symbol}
+                        spotOnly={p.spotOnly}
                         onLog={p.onLogTrade ? () => p.onLogTrade!(m) : undefined}
                         onTrigger={p.onPlanTrigger ? (tf) => p.onPlanTrigger!(m, tf) : undefined}
                       />

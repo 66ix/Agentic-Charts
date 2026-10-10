@@ -21,8 +21,12 @@ export interface SizedPlan {
   riskUsd: number;
   /** Entry + exit fees if the stop is hit. */
   feesUsd: number;
-  /** Leverage needed to hold `notional` with the whole account as margin (1 = no leverage). */
+  /** Leverage needed to hold `notional` with the whole account as margin (1 = no leverage; always 1 in spot). */
   leverage: number;
+  /** The risk actually taken, % of the account (less than asked when spot cash capped the size). */
+  effectiveRiskPct: number;
+  /** Spot: the size was cut to what the cash can buy. */
+  capped: boolean;
   targets: { label: string; price: number; share: number; pnlUsd: number }[];
   warnings: string[];
 }
@@ -34,15 +38,28 @@ function roundQty(qty: number, price: number): number {
   return Math.floor(qty * f) / f;
 }
 
-/** Quantity so that hitting the stop loses `riskPct` of the account, fees included. Targets share equally. */
-export function sizePlan(plan: TradePlan, s: SizingSettings): SizedPlan | null {
+/** Quantity so that hitting the stop loses `riskPct` of the account, fees included. Targets share equally.
+ *  `spotOnly`: no leverage, so the size is capped at what the cash (`freeCash`, else the account) buys, fees
+ *  included, and the risk that leaves is reported instead of a leverage figure. */
+export function sizePlan(plan: TradePlan, s: SizingSettings, opts: { spotOnly?: boolean; freeCash?: number | null } = {}): SizedPlan | null {
   const dist = Math.abs(plan.entry - plan.stop);
   if (!(s.account > 0) || !(s.riskPct > 0) || !(dist > 0)) return null;
   const fee = s.feePct / 100;
-  const riskUsd = (s.account * s.riskPct) / 100;
-  const qty = roundQty(riskUsd / (dist + fee * (plan.entry + plan.stop)), plan.entry);
+  const perCoinRisk = dist + fee * (plan.entry + plan.stop);
+  let qty = roundQty((s.account * s.riskPct) / 100 / perCoinRisk, plan.entry);
+  let capped = false;
+  if (opts.spotOnly) {
+    const cash = opts.freeCash != null && opts.freeCash >= 0 ? opts.freeCash : s.account;
+    const most = roundQty(cash / (plan.entry * (1 + fee)), plan.entry);
+    if (qty > most) {
+      qty = most;
+      capped = true;
+    }
+  }
+  const riskUsd = qty * perCoinRisk;
+  const effectiveRiskPct = (riskUsd / s.account) * 100;
   const notional = qty * plan.entry;
-  const leverage = Math.max(1, notional / s.account);
+  const leverage = opts.spotOnly ? 1 : Math.max(1, notional / s.account);
   const share = plan.targets.length ? 1 / plan.targets.length : 1;
   const sign = plan.direction === "long" ? 1 : -1;
   const targets = plan.targets.map((t) => ({
@@ -52,11 +69,13 @@ export function sizePlan(plan: TradePlan, s: SizingSettings): SizedPlan | null {
     pnlUsd: qty * share * ((t.price - plan.entry) * sign - fee * (plan.entry + t.price)),
   }));
   const warnings: string[] = [];
-  if (leverage > s.maxLeverage) {
+  if (capped) {
+    warnings.push(`Capped by cash: buying with all ${opts.freeCash != null ? "free cash" : "the account"} risks ${effectiveRiskPct.toFixed(2)}% instead of ${s.riskPct}% (the stop is tight for this risk).`);
+  } else if (!opts.spotOnly && leverage > s.maxLeverage) {
     warnings.push(`Needs ${leverage.toFixed(1)}x leverage, above your ${s.maxLeverage}x limit: the stop is very tight for this risk.`);
   }
   if (qty <= 0) warnings.push("Risk is too small for this coin's price.");
-  return { qty, notional, riskUsd, feesUsd: fee * qty * (plan.entry + plan.stop), leverage, targets, warnings };
+  return { qty, notional, riskUsd, feesUsd: fee * qty * (plan.entry + plan.stop), leverage, effectiveRiskPct, capped, targets, warnings };
 }
 
 function qtyText(qty: number): string {
@@ -64,7 +83,7 @@ function qtyText(qty: number): string {
 }
 
 /** One line to paste into an exchange or a trading journal. */
-export function orderText(plan: TradePlan, symbol: string, sized: SizedPlan | null, s: SizingSettings): string {
+export function orderText(plan: TradePlan, symbol: string, sized: SizedPlan | null): string {
   const [base] = splitSymbol(symbol);
   const parts = [
     `${plan.direction.toUpperCase()} ${displaySymbol(symbol)}`,
@@ -74,7 +93,7 @@ export function orderText(plan: TradePlan, symbol: string, sized: SizedPlan | nu
   ];
   if (sized) {
     parts.push(`Qty ${qtyText(sized.qty)} ${base} (~$${sized.notional.toFixed(2)})`);
-    parts.push(`Risk $${sized.riskUsd.toFixed(2)} (${s.riskPct}%)`);
+    parts.push(`Risk $${sized.riskUsd.toFixed(2)} (${+sized.effectiveRiskPct.toFixed(2)}%)`);
     if (sized.leverage > 1) parts.push(`Lev ${sized.leverage.toFixed(1)}x`);
   }
   return parts.join(" · ");

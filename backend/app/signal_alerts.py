@@ -98,6 +98,10 @@ SIGNALS: dict[str, SignalInfo] = {
 KIMI_SIGNALS = frozenset({"kimi_buy", "kimi_sell", "kimi_any"})
 SELL_SIGNALS = frozenset({"lost_support", "at_resistance"})  # sell_check.py's checks, for spot holders
 KIMI_LABELS = {"kimi_buy": {"B+"}, "kimi_sell": {"B-"}}
+# Which way each signal points, for drawing it (kimi_any: each hit's own direction). Mirrors SIGNAL_SIDE in
+# frontend/lib/alerts.ts.
+SHORT_SIGNALS = frozenset({"kimi_sell", "rsi_bear_div", "sweep_high", "new_supply", "bos_bear", "rsi_overbought",
+                           "lost_support", "at_resistance"})
 
 WINDOW = 300          # closed candles the detectors see, like the watchlist scan
 MIN_BARS = 60         # fewer than this and the detectors have nothing to work with
@@ -459,7 +463,7 @@ class SignalAlertService:
     # ----------------------------------------------------------- preview
     async def preview(self, symbol: str, interval: str, signal: str, bars: int = 300) -> dict:
         """When `signal` would have fired on the last `bars` closed candles → {symbol, interval, signal, name,
-        bars, data_source, hits: [{time, price, text}] newest first, note?}."""
+        bars, data_source, hits: [{time, price, text, direction}] newest first, note?}."""
         if signal not in SIGNALS or signal == "zone_trigger":
             raise ValueError(f"signal must be one of {', '.join(SIGNAL_IDS[:-1])}")
         bars = max(10, min(bars, 1000))
@@ -482,7 +486,12 @@ class SignalAlertService:
             out["note"] = f"{demo} {out['note']}" if out.get("note") else demo
         async with self._preview_sem:
             hits = await asyncio.to_thread(scan_history, signal, candles_to_df(closed), bars, kimi)
-        out["hits"] = [{"time": h.time, "price": h.price, "text": h.text} for h in reversed(hits)]
+        def side(h: SignalHit) -> str:
+            if signal == "kimi_any":
+                return "short" if h.key.startswith("kimi:B-") or "(short)" in h.text else "long"
+            return "short" if signal in SHORT_SIGNALS else "long"
+
+        out["hits"] = [{"time": h.time, "price": h.price, "text": h.text, "direction": side(h)} for h in reversed(hits)]
         return out
 
     # ---------------------------------------------------- trigger alerts

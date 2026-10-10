@@ -8,7 +8,7 @@ import { useAlerts, type FiredAlert, type SignalFired } from "@/hooks/useAlerts"
 import { useAppStatus } from "@/hooks/useAppStatus";
 import { useHigherTfOverlays } from "@/hooks/useHigherTfOverlays";
 import { useIsMobile } from "@/hooks/useMediaQuery";
-import { readStored, usePersistentState, writeStored } from "@/hooks/usePersistentState";
+import { pruneStorage, readStored, STORAGE_FULL_EVENT, usePersistentState, writeStored } from "@/hooks/usePersistentState";
 import { useUndo } from "@/hooks/useUndo";
 import { alertFromDrawing, alertOverlays, chartZones, saveBriefNotes, SELL_SIGNALS } from "@/lib/alerts";
 import { fetchAccountPositions, fetchBinanceKey, positionOverlays } from "@/lib/binance";
@@ -144,6 +144,9 @@ function drawingChange(before: Drawing[], after: Drawing[]): string {
   if (after.length < before.length) return before.length - after.length > 1 ? "delete drawings" : "delete drawing";
   return "drawing edit";
 }
+
+/** An answer is still streaming in: don't store the conversation yet. */
+const holdChat = (m: AgentMessage[]) => m.some((x) => x.streaming);
 
 export default function ChartWorkspace() {
   const mobile = useIsMobile();
@@ -458,7 +461,8 @@ export default function ChartWorkspace() {
   }, [composed.counts, drawings.length, compare.length, indicators.kimi, indicators.sessions, indicators.heatmap, symbol]);
 
   // ------------------------------------------------------------------ the chart agent
-  const [messages, setStoredMessages] = usePersistentState<AgentMessage[]>("ac:chat", []);
+  // Not written while an answer streams in (that was a write per token), only once it is complete.
+  const [messages, setStoredMessages] = usePersistentState<AgentMessage[]>("ac:chat", [], { holdWhile: holdChat });
   const [lastIntent, setLastIntent] = usePersistentState<AnalysisIntent | null>("ac:intent", null);
   const setMessages = useCallback(
     (fn: (m: AgentMessage[]) => AgentMessage[]) => setStoredMessages((m) => fn(m).slice(-MAX_MESSAGES)),
@@ -472,8 +476,16 @@ export default function ChartWorkspace() {
   const [searchMode, setSearchMode] = useState<SearchMode | null>(null);
   const [feed, setFeed] = useState<FeedInfo>({ price: NaN, open24: null, source: "connecting" });
   const [error, setError] = useState<string | null>(null);
+  const [storageFull, setStorageFull] = useState(false);
+  useEffect(() => {
+    pruneStorage(); // drawings of charts not opened for 30 days
+    const onFull = () => setStorageFull(true);
+    window.addEventListener(STORAGE_FULL_EVENT, onFull);
+    return () => window.removeEventListener(STORAGE_FULL_EVENT, onFull);
+  }, []);
   const [dialog, setDialog] = useState<"settings" | "indicators" | "shortcuts" | null>(null);
   const analysisCtrl = useRef<AbortController | null>(null);
+  const selfNavRef = useRef<string | null>(null); // "SYMBOL:interval" the agent's answer is moving the chart to
 
   // Past conversations: "New chat" files the current one here, and opening one brings it back to continue.
   const [chats, setChats] = usePersistentState<ChatSession[]>(CHATS_KEY, []);
@@ -534,6 +546,12 @@ const convoRef = useRef({ messages, overlays, lastIntent, watchlist, spotOnly, i
   // Cancel in-flight analysis when the market changes (unless a top-down walk is the one changing it).
   useEffect(() => {
     if (walkingRef.current) return;
+    if (selfNavRef.current === `${symbol}:${interval}`) {
+      selfNavRef.current = null; // the agent moved the chart for its own answer: let it finish
+      setSelectedId(null);
+      return;
+    }
+    selfNavRef.current = null;
     analysisCtrl.current?.abort();
     setSelectedId(null);
     setBusy(false);
@@ -574,6 +592,7 @@ const convoRef = useRef({ messages, overlays, lastIntent, watchlist, spotOnly, i
       const convo = convoRef.current;
       if (!opts.silent) setMessages((m) => [...m, { id: uid(), role: "user", text: prompt }]);
       setBusy(true);
+      const id = uid();
       try {
         const candles: Candle[] = activeChart()?.getCandles() ?? [];
         const history = convo.messages
@@ -604,7 +623,6 @@ const convoRef = useRef({ messages, overlays, lastIntent, watchlist, spotOnly, i
             stoch_rsi: convo.indicatorSettings.stochRsi,
           },
         };
-        const id = uid();
         const at = Date.now();
         const lead = opts.silent ? "Auto-detected levels. " : "";
         const toMessage = (res: AnalyzeResponse, text: string, streaming: boolean): AgentMessage => {
@@ -646,9 +664,15 @@ const convoRef = useRef({ messages, overlays, lastIntent, watchlist, spotOnly, i
           const target = r.navigate ?? { symbol, interval };
           // Saved under the chart the answer belongs to; when the agent moves the chart, that chart loads them.
           changeOverlays(`ac:overlays:${target.symbol}:${target.interval}`, r.overlays, opts.silent ? "auto levels" : "agent answer");
-          if (r.navigate) setCell({ symbol: r.navigate.symbol, interval: r.navigate.interval });
+          if (r.navigate) {
+            // The answer moves the chart itself: that move must not cancel the summary still being written.
+            selfNavRef.current = `${r.navigate.symbol}:${r.navigate.interval}`;
+            setCell({ symbol: r.navigate.symbol, interval: r.navigate.interval });
+          }
           if (Object.keys(r.indicators ?? {}).length) setIndicators((ind) => ({ ...ind, ...r.indicators }));
-          if (prompt) setLastIntent(r.intent);
+          // A question about the plan on screen ("what invalidates this?") keeps that plan's intent for the next
+          // follow-up rather than replacing it with an empty one.
+          if (prompt && !(r.intent?.keep_existing && !r.intent.features?.length)) setLastIntent(r.intent);
           addAlerts(r.alerts ?? [], r.symbol);
           for (const t of r.trigger_alerts ?? []) void addTrigger(t);
         };
@@ -684,6 +708,16 @@ const convoRef = useRef({ messages, overlays, lastIntent, watchlist, spotOnly, i
         if (!opts.silent) setQuickAnswer(msg);
       } finally {
         if (analysisCtrl.current === ctrl) setBusy(false);
+        if (ctrl.signal.aborted) {
+          // Stopped mid-answer: keep what was written (marked stopped) instead of a message streaming forever.
+          setMessages((m) =>
+            m.flatMap((x) => {
+              if (x.id !== id || !x.streaming) return [x];
+              if (!x.text.trim() && !x.overlays?.length && !x.plan) return [];
+              return [{ ...x, streaming: undefined, text: x.text.trim() ? `${x.text} …` : "", meta: "Stopped before the answer finished." }];
+            }),
+          );
+        }
       }
     },
     [symbol, interval, activeChart, setMessages, changeOverlays, setLastIntent, addAlerts, addTrigger, setCell, setIndicators, playWalk],
@@ -983,7 +1017,8 @@ const convoRef = useRef({ messages, overlays, lastIntent, watchlist, spotOnly, i
   /** "Log trade" on a plan card: track it in the journal, sized with the user's position-sizing settings. */
   const logTrade = useCallback(async (m: AgentMessage) => {
     if (!m.plan || !m.symbol || !m.interval) return false;
-    const sized = sizePlan(m.plan, { ...DEFAULT_SIZING, ...readStored<Partial<SizingSettings>>("ac:sizing", {}) });
+    const sized = sizePlan(m.plan, { ...DEFAULT_SIZING, ...readStored<Partial<SizingSettings>>("ac:sizing", {}) },
+      { spotOnly: readStored<boolean>(SPOT_ONLY_KEY, true) });
     try {
       await createJournalEntry(planToJournalEntry(m.plan, m.symbol, m.interval, sized ? { size_qty: sized.qty, risk_usd: sized.riskUsd } : {}));
       return true;
@@ -1307,6 +1342,14 @@ const convoRef = useRef({ messages, overlays, lastIntent, watchlist, spotOnly, i
           {error && (
             <div className="absolute left-1/2 top-12 z-30 -translate-x-1/2 rounded-md border border-down/40 bg-down/10 px-3 py-1.5 text-xs text-down">
               {error} Retrying…
+            </div>
+          )}
+          {storageFull && (
+            <div className="absolute left-1/2 top-20 z-30 flex -translate-x-1/2 items-center gap-2 rounded-md border border-yellow-400/40 bg-yellow-400/10 px-3 py-1.5 text-xs text-yellow-200">
+              The browser&apos;s storage is full, so recent changes may not be saved. Delete old chats or drawings, or save a backup in Settings.
+              <button type="button" className="btn-ghost h-5 px-1 text-[11px]" onClick={() => setStorageFull(false)}>
+                Dismiss
+              </button>
             </div>
           )}
           {undoNote && (

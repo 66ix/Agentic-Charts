@@ -33,13 +33,28 @@ function Rows({ title, rows }: { title: string; rows: KimiRow[] }) {
  * Kimi Cooked's two tables (PATH VERIFY and Signal Stats) and its latest signals, folded into a pill under the
  * chart legend so they don't cover the candles.
  */
-export default function KimiPanel({ data, loading, error, plain, onPlain }: {
+/** "MM-DD HH:MM" in the chart's timezone ("local", "UTC" or an IANA zone), like the time axis. */
+function stamp(t: number, tz: string | undefined): string {
+  const timeZone = !tz || tz === "local" ? undefined : tz;
+  let f: Intl.DateTimeFormat;
+  try {
+    f = new Intl.DateTimeFormat("en-GB", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false, timeZone });
+  } catch {
+    f = new Intl.DateTimeFormat("en-GB", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
+  }
+  const p = Object.fromEntries(f.formatToParts(new Date(t * 1000)).map((x) => [x.type, x.value]));
+  return `${p.month}-${p.day} ${p.hour}:${p.minute}`;
+}
+
+export default function KimiPanel({ data, loading, error, plain, onPlain, timezone }: {
   data: KimiResult | null;
   loading: boolean;
   error: string | null;
   /** Show Kimi's own forecast line instead of Kimi + Agent. */
   plain: boolean;
   onPlain(v: boolean): void;
+  /** The chart's timezone setting, so times match the time axis. */
+  timezone?: string;
 }) {
   const withAgentLine = agentInUse(data, plain);
   const agent = data?.forecast?.agent ?? null;
@@ -117,7 +132,7 @@ export default function KimiPanel({ data, loading, error, plain, onPlain }: {
                   {recent.map((s) => (
                     <tr key={`${s.text}-${s.time}`}>
                       <td className={clsx("pr-2", s.direction === "long" ? "text-up" : "text-down")}>{s.text}</td>
-                      <td className="pr-2 text-mute">{new Date(s.confirm_time * 1000).toISOString().slice(5, 16).replace("T", " ")}</td>
+                      <td className="pr-2 text-mute">{stamp(s.confirm_time, timezone)}</td>
                       <td className="pr-2 text-right text-ink">{formatPrice(s.entry)}</td>
                       <td className={clsx("text-right", RESULT[s.result])}>
                         {s.result}
@@ -142,7 +157,7 @@ export default function KimiPanel({ data, loading, error, plain, onPlain }: {
                   {shapes.map((p) => (
                     <tr key={`${p.name}-${p.time}`}>
                       <td className={clsx("pr-2", p.direction === "bullish" ? "text-up" : "text-down")}>{p.name}</td>
-                      <td className="pr-2 text-mute">{new Date(p.time * 1000).toISOString().slice(5, 16).replace("T", " ")}</td>
+                      <td className="pr-2 text-mute">{stamp(p.time, timezone)}</td>
                       <td className="text-right text-ink">{p.detail}</td>
                     </tr>
                   ))}

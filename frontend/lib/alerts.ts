@@ -164,6 +164,25 @@ export const SIGNAL_OPTIONS: { id: SignalId; name: string; hint: string }[] = [
 /** The two signals that watch coins you hold, the alert version of "what should I sell or trim?". */
 export const SELL_SIGNALS: SignalId[] = ["lost_support", "at_resistance"];
 
+/** Which way a signal points, for drawing it; kimi_any takes each hit's own direction. Mirrors SHORT_SIGNALS in
+ * backend/app/signal_alerts.py. */
+export const SIGNAL_SIDE: Record<Exclude<SignalId, "kimi_any" | "zone_trigger">, "long" | "short"> = {
+  kimi_buy: "long",
+  kimi_sell: "short",
+  rsi_bull_div: "long",
+  rsi_bear_div: "short",
+  sweep_low: "long",
+  sweep_high: "short",
+  new_demand: "long",
+  new_supply: "short",
+  bos_bull: "long",
+  bos_bear: "short",
+  rsi_overbought: "short",
+  rsi_oversold: "long",
+  lost_support: "short",
+  at_resistance: "short",
+};
+
 export function signalName(id: string): string {
   if (id === "zone_trigger") return "Zone trigger";
   return SIGNAL_OPTIONS.find((s) => s.id === id)?.name ?? id;
@@ -216,7 +235,7 @@ export interface SignalPreview {
   bars: number;
   data_source: string;
   /** Newest first. `time` is the candle's open time (UNIX s). */
-  hits: { time: number; price: number; text: string }[];
+  hits: { time: number; price: number; text: string; direction?: "long" | "short" }[];
   note?: string;
 }
 

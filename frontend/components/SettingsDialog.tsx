@@ -5,6 +5,7 @@ import { useRef, useState } from "react";
 
 import { readStored, storedKeys, usePersistentState, writeStored } from "@/hooks/usePersistentState";
 import { DEFAULT_SIZING, type SizingSettings } from "@/lib/sizing";
+import { SPOT_ONLY_KEY } from "@/lib/spot";
 import type { LayoutState } from "@/lib/types";
 
 import { BinanceKeySettings } from "./AccountPanel";
@@ -40,6 +41,7 @@ interface Props {
 /** Everything that isn't about one chart: time, sizing, and a backup of the whole app. */
 export default function SettingsDialog(p: Props) {
   const [sizing, setSizing] = usePersistentState<SizingSettings>("ac:sizing", DEFAULT_SIZING);
+  const [spotOnly] = usePersistentState<boolean>(SPOT_ONLY_KEY, true);
   const [note, setNote] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -125,9 +127,11 @@ export default function SettingsDialog(p: Props) {
         <Row label="Fee per side">
           <NumberInput value={sizing.feePct} min={0} max={1} step={0.01} onChange={(v) => setSizing({ ...sizing, feePct: v })} suffix="%" />
         </Row>
-        <Row label="Highest leverage" hint="A plan that needs more than this is flagged">
-          <NumberInput value={sizing.maxLeverage} min={1} max={125} step={1} onChange={(v) => setSizing({ ...sizing, maxLeverage: v })} suffix="×" />
-        </Row>
+        {!spotOnly && (
+          <Row label="Highest leverage" hint="A plan that needs more than this is flagged">
+            <NumberInput value={sizing.maxLeverage} min={1} max={125} step={1} onChange={(v) => setSizing({ ...sizing, maxLeverage: v })} suffix="×" />
+          </Row>
+        )}
       </Section>
 
       <div className="border-b border-line py-2">
