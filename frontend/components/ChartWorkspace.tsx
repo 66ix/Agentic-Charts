@@ -10,7 +10,9 @@ import { useHigherTfOverlays } from "@/hooks/useHigherTfOverlays";
 import { useIsMobile } from "@/hooks/useMediaQuery";
 import { pruneStorage, readStored, STORAGE_FULL_EVENT, usePersistentState, writeStored } from "@/hooks/usePersistentState";
 import { useUndo } from "@/hooks/useUndo";
-import { alertFromDrawing, alertOverlays, chartZones, saveBriefNotes, SELL_SIGNALS } from "@/lib/alerts";
+import { alertFromDrawing, alertOverlays, chartZones, saveBriefNotes, SELL_SIGNALS, type AlertHistoryItem } from "@/lib/alerts";
+import { setFaviconDot } from "@/lib/favicon";
+import { tabTitle, toastFromHistory } from "@/lib/notifyClient";
 import { fetchAccountPositions, fetchBinanceKey, positionOverlays } from "@/lib/binance";
 import { analyzeStream } from "@/lib/api";
 import { imageToDataUrl, readScreenshot } from "@/lib/screenshot";
@@ -68,7 +70,7 @@ import { CURRENT_WORKSPACE_KEY, saveWorkspace, WORKSPACES_KEY, type SavedWorkspa
 import AgentPanel, { placeholderFor, type AgentMessage, type AgentPanelHandle } from "./AgentPanel";
 import { type AgenticChartHandle, type ChartChip, type CompareLine, type FeedInfo, type KimiVisibility } from "./AgenticChart";
 import AlertsPanel from "./AlertsPanel";
-import AlertToasts, { signalToast, type Toast } from "./AlertToasts";
+import AlertToasts, { signalToast, type Toast, type ToastTarget } from "./AlertToasts";
 import ChartCell from "./ChartCell";
 import ChartHeader, { COMPARE_COLORS } from "./ChartHeader";
 import Dock, { type DockTab } from "./Dock";
@@ -457,11 +459,31 @@ export default function ChartWorkspace() {
 
   // ------------------------------------------------------------------ alerts
   const [toasts, setToasts] = useState<Toast[]>([]);
-  const onAlertsFired = useCallback((fired: FiredAlert[]) => {
-    setToasts((t) => [...t, ...fired.map((f) => ({ id: uid(), alert: f.alert, price: f.price }))].slice(-4));
+  // Events that arrive while the browser tab is hidden, counted in its title until you come back.
+  const [unread, setUnread] = useState(0);
+  const pushToasts = useCallback((add: Toast[]) => {
+    if (!add.length) return;
+    setToasts((t) => [...t.filter((x) => !add.some((a) => a.id === x.id)), ...add].slice(-4));
+    if (document.hidden) setUnread((n) => n + add.length);
   }, []);
-  const onSignalFired = useCallback((f: SignalFired) => setToasts((t) => [...t, signalToast(uid(), f)].slice(-4)), []);
-  const alertsApi = useAlerts(onAlertsFired, onSignalFired);
+  const onAlertsFired = useCallback(
+    (fired: FiredAlert[]) => pushToasts(fired.map((f) => ({ id: uid(), alert: f.alert, price: f.price }))),
+    [pushToasts],
+  );
+  const onSignalFired = useCallback((f: SignalFired) => pushToasts([signalToast(uid(), f)]), [pushToasts]);
+  const onAlertEvent = useCallback(
+    (item: AlertHistoryItem) => {
+      const t = toastFromHistory(item);
+      if (t) pushToasts([t]);
+    },
+    [pushToasts],
+  );
+  useEffect(() => {
+    const onVisible = () => !document.hidden && setUnread(0);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, []);
+  const alertsApi = useAlerts(onAlertsFired, onSignalFired, onAlertEvent);
   const { alerts, add: addAlerts, update: updateAlert, addTrigger, addSignal } = alertsApi;
   const armedAlerts = alerts.filter((a) => a.armed).length;
   // Problems worth a badge on the Status tab: the AI model not answering, Binance down, failing or stalled jobs.
@@ -1061,6 +1083,21 @@ export default function ChartWorkspace() {
 
   const change24 = feed.open24 && Number.isFinite(feed.price) ? ((feed.price - feed.open24) / feed.open24) * 100 : null;
   const price = Number.isFinite(feed.price) ? feed.price : null;
+  // The browser tab reads "(2) INJ 24.31 ▲1.2% · 4H"; its icon gets a dot while events wait unseen.
+  useEffect(() => {
+    document.title = tabTitle({ symbol, interval, price, change24, unread });
+  }, [symbol, interval, price, change24, unread]);
+  useEffect(() => setFaviconDot(unread > 0), [unread]);
+  const openToast = useCallback(
+    (to: ToastTarget) => {
+      if (to.symbol && to.symbol !== "MARKET") {
+        const tf = TIMEFRAMES.find((t) => t.value === to.interval)?.value;
+        pickSymbol(to.symbol, tf);
+      }
+      if (to.tab) openTabRef.current(to.tab);
+    },
+    [pickSymbol],
+  );
 
   // ------------------------------------------------------------------ side-panel tabs
   /** "Log trade" on a plan card: track it in the journal, sized with the user's position-sizing settings. */
@@ -1485,7 +1522,7 @@ export default function ChartWorkspace() {
         onClose={() => setDialog(null)}
       />
       <ShortcutsDialog open={dialog === "shortcuts"} onClose={() => setDialog(null)} />
-      <AlertToasts toasts={toasts} onDismiss={(id) => setToasts((t) => t.filter((x) => x.id !== id))} />
+      <AlertToasts toasts={toasts} onDismiss={(id) => setToasts((t) => t.filter((x) => x.id !== id))} onOpen={openToast} />
     </div>
   );
 }
