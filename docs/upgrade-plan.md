@@ -1774,3 +1774,16 @@ They give visible wins while the backend items wait.
 - Grid bot health checks, DCA plan reminders, a walk-forward grid planner, coaching on individual sells, and a losing-streak brake: portfolio extras that build on the cockpit.
 - Load older history on scroll-left, plus the performance pass (feed store, memoised and lazy-loaded panels, pausing hidden tabs): important but mostly invisible; drawing-v2 already removes the worst re-render (on drag).
 - Level-freshness chip, grid upgrades (maximise a cell, 1+2 layout, per-cell timeframe), phone-first bottom nav, hover a price in an answer to highlight it, forecast ghosts, factor scoreboard, 'Kimi as of then' in replay, Kimi Lab, TradingView parity checker, Kimi lines in 'since you last looked', market regime tape, what-if questions on holdings: good ideas that each add less than the 22 chosen; the Kimi replay lookahead itself is in fixes.
+
+## Parked ideas
+
+### `ghost-candles`: Kimi's forecast as ghost candles that real candles print over (later)
+
+Instead of a line redrawn at every close, the forecast is drawn as faded ghost candles for its horizon (about 20 bars,
+set per timeframe, as Kimi's horizon already is): each opens at the previous ghost's close and closes on the forecast
+path; wicks come from the scenario texture and the band, and fade with distance (only the closes are forecast; the
+tooltip says so). A forecast is locked when made and stays for its whole horizon while real candles print on top; the
+next starts when it ends (a switch keeps today's redraw-every-close, and the latest fresh forecast can show as a thin
+line meanwhile). Each finished forecast gets a score label: real closes inside the ghosts' range, direction right or
+not, end error; the last few stay faded under the real candles, from the forecasts kimi_agent already keeps. 'Flat (no
+proven edge)' ghosts stay grey and say so. Main pane only at first.
