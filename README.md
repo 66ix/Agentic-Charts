@@ -216,6 +216,8 @@ scores are kept in `LLM_CHOICE_STORE` (default `.cache/llm_choice.json`). The sa
 | `MARKET_SCAN_CONCURRENCY` | `4` | Coins whose candles load at once during a scan |
 | `MARKET_SCAN_SCHEDULE` | empty | Timed scans as `timeframe=minutes`, e.g. `15m=10,4h=60` (at least 5 minutes; empty = on demand only) |
 | `MARKET_SCAN_NOTIFY_TOP` | `0` | Send this many of the best setups to Telegram / Discord after each timed scan (`0` = off) |
+| `MARKET_SCAN_NOTIFY_SIDE` | `spot` | Which setups a timed scan sends: `spot` (longs at higher-timeframe demand), `long` or `both`. Scans on demo or mixed data are never sent |
+| `MARKET_SCAN_RESEND_HOURS` | `12` | A setup (coin and entry) already sent is not sent again for this many hours |
 | `MARKET_SCAN_STORE` | `backend/.cache/market_scan.json` | The last scan per timeframe; `memory` = not saved |
 | `HEATMAP_INTERVAL_SECONDS` | `10` | How often the order-book heatmap samples the book of a symbol someone is viewing |
 | `HEATMAP_DEPTH_LIMIT` | `1000` | Levels per snapshot (Binance request weight 50; `5000` reaches further but weighs 250) |

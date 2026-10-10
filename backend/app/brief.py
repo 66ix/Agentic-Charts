@@ -394,6 +394,7 @@ class BriefService:
         self._notes: dict[str, str] = {k: str(v) for k, v in (data.get("notes") or {}).items() if v}
         self._last_review: str = str(data.get("last_review") or "")  # ISO week of the last weekly check, "2026-W41"
         self._task: asyncio.Task | None = None
+        self._error: Optional[str] = None  # a failure tick() caught, for the status panel
         self._send_lock = asyncio.Lock()
 
     # ----------------------------------------------------------- settings
@@ -588,7 +589,8 @@ class BriefService:
             return False
         try:
             await self.send(now=ts)
-        except Exception:
+        except Exception as exc:
+            self._error = f"Scheduled brief failed: {exc}"
             log.exception("Scheduled brief failed")
             return False
         return True
@@ -621,7 +623,8 @@ class BriefService:
         self._save()  # before sending, like the brief: never twice in one week
         try:
             await self.send_review(now=ts)
-        except Exception:
+        except Exception as exc:
+            self._error = f"Weekly level check failed: {exc}"
             log.exception("Weekly level check failed")
             return False
         return True
@@ -641,9 +644,13 @@ class BriefService:
     async def _run(self) -> None:
         while True:
             await asyncio.sleep(self.check_seconds)
+            self._error = None
             try:
                 await self.tick()
-                jobs.ok("brief")
+                if self._error:  # a failed send is caught inside tick(); still show it on Status
+                    jobs.fail("brief", self._error)
+                else:
+                    jobs.ok("brief")
             except Exception as exc:
                 jobs.fail("brief", exc)
                 log.exception("Brief scheduler check failed")

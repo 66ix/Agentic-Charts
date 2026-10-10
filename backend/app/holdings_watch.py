@@ -78,8 +78,11 @@ class HoldingsWatch:
             jobs.set_enabled("holdings_watch", self.settings.enabled)
             if self.settings.enabled:
                 try:
-                    await self.run()
-                    jobs.ok("holdings_watch")
+                    last = await self.run()
+                    if last.get("error"):
+                        jobs.fail("holdings_watch", last["error"])
+                    else:
+                        jobs.ok("holdings_watch")
                 except Exception as exc:
                     jobs.fail("holdings_watch", exc)
             await asyncio.sleep(CHECK_EVERY)

@@ -163,6 +163,11 @@ class Settings:
         default_factory=lambda: max(1, min(int(_env("MARKET_SCAN_CONCURRENCY", "4")), 16)))
     market_scan_schedule: str = field(default_factory=lambda: _env("MARKET_SCAN_SCHEDULE", ""))
     market_scan_notify_top: int = field(default_factory=lambda: max(0, int(_env("MARKET_SCAN_NOTIFY_TOP", "0"))))
+    # Which setups a timed scan sends: "spot" (longs at higher-timeframe demand, the default), "long" or "both".
+    market_scan_notify_side: str = field(default_factory=lambda: _env("MARKET_SCAN_NOTIFY_SIDE", "spot").lower())
+    # A setup (coin and entry) already sent is not sent again for this many hours.
+    market_scan_resend_hours: float = field(
+        default_factory=lambda: max(0.0, float(_env("MARKET_SCAN_RESEND_HOURS", "12"))))
     market_scan_store: str = field(default_factory=lambda: _env(
         "MARKET_SCAN_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "market_scan.json")))
 

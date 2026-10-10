@@ -329,7 +329,7 @@ class TradeManager:
         t = ManagedTrade(**new.model_dump(exclude={"opened_at"}), id=uuid.uuid4().hex[:10],
                          opened_at=new.opened_at or int(time.time()), initial_stop=new.stop)
         self._trades[t.id] = t
-        await self.check(t)  # catch up on the candles since it was opened
+        await self.check(t, catch_up=True)  # catch up on the candles since it was opened, quietly
         self._save()
         return t
 
@@ -371,8 +371,10 @@ class TradeManager:
         return True
 
     # ------------------------------------------------------------ checks
-    async def check(self, t: ManagedTrade) -> list[Advice]:
-        """Fetch the trade's candles and review the closed ones it hasn't seen."""
+    async def check(self, t: ManagedTrade, catch_up: bool = False) -> list[Advice]:
+        """Fetch the trade's candles and review the closed ones it hasn't seen. `catch_up` (a trade just added,
+        maybe opened days ago): advice on older candles is kept and marked done without a message each, and one
+        summary is sent instead; only advice on the newest closed candle is announced as usual."""
         if t.status != "open":
             return []
         try:
@@ -385,9 +387,29 @@ class TradeManager:
         t.data_source = source
         df = candles_to_df(closed_only(candles, t.interval))
         new = review(t, df)
+        latest = int(df["time"].iloc[-1]) if len(df) else None
+        old = [a for a in new if catch_up and latest is not None and a.time < latest]
+        for a in old:
+            a.status = "done"
+        if old:
+            self._catch_up_summary(t, old, latest)
         for a in new:
-            self._announce(t, a)
+            if a not in old:
+                self._announce(t, a)
         return new
+
+    def _catch_up_summary(self, t: ManagedTrade, old: list[Advice], latest: int) -> None:
+        span = max(0, latest - old[0].time)
+        ago = f"{span / 86400:.0f} day{'s' if round(span / 86400) != 1 else ''}" if span >= 86400 else \
+            f"{span / 3600:.0f}h"
+        kinds = list(dict.fromkeys(a.kind.replace("_", " ") for a in old))
+        stops = [a.suggested_stop for a in old if a.suggested_stop is not None]
+        best = (max(stops) if t.direction == "long" else min(stops)) if stops else None
+        text = (f"{t.symbol} {t.direction}: caught up {ago} of {t.interval} candles: {', '.join(kinds)}"
+                + (f"; best stop now {fmt_price(best)}" if best is not None else "") + ".")
+        self.alerts.record("trade", t.symbol, f"{t.symbol} {t.direction}: caught up", text, price=old[-1].price)
+        self.alerts.broadcast({"type": "trade_advice", "trade_id": t.id, "advice": None, "text": text})
+        self.alerts.notify(text)
 
     async def sync_positions(self) -> bool:
         """Close managed Binance positions that are no longer open on the account. True when one was closed."""
@@ -426,23 +448,28 @@ class TradeManager:
                 due = [t for t in self._trades.values() if t.status == "open" and (
                     t.last_bar is None or now >= t.last_bar + 2 * INTERVAL_SECONDS[t.interval])]
                 changed = False
+                failures: list[str] = []
                 for t in due:
                     try:
                         before = (t.last_bar, len(t.advice), t.status)
                         await self.check(t)
                         changed |= before != (t.last_bar, len(t.advice), t.status)
                     except Exception as exc:
-                        jobs.fail("trade_manager", exc)
+                        failures.append(f"{t.symbol} {t.interval}: {exc}")
                         log.exception("Trade manager check failed for %s", t.id)
                 if now - self._positions_checked >= POSITIONS_CHECK_SECONDS:
                     self._positions_checked = now
                     try:
                         changed |= await self.sync_positions()
-                    except Exception:
+                    except Exception as exc:
+                        failures.append(f"Binance position check: {exc}")
                         log.exception("Trade manager: Binance position check failed")
                 if changed:
                     self._save()
-            jobs.ok("trade_manager", f"{len(due)} trade{'s' if len(due) != 1 else ''} checked" if due else "")
+            if failures:  # ok only for a clean pass, so Status keeps showing the error
+                jobs.fail("trade_manager", "; ".join(failures)[:300])
+            else:
+                jobs.ok("trade_manager", f"{len(due)} trade{'s' if len(due) != 1 else ''} checked" if due else "")
 
     # ------------------------------------------------------- persistence
     def _load(self) -> None:

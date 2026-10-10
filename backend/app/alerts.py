@@ -209,7 +209,7 @@ def build_channels(s: Settings) -> list[Channel]:
     if s.discord_webhook_url:
         url = s.discord_webhook_url
         token = url.rstrip("/").rsplit("/", 1)[-1]  # .../webhooks/<id>/<token>
-        out.append(Channel("discord", url, lambda text: {"content": text[:2000]},
+        out.append(Channel("discord", url, lambda text: {"content": text[:2000], "allowed_mentions": {"parse": []}},  # never @everyone
                            (url, token) if len(token) >= 8 else (url,), limit=2000))
     return out
 
