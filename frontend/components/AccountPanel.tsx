@@ -38,6 +38,9 @@ import {
 } from "@/lib/binance";
 import { fetchCoach, type CoachFinding, type CoachReport } from "@/lib/coach";
 import { displaySymbol, formatPrice } from "@/lib/format";
+import type { DockPanelProps } from "@/lib/dock";
+import { exitOverlays } from "@/lib/exitPlan";
+import ExitPlanCard from "./ExitPlanCard";
 import { fetchGridBots, type GridBot } from "@/lib/gridbot";
 
 const STATUS_MS = 60_000;
@@ -675,7 +678,8 @@ function CoachView({ enabled, version }: { enabled: boolean; version: number }) 
 }
 
 /** Every coin owned, spot and Simple Earn together, with where it sits and a totals footer. */
-function MergedHoldings({ rows, onHide }: { rows: MergedHolding[]; onHide(asset: string): void }) {
+function MergedHoldings({ rows, onHide, onChartOverlays }: { rows: MergedHolding[]; onHide(asset: string): void; onChartOverlays?: DockPanelProps["onChartOverlays"] }) {
+  const [planFor, setPlanFor] = useState<string | null>(null);
   const shown = rows.filter((h) => (h.value ?? 0) >= 1 || h.value == null);
   const total = shown.reduce((a, h) => a + (h.value ?? 0), 0);
   const pnl = shown.reduce((a, h) => a + (h.unrealized_pnl ?? 0), 0);
@@ -702,9 +706,24 @@ function MergedHoldings({ rows, onHide }: { rows: MergedHolding[]; onHide(asset:
               {h.unrealized_pnl >= 0 ? "+" : "−"}${money(Math.abs(h.unrealized_pnl))}
             </span>
           )}
+          {h.tradable !== false && (h.value ?? 0) >= 10 && (
+            <button
+              type="button"
+              className={clsx("btn-ghost h-5 px-1 font-sans text-[10px]", planFor === h.symbol && "text-accent")}
+              title="Where to sell it in pieces, and where holding it is wrong"
+              onClick={() => setPlanFor(planFor === h.symbol ? null : h.symbol)}
+            >
+              Exit plan
+            </button>
+          )}
           <button type="button" className="btn-ghost h-5 w-5 p-0" title={`Hide ${h.asset}: never request it from Binance or show it here (undo in Setup)`} onClick={() => onHide(h.asset)}>
             <EyeOff className="h-3 w-3" />
           </button>
+          {planFor === h.symbol && (
+            <div className="w-full font-sans">
+              <ExitPlanCard symbol={h.symbol} onChart={onChartOverlays ? (p) => onChartOverlays(`exit:${h.symbol}`, h.symbol, p ? exitOverlays(p) : []) : undefined} />
+            </div>
+          )}
         </div>
       ))}
       <div className="flex justify-between border-t border-line pt-1 font-mono text-[11px]">
@@ -717,7 +736,7 @@ function MergedHoldings({ rows, onHide }: { rows: MergedHolding[]; onHide(asset:
   );
 }
 
-function PositionsView({ bots, enabled }: { bots: GridBot[]; enabled: boolean }) {
+function PositionsView({ bots, enabled, onChartOverlays }: { bots: GridBot[]; enabled: boolean; onChartOverlays?: DockPanelProps["onChartOverlays"] }) {
   const [data, setData] = useState<AccountPositions | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -770,6 +789,7 @@ function PositionsView({ bots, enabled }: { bots: GridBot[]; enabled: boolean })
           {m.holdings && m.holdings.length > 0 && (
             <MergedHoldings
               rows={m.holdings}
+              onChartOverlays={onChartOverlays}
               onHide={(a) =>
                 void setAssetHidden(a, true)
                   .then(() => load(true))
@@ -1080,7 +1100,7 @@ function HoldingsWatchSetup({ enabled: keyOk }: { enabled: boolean }) {
  * the backend only), the fill import into the journal, open positions (own and bots' apart) and every imported fill
  * with whose it is (mine, a bot's, unknown) and why, which the user can correct.
  */
-export default function AccountPanel() {
+export default function AccountPanel(props: Partial<DockPanelProps> = {}) {
   const [tab, setTab] = usePersistentState<Tab>("ac:account-tab", "setup");
   const [status, setStatus] = useState<ImportStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1140,7 +1160,7 @@ export default function AccountPanel() {
             )}
           </div>
         )}
-        {tab === "positions" && <PositionsView bots={bots} enabled={enabled} />}
+        {tab === "positions" && <PositionsView bots={bots} enabled={enabled} onChartOverlays={props.onChartOverlays} />}
         {tab === "pnl" && <PnlView enabled={enabled} version={version} />}
         {tab === "coach" && <CoachView enabled={enabled} version={version} />}
         {tab === "fills" && <FillsView bots={bots} enabled={enabled} version={version} />}

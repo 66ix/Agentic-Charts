@@ -65,6 +65,7 @@ from .jobs import jobs
 from .kimi_service import KimiService
 from .llm import LLMClient
 from .postmortem import PostMortemService, ReviewSettings
+from .exit_plan import ExitPlanService
 from .market_data import INTERVAL_SECONDS, MarketData, MarketDataError, candles_to_df
 from .market_index import MarketIndexService
 from .market_metrics import MarketMetricsService
@@ -150,6 +151,7 @@ async def lifespan(app: FastAPI):
     app.state.market_scanner = MarketScanner(market, TrackRecordService(market), app.state.alerts)
     app.state.market_scanner.start()
     # The agent desk (agent_desk.py): its own calls at 1h/4h/1d closes, scored, paper-traded and learned from.
+    app.state.exit_plans = ExitPlanService(market, app.state.db, app.state.alerts, app.state.binance)
     app.state.desk = AgentDesk(market, app.state.db, app.state.alerts, app.state.market_scanner.track)
     app.state.desk.start()
     app.state.brief.desk_lines = app.state.desk.brief_lines
@@ -696,6 +698,43 @@ async def trades_delete(trade_id: str, request: Request) -> dict:
 
 
 # ------------------------------------------------------------------ AI model (Settings → AI model)
+
+
+@app.post("/api/exit-plan")
+async def exit_plan_build(request: Request, body: dict = Body(...)) -> dict:
+    """{symbol, profile?, qty?, avg_entry?} → the exit plan for a coin you hold (saved). qty / avg_entry work without a
+    Binance key."""
+    profile = body.get("profile") or "quarters"
+    if profile not in ("quarters", "thirds", "cost_out"):
+        raise HTTPException(422, "profile must be quarters, thirds or cost_out")
+    try:
+        plan = await request.app.state.exit_plans.build(_norm_symbol(str(body.get("symbol", ""))), profile,
+                                                        body.get("qty"), body.get("avg_entry"))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except MarketDataError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    return plan.model_dump()
+
+
+@app.get("/api/exit-plans")
+async def exit_plans_list(request: Request) -> dict:
+    return {"plans": [p.model_dump() for p in request.app.state.exit_plans.list()]}
+
+
+@app.delete("/api/exit-plans/{symbol}")
+async def exit_plan_delete(request: Request, symbol: str) -> dict:
+    if not await request.app.state.exit_plans.delete(_norm_symbol(symbol)):
+        raise HTTPException(404, "No exit plan for that coin")
+    return {"ok": True}
+
+
+@app.post("/api/exit-plans/{symbol}/arm")
+async def exit_plan_arm(request: Request, symbol: str) -> dict:
+    try:
+        return (await request.app.state.exit_plans.arm(_norm_symbol(symbol))).model_dump()
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @app.get("/api/llm/models")

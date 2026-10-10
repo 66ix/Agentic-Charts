@@ -108,6 +108,7 @@ export function panelLayer(key: string): LayerId {
     walls: "walls",
     liqs: "liqs",
     compare: "compare",
+    exit: "plan",
   };
   return map[head] ?? "panels";
 }
