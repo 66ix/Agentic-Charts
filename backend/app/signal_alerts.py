@@ -31,7 +31,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from functools import cached_property
-from typing import TYPE_CHECKING, Literal, Optional, get_args
+from typing import TYPE_CHECKING, Callable, Literal, Optional, get_args
 
 import numpy as np
 import pandas as pd
@@ -375,6 +375,7 @@ class SignalAlertService:
         self.retry_delay = retry_delay
         self._path = store_path(self.s.signal_alerts_store)
         self._alerts: dict[str, SignalAlert] = {}
+        self._context: dict[str, Callable[[SignalAlert], str]] = {}
         self._watches: dict[tuple[str, str], tuple[asyncio.Queue, asyncio.Task]] = {}
         self._seen: dict[tuple[str, str], int] = {}       # newest open time seen per stream
         self._scheduled: dict[tuple[str, str], int] = {}  # newest closed candle queued for a check per stream
@@ -470,6 +471,21 @@ class SignalAlertService:
         await self._sync()
         return True
 
+    async def remove_owned(self, owner: str) -> int:
+        """Deletes the alerts `owner` (e.g. "desk:<call id>") made → how many."""
+        gone = [k for k, a in self._alerts.items() if a.owner == owner]
+        for k in gone:
+            del self._alerts[k]
+        if gone:
+            self._changed()
+            await self._sync()
+        return len(gone)
+
+    def register_context(self, prefix: str, fn: Callable[[SignalAlert], str]) -> None:
+        """`fn(alert)` adds a line to the fire text of alerts whose owner starts with `prefix` (the desk says where
+        its call stands)."""
+        self._context[prefix] = fn
+
     async def sync_owned(self, owner: str, symbols: list[str], interval: str, signals: list[str],
                          note: str = "") -> dict:
         """Makes `owner`'s alerts exactly `signals` on `interval` for `symbols`: adds the missing ones and removes
@@ -530,7 +546,7 @@ class SignalAlertService:
         return out
 
     # ---------------------------------------------------- trigger alerts
-    async def add_trigger(self, spec: ZoneTriggerSpec) -> SignalAlert:
+    async def add_trigger(self, spec: ZoneTriggerSpec, owner: Optional[str] = None) -> SignalAlert:
         """A zone trigger alert (zone_triggers.py). The same coin, timeframe, zone and confirmation again re-arms
         the existing alert with the new cooldown, repeat and note instead of adding a duplicate. A fixed zone
         without a direction takes it from where price is (below price = long). Raises ValueError for bad input."""
@@ -559,7 +575,8 @@ class SignalAlertService:
                                         "trigger": kept.model_copy(update={"cooldown_min": spec.cooldown_min})})
         else:
             a = SignalAlert(id=uuid.uuid4().hex[:10], symbol=sym, interval=spec.interval, signal="zone_trigger",
-                            repeat=spec.repeat, note=note, created_at=int(time.time() * 1000), trigger=trig)
+                            repeat=spec.repeat, note=note, created_at=int(time.time() * 1000), trigger=trig,
+                            owner=owner)
         self._alerts[a.id] = a
         self._changed()
         await self._sync()
@@ -819,6 +836,15 @@ class SignalAlertService:
     def _fire(self, a: SignalAlert, hit: SignalHit | TriggerHit, source: str,
               frame: Optional[Frame] = None) -> SignalAlert:
         text = f"{a.symbol} {a.interval}: {hit.text}" + (f" — {a.note}" if a.note else "")
+        for prefix, fn in self._context.items():
+            if a.owner and a.owner.startswith(prefix):
+                try:
+                    extra = fn(a)
+                except Exception as exc:  # a context line must never stop the alert
+                    log.info("Signal alert context for %s failed: %s", a.owner, exc)
+                    extra = ""
+                if extra:
+                    text += f". {extra}"
         new = a.model_copy(update={
             "armed": a.repeat, "last_fired_at": int(time.time() * 1000), "fire_count": a.fire_count + 1,
             "last_bar": hit.time, "last_key": hit.key, "last_text": text, "last_price": hit.price,

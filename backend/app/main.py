@@ -154,6 +154,7 @@ async def lifespan(app: FastAPI):
     app.state.exit_plans = ExitPlanService(market, app.state.db, app.state.alerts, app.state.binance,
                                           app.state.signal_alerts)
     app.state.desk = AgentDesk(market, app.state.db, app.state.alerts, app.state.market_scanner.track)
+    app.state.desk.attach_signals(app.state.signal_alerts)
     app.state.desk.start()
     app.state.brief.desk_lines = app.state.desk.brief_lines
     # Coaching from your own imported trades (coach.py).

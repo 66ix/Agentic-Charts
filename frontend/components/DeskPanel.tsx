@@ -443,6 +443,11 @@ function Settings({ d, onSaved }: { d: DeskState; onSaved(d: DeskState): void })
         <Check checked={s.notify_fills} onChange={(v) => void save({ notify_fills: v })} label="When a buy fills" />
         <Check checked={s.notify_results} onChange={(v) => void save({ notify_results: v })} label="Results (take-profit, invalidated, timed out)" />
         <Check checked={s.notify_expired} onChange={(v) => void save({ notify_expired: v })} label="Calls that expire unfilled" />
+        <Check
+          checked={s.arm_triggers}
+          onChange={(v) => void save({ arm_triggers: v })}
+          label="Ping again when a 5m/15m candle confirms inside a call's zone (listed under Alerts → Triggers)"
+        />
       </Section>
       <Section title="Run now">
         <p className="text-[11px] text-mute">Look at the latest closed candle now instead of waiting for the next close.</p>

@@ -108,3 +108,46 @@ def test_new_calls_are_broadcast_so_open_apps_refresh():
     desk.alerts.broadcast = lambda msg: seen.append(msg)
     made = asyncio.run(desk.run_interval("4h", now=end + 60, force=True))
     assert made and any(m.get("type") == "desk_scored" and set(m["changed"]) >= {c.id for c in made} for m in seen)
+
+
+class FakeSignals:
+    def __init__(self):
+        self.made, self.ctx = {}, {}
+
+    def register_context(self, prefix, fn):
+        self.ctx[prefix] = fn
+
+    async def add_trigger(self, spec, owner=None):
+        from types import SimpleNamespace
+        a = SimpleNamespace(spec=spec, owner=owner)
+        self.made[owner] = a
+        return a
+
+    async def remove_owned(self, owner):
+        return int(self.made.pop(owner, None) is not None)
+
+
+def test_new_calls_arm_a_confirmation_trigger_in_their_zone():
+    end = T0 + 30
+    desk = _desk(FakeMarket(end))
+    sig = FakeSignals()
+    desk.attach_signals(sig)
+    made = asyncio.run(desk.run_interval("4h", now=end + 60, force=True))
+    assert made and set(sig.made) == {f"desk:{c.id}" for c in made if not c.shadow}
+    c = made[0]
+    t = sig.made[f"desk:{c.id}"]
+    assert t.spec.interval == "15m" and t.spec.zone.price_low == c.zone_low and t.spec.zone.direction == "long"
+    line = sig.ctx["desk:"](t)
+    assert "buy zone" in line and "still waiting" in line and "%" not in line  # no desk odds on the ping
+    # A call that ends takes its trigger with it.
+    desk._calls[c.id] = c.model_copy(update={"status": "expired"})
+    asyncio.run(desk._disarm_trigger(desk._calls[c.id]))
+    assert f"desk:{c.id}" not in sig.made
+
+
+def test_no_triggers_when_switched_off():
+    end = T0 + 30
+    desk = _desk(FakeMarket(end), arm_triggers=False)
+    sig = FakeSignals()
+    desk.attach_signals(sig)
+    assert asyncio.run(desk.run_interval("4h", now=end + 60, force=True)) and not sig.made

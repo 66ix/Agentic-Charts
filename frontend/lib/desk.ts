@@ -82,6 +82,8 @@ export interface DeskSettings {
   min_expected_r?: number;
   /** Calls running at once; watched zones are not limited. */
   max_active: number;
+  /** Each new call arms a lower-timeframe confirmation trigger in its zone, removed when the call ends. */
+  arm_triggers: boolean;
   notify_new: boolean;
   notify_fills: boolean;
   notify_results: boolean;

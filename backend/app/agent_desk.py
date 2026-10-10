@@ -108,6 +108,7 @@ class DeskSettings(BaseModel):
                                   description="Calls must expect at least this much R after fees")
     max_active: int = Field(30, ge=1, le=200, description="Calls running at once, across coins and timeframes "
                                                           "(watched zones are not limited)")
+    arm_triggers: bool = Field(True, description="Each new call arms a lower-timeframe confirmation alert in its zone")
     notify_new: bool = True
     notify_fills: bool = True
     notify_results: bool = True
@@ -159,6 +160,14 @@ def stale(tf: str, bar_time: int, now: float) -> bool:
     return now - (bar_time + step) > max(STALE_FRACTION * step, 4 * CLOSE_DELAY)
 
 
+# The lower timeframe whose confirmation candle a call's zone trigger waits for.
+TRIGGER_TF = {"15m": "5m", "30m": "5m", "1h": "5m", "4h": "15m", "1d": "15m", "1w": "15m"}
+
+
+def trigger_owner(call_id: str) -> str:
+    return f"desk:{call_id}"
+
+
 @dataclass
 class CoinResult:
     call: Optional[DeskCall] = None
@@ -197,6 +206,7 @@ class AgentDesk:
         self._scored_at = 0.0
         self._pruned_at = 0.0
         self.last_run: dict[str, dict] = (self._kv("last_run") or {})
+        self.signals = None  # SignalAlertService, set by attach_signals: zone triggers for calls
 
     # ------------------------------------------------------------------ storage
     def _kv(self, key: str):
@@ -317,9 +327,49 @@ class AgentDesk:
             self._set_kv("last_run", self.last_run)
         for c in made:
             await self._notify(c, "new")
+            await self._arm_trigger(c)
         if made and self.alerts is not None:
             self.alerts.broadcast({"type": "desk_scored", "changed": [c.id for c in made]})
         return made
+
+    # ---------------------------------------------------------- zone triggers
+    def attach_signals(self, signals) -> None:
+        """Calls arm a confirmation trigger in their zone through `signals` (SignalAlertService)."""
+        self.signals = signals
+        signals.register_context("desk:", self._trigger_context)
+
+    async def _arm_trigger(self, c: DeskCall) -> None:
+        """A lower-timeframe confirmation inside the call's buy zone: the second ping, when price actually reacts
+        there. It stays through waiting and open and goes when the call ends (score)."""
+        if self.signals is None or c.shadow or not self.settings.arm_triggers:
+            return
+        from .schemas import TriggerZone, ZoneTriggerSpec
+
+        tf = TF_LABEL.get(c.interval, c.interval)
+        spec = ZoneTriggerSpec(symbol=c.symbol, interval=TRIGGER_TF.get(c.interval, "15m"), confirm="any",
+                               zone=TriggerZone(source="fixed", price_low=c.zone_low, price_high=c.zone_high,
+                                                direction="long", timeframe=c.interval, label=f"Desk {tf} buy zone"),
+                               cooldown_min=60, repeat=False)
+        try:
+            await self.signals.add_trigger(spec, owner=trigger_owner(c.id))
+        except ValueError as exc:  # e.g. the alert limit: the call stands without it
+            log.info("Desk: no zone trigger for %s: %s", c.symbol, exc)
+
+    async def _disarm_trigger(self, c: DeskCall) -> None:
+        if self.signals is not None:
+            await self.signals.remove_owned(trigger_owner(c.id))
+
+    def _trigger_context(self, alert) -> str:
+        """Where the call stands, for its trigger's fire text. Never the desk's odds: they were measured for the
+        limit at the zone top, not for an entry on this confirmation."""
+        c = self._calls.get((alert.owner or "").removeprefix("desk:"))
+        if c is None:
+            return ""
+        tf = TF_LABEL.get(c.interval, c.interval)
+        where = (f"filled at {fmt_price(c.fill_price or c.entry)}" if c.status == "open"
+                 else f"still waiting at {fmt_price(c.entry)}" if c.status == "waiting" else c.status.replace("_", " "))
+        return (f"Inside the desk's {tf} buy zone {fmt_price(c.zone_low)}–{fmt_price(c.zone_high)}; desk limit {where}, "
+                f"take-profit {fmt_price(c.tp)}, wrong below {fmt_price(c.stop)}")
 
     async def _coin(self, symbol: str, interval: str, bar: int, now: float) -> "CoinResult":
         """One coin on one candle: the call worth making (if any) and the other new zones, watched."""
@@ -513,6 +563,8 @@ class AgentDesk:
             self._scored_at = now
         for before, after in changed:
             await self._notify(after, "update")
+            if after.status not in ACTIVE:
+                await self._disarm_trigger(after)
         if changed and self.alerts is not None:  # open apps refresh their desk view and chart (no toast)
             self.alerts.broadcast({"type": "desk_scored", "changed": [a.id for _, a in changed]})
         return [a for _, a in changed]
