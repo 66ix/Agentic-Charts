@@ -191,6 +191,7 @@ scores are kept in `LLM_CHOICE_STORE` (default `.cache/llm_choice.json`). The sa
 | `LLM_PROVIDER` | `ollama` | `ollama`, `openai`, `anthropic`, `none` |
 | `OLLAMA_NUM_CTX` | `8192` | Context window requested from Ollama. Its own default on GPUs under 24 GB is 4096, too small for the agent's tool calls (`0` = Ollama's default) |
 | `AGENT_MODE` | `tools` | `tools` = the model may look at other charts before drawing, `single` = one planning call |
+| `AGENT_ROUTER` | `rules_first` with Ollama, else `llm_first` | `rules_first` = clear requests ("give me a long setup", "best spot buys", "alert me at 7.5") are planned by the rule parser in milliseconds and the model only plans what the rules are unsure of (comparisons, judgement questions, several coins); `llm_first` = the model plans every request. Also in Settings → AI model → Planning |
 | `AGENT_MAX_STEPS` | `4` | Tool calls allowed per request before the model must draw |
 | `AGENT_RATE_LIMIT` | `20/minute` | Agent requests per client (`0` = off); also `/second`, `/hour`, `/day` |
 | `API_RATE_LIMIT` | `300/minute` | All other `/api/` requests per client (`0` = off) |

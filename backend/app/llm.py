@@ -668,8 +668,11 @@ def _scan_filter(p: str) -> str:
 
 
 def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases: set[str] | None = None,
-                chart_symbol: str | None = None, listed: frozenset[str] | None = None) -> AnalysisIntent:
-    """Keyword parser used when no LLM is available."""
+                chart_symbol: str | None = None, listed: frozenset[str] | None = None,
+                trace: dict | None = None) -> AnalysisIntent:
+    """Keyword parser: the plan when no LLM is available, and the fast path when it is sure (rule_route).
+    `trace`, when given, says which branch decided: explicit, question_only, follow_up, default, general or kimi."""
+    trace = trace if trace is not None else {}
     asked = prompt
     p = prompt.lower()
     symbol = find_symbol(prompt, known_bases, listed)
@@ -832,12 +835,18 @@ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases
     asks_kimi = not feats and bool(re.search(r"\bkimi\b", p))
     # A question about what is already in view ("what would invalidate this?", "does the daily agree?", "is RSI
     # overbought here?") is answered from the facts: nothing is redrawn, so a plan on the chart stays there.
+    trace["feature_words"] = bool(feats)
+    trace["acting"] = acting
     if not feats and not acting and not navigating and not general and not asks_kimi and re.search(_QUESTION_ONLY, p):
+        trace["branch"] = "question_only"
         return AnalysisIntent(features=[], keep_existing=True, answer_hint=asked.strip()[:200])
+    trace["branch"] = ("general" if general else "kimi" if asks_kimi else "explicit" if (feats or acting) else
+                       "navigate" if navigating else "default")
     follow_up = previous is not None and not feats and not acting and not general and (
         timeframe is not None or symbol is not None
         or re.search(r"\b(same|again|that|it|this|now|instead|redo|refresh)\b", p))
     if follow_up and not (switch_chart and not re.search(r"\b(same|again|redo)\b", p)):
+        trace["branch"] = "follow_up"
         feats = list(previous.features)
         windows = [tf for tf in tfs if tf in ("1h", "4h", "1d", "1w")] or list(previous.window_timeframes)
         max_zones = previous.max_zones
@@ -857,6 +866,62 @@ def rule_intent(prompt: str, previous: AnalysisIntent | None = None, known_bases
                           scan_kind=scan_kind, top_down=top_down, take_profit=take_profit, dip_ladder=dip_ladder,  # type: ignore[arg-type]
                           general_question=general, sell_check=sell_check,
                           metric_alerts=metric_alerts)
+
+
+# Words that make a request a judgement or a comparison: the rules can parse it, but the model should plan it.
+_UNSURE = re.compile(r"\b(compare|vs\.?|versus|than|relative|should i|what if|better|worse|instead|rather)\b", re.I)
+_JUDGEMENT = re.compile(r"\b(will|would|could|can|should|hold|safe|worth|good|bad|why|risk|if)\b", re.I)
+
+
+@dataclass
+class Route:
+    """rule_route's verdict: the rule parser's plan, and whether it is sure enough to skip the model."""
+
+    intent: AnalysisIntent
+    confident: bool
+    reason: str
+
+
+def rule_route(prompt: str, previous: AnalysisIntent | None = None, known_bases: set[str] | None = None,
+               chart_symbol: str | None = None, listed: frozenset[str] | None = None) -> Route:
+    """Rules first: a request with an explicit action ("give me a long setup", "best spot buys", "alert me at 7.5")
+    or explicit feature words is planned by the rules in milliseconds; comparisons, judgement questions, several
+    coins, pronoun follow-ups, plain questions and requests with nothing explicit go to the model."""
+    trace: dict = {}
+    intent = rule_intent(prompt, previous, known_bases, chart_symbol, listed, trace)
+    p = prompt.lower()
+    branch = trace.get("branch", "default")
+    if branch == "question_only":
+        return Route(intent, True, "explicit: a question about what is on screen")
+    coins = {m for m in re.findall(r"[a-z0-9]{2,12}", p) if find_symbol(m, known_bases, listed)}
+    coins |= {intent.symbol} if intent.symbol else set()
+    if intent.sell_check and not intent.symbol:  # "what should I sell?" is the sell check, not a judgement call
+        return Route(intent, True, "explicit: sell_check")
+    if intent.take_profit and not _UNSURE.search(p.replace("should i", "")):  # "where should I take profit?"
+        return Route(intent, True, "explicit: take_profit")
+    if _UNSURE.search(p):
+        return Route(intent, False, "unsure: a comparison or a should-I question")
+    if len({find_symbol(c, known_bases, listed) for c in coins} - {None}) >= 2:
+        return Route(intent, False, "unsure: several coins named")
+    if branch == "general" or intent.general_question:
+        return Route(intent, False, "unsure: a plain-language question")
+    if branch == "follow_up":
+        if re.search(r"\b(same|again|redo|refresh)\b", p):
+            return Route(intent, True, "explicit: same again")
+        return Route(intent, False, "unsure: a follow-up that leans on the conversation")
+    if branch in ("default", "navigate") and not trace.get("acting"):
+        if branch == "navigate" and not re.search(r"\?$", p.strip()):
+            return Route(intent, True, "explicit: open a chart")
+        return Route(intent, False, "unsure: nothing explicit asked")
+    if trace.get("acting") or intent.take_profit or branch == "kimi":
+        what = ("trade_plan" if intent.trade_plan else "scan" if intent.scan_market or intent.scan_watchlist else
+                "alert" if intent.alert_prices or intent.alert_targets or intent.zone_trigger or intent.metric_alerts
+                else "take_profit" if intent.take_profit else "kimi" if branch == "kimi" else "action")
+        return Route(intent, True, f"explicit: {what}")
+    # Feature words only: "show supply and demand" is clear; "will this support hold?" is a judgement.
+    if trace.get("feature_words") and not (prompt.strip().endswith("?") and _JUDGEMENT.search(p)):
+        return Route(intent, True, "explicit: " + ", ".join(intent.features[:3]))
+    return Route(intent, False, "unsure: a judgement question")
 
 
 _FEATURE_GROUPS: dict[str, list[str]] = {
@@ -900,6 +965,35 @@ class ToolTurn:
     calls: list[ToolCall]
 
 
+_TOOL_CALL_TAG = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.S)
+
+
+def text_tool_calls(text: str, names: set[str]) -> list[ToolCall]:
+    """Tool calls a model wrote as text: <tool_call>{"name": ..., "arguments": {...}}</tool_call> blocks (Qwen's
+    format), or the whole reply as one such object. Only calls to offered tools count."""
+    blobs = _TOOL_CALL_TAG.findall(text or "")
+    if not blobs:
+        stripped = (text or "").strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        if stripped.startswith("{") and stripped.endswith("}"):
+            blobs = [stripped]
+    out: list[ToolCall] = []
+    for blob in blobs:
+        try:
+            obj = json.loads(blob)
+        except ValueError:
+            continue
+        name = obj.get("name") if isinstance(obj, dict) else None
+        args = obj.get("arguments", obj.get("parameters", {})) if isinstance(obj, dict) else {}
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except ValueError:
+                continue
+        if name in names and isinstance(args, dict):
+            out.append(ToolCall(f"call_{uuid.uuid4().hex[:8]}", name, args))
+    return out
+
+
 def _today() -> str:
     dt = datetime.now(timezone.utc)
     return f"{dt:%A} {dt.day} {dt:%B %Y, %H:%M} UTC"
@@ -938,6 +1032,7 @@ class LLMClient:
         self._client = httpx.AsyncClient(timeout=httpx.Timeout(self.s.llm_timeout, connect=3.0),
                                          event_hooks={"response": [self._seen_response]})
         self._down_until = 0.0  # circuit breaker: skip the LLM briefly after a connection failure
+        self.router_choice: str | None = None  # picked in the app; None = AGENT_ROUTER
         # For the status panel: the last answer from the model and the last failure (HTTP error or no connection).
         self.last_ok_at: float | None = None
         self.last_error: str | None = None
@@ -968,6 +1063,12 @@ class LLMClient:
 
     async def close(self) -> None:
         await self._client.aclose()
+
+    @property
+    def router(self) -> str:
+        """"rules_first" or "llm_first": the app's choice (Settings → AI model), else AGENT_ROUTER."""
+        r = self.router_choice or self.s.agent_router
+        return r if r in ("rules_first", "llm_first") else "llm_first"
 
     def use(self, provider: str | None, model: str | None) -> None:
         """Switch provider and model at runtime; None (or an empty model) goes back to the .env settings."""
@@ -1058,10 +1159,14 @@ class LLMClient:
             return ToolTurn(text=msg.get("content") or "", calls=calls)
 
         if self.provider == "ollama":
+            # Ollama has no tool_choice: a forced tool is the only one offered (like the Anthropic branch).
+            offered = [t for t in tools if t["name"] == force] if force not in (None, "any") else tools
+            if force:
+                system += f"\n\nAnswer by calling {'the ' + force + ' tool' if force != 'any' else 'one of the tools'}."
             r = await self._client.post(f"{self.s.ollama_url}/api/chat", json={
                 "model": self.model, "stream": False, "options": self._ollama_options(0),
                 "tools": [{"type": "function", "function": {"name": t["name"], "description": t["description"],
-                                                            "parameters": t["parameters"]}} for t in tools],
+                                                            "parameters": t["parameters"]}} for t in offered],
                 "messages": [{"role": "system", "content": system}, *_to_ollama(messages)],
             })
             r.raise_for_status()
@@ -1071,7 +1176,10 @@ class LLMClient:
                 args = c["function"].get("arguments") or {}
                 calls.append(ToolCall(f"call_{uuid.uuid4().hex[:8]}", c["function"]["name"],
                                       json.loads(args) if isinstance(args, str) else args))
-            return ToolTurn(text=msg.get("content") or "", calls=calls)
+            text = msg.get("content") or ""
+            if not calls:  # small local models often write the call as text instead
+                calls = text_tool_calls(text, {t["name"] for t in offered})
+            return ToolTurn(text=text, calls=calls)
 
         raise ValueError("No LLM provider configured")
 

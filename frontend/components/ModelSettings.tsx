@@ -24,6 +24,9 @@ interface ModelsInfo {
   custom: boolean;
   default: { provider: string; model: string };
   providers: Record<Provider, boolean>;
+  /** Who plans requests: the rule parser when it is sure, or the model every time. */
+  router?: "rules_first" | "llm_first";
+  router_default?: string;
   ollama: {
     installed: OllamaModel[];
     error: string | null;
@@ -92,6 +95,15 @@ export default function ModelSettings() {
     return () => clearInterval(id);
   }, [running, load]);
 
+  const setRouter = async (router: "rules_first" | "llm_first") => {
+    try {
+      await apiRequest("/api/llm/model", { method: "PUT", body: JSON.stringify({ router }) });
+      await load();
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+
   const choose = async (body: { provider: Provider | null; model?: string }) => {
     try {
       await apiRequest("/api/llm/model", { method: "PUT", body: JSON.stringify(body) });
@@ -133,6 +145,22 @@ export default function ModelSettings() {
             </button>
           )}
         </p>
+      )}
+
+      {info?.router && (
+        <label className="flex items-center gap-2 pb-2 text-[12px] text-ink">
+          Planning
+          <select
+            value={info.router}
+            onChange={(e) => void setRouter(e.target.value as "rules_first" | "llm_first")}
+            className="h-7 rounded border border-line bg-base px-1.5 text-[12px] text-ink outline-none focus:border-accent"
+            aria-label="Planning"
+            title="Rules first: clear requests ('give me a long setup', 'best spot buys') are planned instantly without the model; the model plans only what the rules are unsure of"
+          >
+            <option value="rules_first">Rules first, model when unsure (fastest)</option>
+            <option value="llm_first">Model plans every request</option>
+          </select>
+        </label>
       )}
 
       <div className="flex flex-wrap items-center gap-2">

@@ -3,8 +3,8 @@
 Instead of filling one plan in a single shot, the model gets read-only tools that run the same
 deterministic detectors (`look_at_chart` on any coin/timeframe, `scan_watchlist`, `market_context`)
 and finishes by calling `draw_on_chart` with the usual AnalysisIntent. Prices still only come from the
-detectors. Any failure (provider error, no tool support, step budget spent without a plan) returns
-None and the caller falls back to the single-shot planner.
+detectors. Any failure (provider error, no tool support, step budget spent without a plan) falls back to the
+single-shot planner, with whatever the tools already found kept as research.
 """
 
 from __future__ import annotations
@@ -131,15 +131,55 @@ class Toolbox:
 
 @dataclass
 class LoopResult:
-    intent: AnalysisIntent
+    """What the planner did. `intent` is None when it looked but never drew: its research is kept and the
+    single-shot planner makes the plan."""
+
+    intent: AnalysisIntent | None
     engine: str
     steps: list[str] = field(default_factory=list)
     research: list[dict] = field(default_factory=list)
 
 
 def _clip(obj: Any) -> str:
-    text = json.dumps(obj, default=float, separators=(",", ":"))
-    return text if len(text) <= MAX_RESULT_CHARS else text[:MAX_RESULT_CHARS] + "…"
+    """The tool result as JSON of at most MAX_RESULT_CHARS, still valid: the longest lists lose items from the end
+    (and long strings are cut) until it fits."""
+    def dump(o: Any) -> str:
+        return json.dumps(o, default=float, separators=(",", ":"))
+
+    text = dump(obj)
+    if len(text) <= MAX_RESULT_CHARS:
+        return text
+    obj = json.loads(text)  # a plain copy to trim
+
+    def lists(o: Any) -> list[list]:
+        found = []
+        if isinstance(o, list):
+            found.append(o)
+            for x in o:
+                found += lists(x)
+        elif isinstance(o, dict):
+            for x in o.values():
+                found += lists(x)
+        return found
+
+    while len(text := dump(obj)) > MAX_RESULT_CHARS:
+        trimmable = [lst for lst in lists(obj) if len(lst) > 1]
+        if not trimmable:
+            break
+        max(trimmable, key=lambda lst: len(dump(lst))).pop()
+    if len(text) > MAX_RESULT_CHARS:  # one huge item: keep the keys, cut the strings
+        def cut(o: Any) -> Any:
+            if isinstance(o, str):
+                return o[:200]
+            if isinstance(o, list):
+                return [cut(x) for x in o]
+            if isinstance(o, dict):
+                return {k: cut(v) for k, v in o.items()}
+            return o
+        text = dump(cut(obj))
+        if len(text) > MAX_RESULT_CHARS:
+            text = dump({"error": "result too large to show"})
+    return text
 
 
 def _pair(raw: Any, chart: ChartContext) -> tuple[str, str | None]:
@@ -157,6 +197,14 @@ def _pair(raw: Any, chart: ChartContext) -> tuple[str, str | None]:
 
 
 async def _run_tool(box: Toolbox, name: str, args: dict, chart: ChartContext) -> tuple[Any, str]:
+    result, step = await _call_tool(box, name, args, chart)
+    # A live chart (Binance's pair list is at hand) never reasons from demo candles a bad lookup fell back to.
+    if chart.listed is not None and isinstance(result, dict) and result.get("data_source") == "synthetic":
+        return {"error": f"no live data for {result.get('symbol') or args.get('symbol')}"}, ""
+    return result, step
+
+
+async def _call_tool(box: Toolbox, name: str, args: dict, chart: ChartContext) -> tuple[Any, str]:
     if name in ("look_at_chart", "read_kimi", "market_context"):
         sym, error = _pair(args.get("symbol"), chart)
         if error:
@@ -200,7 +248,7 @@ async def plan_with_tools(llm: LLMClient, prompt: str, history: list[ChatTurn], 
             turn = await llm.tool_turn(system, messages, TOOLS, force=force)
             if not turn.calls:
                 log.info("Planner answered without a tool call; falling back")
-                return None
+                break
             messages.append({"role": "assistant", "text": turn.text, "calls": turn.calls})
             final = next((c for c in turn.calls if c.name == FINAL_TOOL), None)
             if final:
@@ -221,4 +269,5 @@ async def plan_with_tools(llm: LLMClient, prompt: str, history: list[ChatTurn], 
     except (httpx.HTTPError, ValidationError, ValueError, KeyError, TypeError) as exc:
         log.warning("Tool planner failed (%s: %s); using the single-shot planner", type(exc).__name__, exc)
         llm.note_failure(exc)
-    return None
+    # It looked but never drew: keep what it found, and let the single-shot planner make the plan.
+    return LoopResult(None, "", steps, research) if research else None

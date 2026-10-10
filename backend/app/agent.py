@@ -23,7 +23,7 @@ from typing import Any
 import pandas as pd
 
 from . import general
-from .agent_loop import Toolbox, plan_with_tools
+from .agent_loop import LoopResult, Toolbox, plan_with_tools
 from .config import get_settings
 from .derivatives import DerivativesService
 from .dip_ladder import LadderRequest, LadderResult, describe_ladder, ladder_facts, plan_ladder
@@ -33,7 +33,7 @@ from .grid_planner import GridPlanRequest, describe_plan, plan_grid
 from .grid_planner import plan_facts as grid_plan_facts
 from .gridbot import GridBotService
 from .kimi_service import KimiService, summarize
-from .llm import ChartContext, LLMClient
+from .llm import ChartContext, LLMClient, rule_route
 from .market_data import FALLBACK_SYMBOLS, INTERVAL_SECONDS, MarketData, candles_to_df
 from .market_metrics import MarketMetricsService, overview_facts
 from .market_scanner import MarketScanner, MarketScanResult
@@ -692,14 +692,24 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
     steps: list[str] = []
     research: list[dict] = []
     loop = None
-    if req.prompt.strip() and llm.available() and settings.agent_mode == "tools":
+    # Rules first: a request the rule parser is sure of is planned in milliseconds, without the model.
+    route = None
+    if req.prompt.strip() and llm.available() and llm.router == "rules_first":
+        known = {w.removesuffix("USDT") for w in chart.watchlist}
+        route = rule_route(req.prompt, req.previous_intent, known, chart.symbol, chart.listed)
+        log.info("Route %r: %s", req.prompt[:60], route.reason)
+    if route is not None and route.confident:
+        loop = LoopResult(route.intent, "rules (fast path)")
+    elif req.prompt.strip() and llm.available() and settings.agent_mode == "tools":
         box = make_toolbox(market, derivatives, req.watchlist, kimi, futures, events, scanner, req.spot_only, metrics,
                            req.indicator_settings)
         loop = await plan_with_tools(llm, req.prompt, req.history, req.overlays, req.previous_intent, chart, box,
                                      settings.agent_max_steps)
-    if loop:
+    if loop and loop.intent is not None:
         intent, intent_engine, steps, research = loop.intent, loop.engine, loop.steps, loop.research
     else:
+        if loop:  # the tools looked but never drew: keep what they found
+            steps, research = loop.steps, loop.research
         intent, intent_engine = await llm.parse_intent(req.prompt, req.history, req.overlays, req.previous_intent,
                                                        chart)
     # Asking about an indicator reads it; only "add", "show" or "turn on" puts it on the chart (Kimi has its own rule).
@@ -997,7 +1007,8 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         summary="",
         intent=intent,
         stats=result.stats,
-        engine={"intent": intent_engine, "summary": "pending", "detector": "scipy"},
+        engine={"intent": intent_engine, "summary": "pending", "detector": "scipy",
+                **({"route": route.reason} if route is not None else {})},
         data_source=source,
         alerts=alerts,
         navigate=navigate,

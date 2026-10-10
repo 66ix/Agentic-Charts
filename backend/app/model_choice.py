@@ -99,7 +99,16 @@ class ModelChooser:
             # Which providers have what they need (a key, or a URL) to be picked.
             "providers": {"ollama": True, "openai": bool(s.openai_api_key) or "api.openai.com" not in s.openai_base_url,
                           "anthropic": bool(s.anthropic_api_key)},
+            # Who plans requests: the rules when they are sure ("rules_first") or the model every time.
+            "router": self.llm.router, "router_default": s.agent_router,
         }
+
+    def set_router(self, router: str | None) -> dict:
+        if router not in (None, "rules_first", "llm_first"):
+            raise ValueError("router must be rules_first or llm_first")
+        self.llm.router_choice = router
+        self._save()
+        return self.current()
 
     def choose(self, choice: ModelChoice | None) -> dict:
         if choice and not self.current()["providers"][choice.provider]:
@@ -199,6 +208,8 @@ class ModelChooser:
             if data.get("choice"):
                 c = ModelChoice.model_validate(data["choice"])
                 self.llm.use(c.provider, c.model)
+            if data.get("router") in ("rules_first", "llm_first"):
+                self.llm.router_choice = data["router"]
             # A run cut off by a restart can't finish.
             self._runs = [EvalRun.model_validate(r) for r in data.get("runs", [])]
             for r in self._runs:
@@ -212,6 +223,7 @@ class ModelChooser:
             return
         choice = self.llm.choice
         data = {"choice": {"provider": choice[0], "model": choice[1]} if choice else None,
+                "router": self.llm.router_choice,
                 "runs": [r.model_dump() for r in self._runs if r.status != "running"]}
         try:
             self._store.parent.mkdir(parents=True, exist_ok=True)

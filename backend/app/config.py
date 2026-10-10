@@ -76,6 +76,10 @@ class Settings:
     llm_choice_store: str = field(default_factory=lambda: _env(
         "LLM_CHOICE_STORE", str(Path(__file__).resolve().parent.parent / ".cache" / "llm_choice.json")))
     agent_mode: str = field(default_factory=lambda: _env("AGENT_MODE", "tools").lower())
+    # Who plans a request: "rules_first" (the rule parser when it is sure, the model only when it is unsure; fastest,
+    # the default with a local model) or "llm_first" (the model plans every request).
+    agent_router: str = field(default_factory=lambda: (_env("AGENT_ROUTER", "") or (
+        "rules_first" if _env("LLM_PROVIDER", "ollama").lower() == "ollama" else "llm_first")).lower())
     agent_max_steps: int = field(default_factory=lambda: int(_env("AGENT_MAX_STEPS", "4")))
     # Rate limits per client ("N/second|minute|hour|day", or 0 to disable) and a global daily agent cap.
     agent_rate_limit: str = field(default_factory=lambda: _env("AGENT_RATE_LIMIT", "20/minute"))

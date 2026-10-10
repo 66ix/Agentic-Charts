@@ -15,7 +15,7 @@ import asyncio
 import json
 from pathlib import Path
 
-from app.llm import ChartContext, LLMClient, rule_intent
+from app.llm import ChartContext, LLMClient, rule_intent, rule_route
 from app.schemas import AnalysisIntent
 
 CASES = Path(__file__).with_name("intents.jsonl")
@@ -76,10 +76,34 @@ async def run_llm() -> list[tuple[dict, list[str]]]:
         await llm.close()
 
 
+def run_route() -> dict:
+    """How many cases the rules-first router would plan without the model, and how many of those are right."""
+    known = {s.removesuffix("USDT") for s in CHART.watchlist}
+    fast = right = 0
+    rows = []
+    cases = [c for c in load_cases() if not c.get("llm_only")]
+    for c in cases:
+        route = rule_route(c["prompt"], previous(c), known, CHART.symbol)
+        errs = check(route.intent, c["expect"])
+        if route.confident:
+            fast += 1
+            right += not errs
+        rows.append((c["prompt"], route.confident, route.reason, errs))
+    return {"cases": len(cases), "fast": fast, "fast_right": right, "rows": rows}
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--llm", action="store_true", help="evaluate the configured LLM provider")
+    ap.add_argument("--route", action="store_true", help="report which cases the rules-first router plans itself")
     args = ap.parse_args()
+    if args.route:
+        r = run_route()
+        for prompt, confident, reason, errs in r["rows"]:
+            mark = ("FAST" if confident else "LLM ") + (" FAIL" if confident and errs else "")
+            print(f"{mark:9} {prompt}  [{reason}]" + (f"\n          {'; '.join(errs)}" if confident and errs else ""))
+        print(f"\n{r['fast']}/{r['cases']} on the fast path, {r['fast_right']}/{r['fast']} of them right")
+        raise SystemExit(0 if r["fast_right"] == r["fast"] else 1)
     results = asyncio.run(run_llm()) if args.llm else run_rules()
     passed = sum(1 for _, e in results if not e)
     for case, errs in results:

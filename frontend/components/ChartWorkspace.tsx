@@ -135,7 +135,7 @@ function engineNote(r: AnalyzeResponse): string {
   const llm = r.engine.intent === "rules" || r.engine.intent === "default" ? "rule parser" : r.engine.intent;
   // "template": no model was reachable, so the built-in writer phrased the answer (Settings → AI model sets one up).
   const reply = r.engine.summary === "template" ? " · reply: built-in writer (no AI model)" : "";
-  return `${tf} · ${r.overlays.length} overlays · intent: ${llm} · detector: ${r.engine.detector}${reply}` +
+  return `${tf} · ${r.overlays.length} overlays · plan: ${llm} · detector: ${r.engine.detector}${reply}` +
     (r.data_source === "synthetic" ? " · demo data" : "");
 }
 
