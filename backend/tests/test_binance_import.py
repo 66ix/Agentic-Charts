@@ -408,7 +408,7 @@ def test_import_classify_journal_positions_and_bot_compare(tmp_path):
         # Positions: own spot holdings with average entry, futures positions; bots separate.
         pos = await svc.positions(refresh=True)
         spot = {r["asset"]: r for r in pos["manual"]["spot"]}
-        assert spot["BTC"]["qty"] == 0.5 and spot["BTC"]["avg_entry"] == pytest.approx(105.0)
+        assert spot["BTC"]["qty"] == 0.5 and spot["BTC"]["avg_entry"] == pytest.approx(105.105)  # 105 plus its 0.1% USDT fee
         assert spot["BTC"]["from_fills_qty"] == pytest.approx(0.5)
         assert spot["INJ"]["own_qty"] == pytest.approx(3.0)  # the bot's buy was sold again: nothing of it held
         assert pos["manual"]["cash"] == [{"asset": "USDT", "qty": 250.0}]

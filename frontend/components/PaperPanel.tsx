@@ -190,10 +190,17 @@ export default function PaperPanel(props: DockPanelProps) {
                       type="button"
                       className="btn-ghost h-6 border border-line px-1.5 text-[11px]"
                       disabled={busy}
-                      title="Market sell everything held of this coin"
+                      title="Market sell everything held of this coin, and cancel its open sells"
                       onClick={() => {
-                        if (window.confirm(`Paper sell all ${displaySymbol(h.symbol)} at the market?`)) {
-                          void act(() => placePaperOrders([{ symbol: h.symbol, side: "sell", type: "market", source: "manual" }]));
+                        const sells = pending.filter((o) => o.symbol === h.symbol && o.side === "sell");
+                        const extra = sells.length ? ` Its ${sells.length} open sell order${sells.length === 1 ? "" : "s"} will be cancelled.` : "";
+                        if (window.confirm(`Paper sell all ${displaySymbol(h.symbol)} at the market?${extra}`)) {
+                          void act(async () => {
+                            const res = await placePaperOrders([{ symbol: h.symbol, side: "sell", type: "market", source: "manual" }]);
+                            let last: unknown = res;
+                            for (const o of sells) last = await cancelPaperOrder(o.id);
+                            return last;
+                          });
                         }
                       }}
                     >

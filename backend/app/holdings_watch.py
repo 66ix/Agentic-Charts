@@ -1,7 +1,7 @@
 """Holdings watch: sell-or-trim alerts on the coins you actually hold, kept in step with your Binance account.
 
 When it is on, every CHECK_EVERY seconds (and when settings change) it reads your own spot holdings through the
-read-only key (binance_import.positions: coins in the spot wallet worth MIN_VALUE or more, without the ones you
+read-only key (binance_import.positions: coins in the spot wallet and Simple Earn worth MIN_VALUE or more, without the ones you
 marked as a bot's) and makes the signal alerts `lost_support` and `at_resistance` on the chosen timeframe exactly
 those coins: a coin you buy gets them, a coin you sell loses them. The alerts it adds carry owner="holdings", so
 alerts you made yourself are never touched or duplicated.
@@ -36,6 +36,7 @@ OWNER = "holdings"
 SIGNALS = ["lost_support", "at_resistance"]
 CHECK_EVERY = 600.0
 MAX_COINS = 40
+STABLE_ASSETS = {"USDT", "USDC", "FDUSD", "TUSD", "BUSD", "DAI", "USDP", "EUR", "TRY"}
 BOT_NOTE = ("Binance's API shows only the Trading Bots wallet's total, not the coins inside it or the bots' open "
             "orders. Bots you track in the Grid bots tab are watched by their coin instead.")
 
@@ -96,13 +97,26 @@ class HoldingsWatch:
     def coins(positions: dict, min_value: float, include_bots: bool) -> tuple[list[dict], list[str]]:
         """Your own holdings worth `min_value`+ → [{symbol, value, source}], and notes. Pure."""
         rows: dict[str, dict] = {}
-        for r in positions.get("manual", {}).get("spot", []):
-            if r.get("own_qty", 0) <= 0:
+        manual = positions.get("manual", {})
+        held: dict[str, dict] = {}  # spot and Simple Earn together: a coin moved to Earn is still yours
+        for r in manual.get("spot", []):
+            if r.get("own_qty", 0) > 0:
+                held[r["symbol"]] = {"symbol": r["symbol"], "value": r.get("value"), "source": "spot"}
+        for r in manual.get("earn", []):
+            if r.get("asset") in STABLE_ASSETS or r.get("qty", 0) <= 0:
                 continue
-            value = r.get("value")
-            if value is not None and value < min_value:
-                continue
-            rows[r["symbol"]] = {"symbol": r["symbol"], "value": value, "source": "spot"}
+            row = held.get(r["symbol"])
+            if row is None:
+                held[r["symbol"]] = {"symbol": r["symbol"], "value": r.get("value"), "source": "earn"}
+            else:
+                row["value"] = None if row["value"] is None or r.get("value") is None else row["value"] + r["value"]
+                row["source"] = "spot + earn"
+        for sym, row in held.items():
+            if row["value"] is not None:
+                row["value"] = round(row["value"], 2)
+                if row["value"] < min_value:
+                    continue
+            rows[sym] = row
         if include_bots:
             bots = positions.get("bots", {})
             for r in bots.get("tracked", []) + bots.get("spot", []):
