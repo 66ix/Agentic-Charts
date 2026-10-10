@@ -26,6 +26,8 @@ export type LayerId =
   | "gridbots"
   | "journal"
   | "paper"
+  | "position"
+  | "scanner"
   | "backtest"
   | "walls"
   | "liqs"
@@ -64,7 +66,9 @@ export const LAYERS: LayerInfo[] = [
   { id: "alerts", label: "Alert lines", group: "Yours" },
   { id: "journal", label: "Journal trades", group: "Yours" },
   { id: "paper", label: "Paper orders and average cost", group: "Yours" },
+  { id: "position", label: "My Binance entry", group: "Yours" },
   { id: "gridbots", label: "Grid bots", group: "Tools and data" },
+  { id: "scanner", label: "Scanner setup", group: "Tools and data" },
   { id: "backtest", label: "Backtest trades", group: "Tools and data" },
   { id: "walls", label: "Order-book walls", group: "Tools and data" },
   { id: "liqs", label: "Liquidation levels", group: "Tools and data" },
@@ -110,6 +114,9 @@ export function panelLayer(key: string): LayerId {
     backtest: "backtest",
     walls: "walls",
     liqs: "liqs",
+    liqzones: "liqs",
+    myentry: "position",
+    scanner: "scanner",
     compare: "compare",
     exit: "plan",
     desk: "desk",

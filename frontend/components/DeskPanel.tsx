@@ -27,6 +27,8 @@ import type { DockPanelProps } from "@/lib/dock";
 import { displaySymbol, formatPrice } from "@/lib/format";
 import type { PaperWallet } from "@/lib/paper";
 
+/** Mirrors MAX_FEE_R in backend/app/desk_calls.py: a stop is widened until both fees cost at most this much R. */
+const MAX_FEE_R = 0.25;
 const REFRESH_MS = 30_000;
 type Tab = "calls" | "record" | "settings";
 type Filter = "active" | "closed" | "all" | "watched";
@@ -214,6 +216,14 @@ function Record({ d, wallet }: { d: DeskState; wallet: PaperWallet | null }) {
           {s.tracked} buy zone{s.tracked === 1 ? "" : "s"} tracked ({s.calls} called, {s.tracked - s.calls} watched); {s.level_hits} of the {s.learned_from} whose level was decided reached it.
           {s.calls === 0 && " The record below is from watched zones: none was traded."}
         </p>
+        {s.calls === 0 && (
+          <p className="text-[11px] leading-snug text-mute">
+            Why no calls yet: a zone&apos;s confidence is random odds × its setup&apos;s edge, so before fees it expects (edge − 1) R whatever the
+            target. Fees cost up to {MAX_FEE_R}R and a call must still expect {(d.settings.min_expected_r ?? 0.1).toFixed(2)}R, so it needs an edge of
+            about <span className="text-ink">{(1 + MAX_FEE_R + (d.settings.min_expected_r ?? 0.1)).toFixed(2)}x</span> or more (By setup, below). Watched
+            zones keep moving the edges; no setup has cleared that yet.
+          </p>
+        )}
         <p className="text-[10px] leading-snug text-mute">
           Each setup&apos;s edge is its hits against what random odds would give (1.0x = none), starting from the coin&apos;s backtest and moving with every finished zone. Older results count less.
         </p>
