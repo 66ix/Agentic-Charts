@@ -8,7 +8,7 @@ import { apiRequest } from "@/lib/api";
 
 import { Section } from "./Dialog";
 
-type Provider = "ollama" | "openai" | "anthropic";
+type Provider = "ollama" | "openai" | "anthropic" | "google";
 
 interface OllamaModel {
   model: string;
@@ -47,7 +47,12 @@ interface EvalRun {
   error: string | null;
 }
 
-const PROVIDER_LABEL: Record<Provider, string> = { ollama: "Ollama (local)", openai: "OpenAI-compatible", anthropic: "Anthropic" };
+const PROVIDER_LABEL: Record<Provider, string> = {
+  ollama: "Ollama (local)",
+  openai: "OpenAI-compatible",
+  anthropic: "Anthropic",
+  google: "Google AI Studio (Gemini)",
+};
 
 function gpuText(share: number | null | undefined) {
   if (share == null) return null;
@@ -169,7 +174,7 @@ export default function ModelSettings() {
           onChange={(e) => {
             const p = e.target.value as Provider;
             setProvider(p);
-            setModel(p === "ollama" ? (installed[0]?.model ?? "") : p === info?.provider ? info.model : "");
+            setModel(p === "ollama" ? (installed[0]?.model ?? "") : p === info?.provider ? info.model : p === "google" ? "gemini-2.5-flash" : "");
           }}
           className="h-7 rounded border border-line bg-base px-1.5 text-[12px] text-ink outline-none focus:border-accent"
           aria-label="Provider"
@@ -177,7 +182,7 @@ export default function ModelSettings() {
           {(Object.keys(PROVIDER_LABEL) as Provider[]).map((p) => (
             <option key={p} value={p} disabled={info ? !info.providers[p] : false}>
               {PROVIDER_LABEL[p]}
-              {info && !info.providers[p] ? " (needs a key in .env)" : ""}
+              {info && !info.providers[p] ? (p === "google" ? " (needs GOOGLE_API_KEY in .env)" : " (needs a key in .env)") : ""}
             </option>
           ))}
         </select>

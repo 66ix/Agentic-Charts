@@ -36,6 +36,8 @@ export interface ImportSettings {
   futures: boolean;
   /** How far back the first USD-M futures import goes. */
   lookback_days: number;
+  /** Coins never requested from Binance and left out of holdings (airdropped dust like ETHW). */
+  hidden_assets?: string[];
 }
 
 export interface ImportRun {
@@ -58,6 +60,8 @@ export interface ImportStatus {
   running: boolean;
   key: BinanceKeyStatus;
   auto_minutes_options: number[];
+  /** Pairs Binance said don't exist: never requested again. */
+  invalid_symbols?: string[];
   /** Always false: Binance has no public API for Spot Grid bots. */
   spot_grid_api: boolean;
   spot_grid_note: string;
@@ -199,6 +203,8 @@ export interface MergedHolding {
   value: number | null;
   unrealized_pnl: number | null;
   sources: ("spot" | "earn")[];
+  /** False when Binance has no USDT pair for it (nothing to chart, price or alert on). */
+  tradable?: boolean;
 }
 
 /** GET /api/binance/positions: the user's own positions, and the bots' separately. */
@@ -259,6 +265,14 @@ export function removeBinanceKey() {
 
 export function fetchImportStatus(signal?: AbortSignal) {
   return apiRequest<ImportStatus>("/api/binance/import", { signal });
+}
+
+/** Hide a coin from holdings (and never request it from Binance), or show it again. */
+export async function setAssetHidden(asset: string, hidden: boolean) {
+  const st = await fetchImportStatus();
+  const now = st.settings.hidden_assets ?? [];
+  const next = hidden ? [...new Set([...now, asset.toUpperCase()])] : now.filter((a) => a !== asset.toUpperCase());
+  return saveImportSettings({ ...st.settings, hidden_assets: next });
 }
 
 export function saveImportSettings(settings: ImportSettings) {

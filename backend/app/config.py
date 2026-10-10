@@ -65,6 +65,11 @@ class Settings:
     openai_api_key: str = field(default_factory=lambda: _env("OPENAI_API_KEY", ""))
     openai_base_url: str = field(default_factory=lambda: _env("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/"))
     openai_model: str = field(default_factory=lambda: _env("OPENAI_MODEL", "gpt-4o-mini"))
+    # Google AI Studio (Gemini), through its OpenAI-compatible endpoint: a key from aistudio.google.com.
+    google_api_key: str = field(default_factory=lambda: _env("GOOGLE_API_KEY", "") or _env("GEMINI_API_KEY", ""))
+    google_model: str = field(default_factory=lambda: _env("GOOGLE_MODEL", "gemini-2.5-flash"))
+    google_base_url: str = field(default_factory=lambda: _env(
+        "GOOGLE_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai").rstrip("/"))
     anthropic_api_key: str = field(default_factory=lambda: _env("ANTHROPIC_API_KEY", ""))
     anthropic_model: str = field(default_factory=lambda: _env("ANTHROPIC_MODEL", "claude-sonnet-5-5"))
     # General questions ("what did the FOMC decide?") may search the web where the provider offers it: Anthropic's

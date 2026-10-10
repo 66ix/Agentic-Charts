@@ -65,6 +65,7 @@ RETRY_JITTER = (0.2, 0.8)  # seconds before retrying a request that hit a networ
 DEMOTE_AFTER = 3           # failed requests in a row before Binance is treated as down (sooner if ping fails too)
 SYMBOLS_TTL = 3600.0
 SYMBOLS_RETRY = 60.0       # a failed symbol-list lookup is tried again this soon
+REJECTED_FOR = 6 * 3600.0  # a pair Binance rejected (unknown or delisted) isn't requested again for this long
 
 # Rough anchor prices so synthetic charts look plausible per symbol.
 _SYNTH_ANCHORS = {"BTC": 65000.0, "ETH": 3200.0, "SOL": 150.0, "BNB": 580.0, "XRP": 0.6, "INJ": 7.8, "DOGE": 0.15}
@@ -98,6 +99,7 @@ class MarketData:
         self._cache: dict[tuple[str, str, int], _Cached] = {}
         self._binance_down_until = 0.0
         self._paused_until = 0.0  # Retry-After of the last 429/418
+        self._rejected: dict[str, float] = {}  # symbol → until when it isn't requested (Binance said it doesn't exist)
         self._fails = 0           # failed Binance requests in a row
         self._symbols: tuple[float, list[str]] | None = None
         self._good_symbols: list[str] | None = None
@@ -177,13 +179,20 @@ class MarketData:
 
         candles: list[Candle] | None = None
         source = "synthetic"
-        if self.binance_usable():
+        if self.binance_usable() and self._rejected.get(symbol, 0) <= now:  # a pair Binance rejected isn't asked again
             try:
                 candles = await self._binance_klines(symbol, interval, limit)
                 source = "binance"
                 self._fails = 0
             except BinanceRateLimited:
                 raise
+            except BinanceRejected as exc:
+                if self.settings.data_source == "binance":
+                    raise
+                log.info("Binance has no %s (%s); not asking again for %.0fh", symbol, exc, REJECTED_FOR / 3600)
+                self._rejected[symbol] = now + REJECTED_FOR
+                if len(self._rejected) > 500:
+                    self._rejected.pop(next(iter(self._rejected)))
             except Exception as exc:  # network, HTTP 4xx/5xx, bad payload
                 if self.settings.data_source == "binance":
                     raise MarketDataError(f"Binance klines failed: {exc}") from exc

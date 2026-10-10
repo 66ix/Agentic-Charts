@@ -965,6 +965,7 @@ class ToolTurn:
     calls: list[ToolCall]
 
 
+OPENAI_LIKE = ("openai", "google")  # providers spoken to over the OpenAI chat-completions API
 _TOOL_CALL_TAG = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.S)
 
 
@@ -1082,14 +1083,16 @@ class LLMClient:
             return "none"
         if p == "anthropic" and not self.s.anthropic_api_key:
             return "none"
-        return p if p in ("ollama", "openai", "anthropic") else "none"
+        if p == "google" and not self.s.google_api_key:
+            return "none"
+        return p if p in ("ollama", "openai", "anthropic", "google") else "none"
 
     @property
     def model(self) -> str:
         if self.choice and self.choice[0] == self.provider:
             return self.choice[1]
         return {"ollama": self.s.ollama_model, "openai": self.s.openai_model,
-                "anthropic": self.s.anthropic_model}.get(self.provider, "")
+                "anthropic": self.s.anthropic_model, "google": self.s.google_model}.get(self.provider, "")
 
     # ----------------------------------------------------------- public
     def available(self) -> bool:
@@ -1141,14 +1144,14 @@ class LLMClient:
                             calls=[ToolCall(b["id"], b["name"], b.get("input") or {}) for b in blocks
                                    if b.get("type") == "tool_use"])
 
-        if self.provider == "openai":
+        if self.provider in OPENAI_LIKE:
             choice: Any = ({"type": "function", "function": {"name": force}} if force not in (None, "any")
                            else "required" if force else "auto")
-            r = await self._client.post(f"{self.s.openai_base_url}/chat/completions", headers=self._openai_headers(),
+            r = await self._client.post(f"{self._oa_url}/chat/completions", headers=self._openai_headers(),
                                         json={
                 "model": self.model, "temperature": 0, "tool_choice": choice,
                 "tools": [{"type": "function", "function": {"name": t["name"], "description": t["description"],
-                                                            "parameters": t["parameters"], "strict": True}}
+                                                            "parameters": t["parameters"], **self._strict}}
                           for t in tools],
                 "messages": [{"role": "system", "content": system}, *_to_openai(messages)],
             })
@@ -1252,8 +1255,8 @@ class LLMClient:
                     if line.strip():
                         yield json.loads(line).get("message", {}).get("content", "")
             return
-        if self.provider == "openai":
-            async with self._client.stream("POST", f"{self.s.openai_base_url}/chat/completions",
+        if self.provider in OPENAI_LIKE:
+            async with self._client.stream("POST", f"{self._oa_url}/chat/completions",
                                            headers=self._openai_headers(),
                                            json={"model": self.model, "temperature": 0.2, "stream": True,
                                                  "messages": msgs}) as r:
@@ -1327,7 +1330,7 @@ class LLMClient:
                     break
                 messages.append({"role": "assistant", "content": body["content"]})
             return text, _dedupe_sources(sources)
-        if self.provider == "openai" and "api.openai.com" in self.s.openai_base_url:
+        if self.provider == "openai" and "api.openai.com" in self.s.openai_base_url:  # the Responses API
             r = await self._client.post(f"{self.s.openai_base_url}/responses", headers=self._openai_headers(),
                                         timeout=timeout, json={
                 "model": self.model, "instructions": system, "input": user, "tools": [{"type": "web_search"}],
@@ -1379,12 +1382,12 @@ class LLMClient:
             r.raise_for_status()
             return json.loads(r.json()["message"]["content"])
 
-        if self.provider == "openai":
-            r = await self._client.post(f"{self.s.openai_base_url}/chat/completions", headers=self._openai_headers(),
+        if self.provider in OPENAI_LIKE:
+            r = await self._client.post(f"{self._oa_url}/chat/completions", headers=self._openai_headers(),
                                         json={
                 "model": self.model, "temperature": 0,
                 "response_format": {"type": "json_schema",
-                                    "json_schema": {"name": name, "schema": schema, "strict": True}},
+                                    "json_schema": {"name": name, "schema": schema, **self._strict}},
                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": user if not image else [
                     {"type": "text", "text": user},
                     {"type": "image_url", "image_url": {"url": f"data:{image[0]};base64,{image[1]}"}}]}],
@@ -1420,8 +1423,8 @@ class LLMClient:
             })
             r.raise_for_status()
             return r.json()["message"]["content"]
-        if self.provider == "openai":
-            r = await self._client.post(f"{self.s.openai_base_url}/chat/completions", headers=self._openai_headers(),
+        if self.provider in OPENAI_LIKE:
+            r = await self._client.post(f"{self._oa_url}/chat/completions", headers=self._openai_headers(),
                                         json={
                 "model": self.model, "temperature": 0.2,
                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
@@ -1439,7 +1442,18 @@ class LLMClient:
         raise ValueError("No LLM provider configured")
 
     def _openai_headers(self) -> dict[str, str]:
-        return {"Authorization": f"Bearer {self.s.openai_api_key}"} if self.s.openai_api_key else {}
+        key = self.s.google_api_key if self.provider == "google" else self.s.openai_api_key
+        return {"Authorization": f"Bearer {key}"} if key else {}
+
+    @property
+    def _oa_url(self) -> str:
+        """The chat-completions base: OpenAI (or any compatible server), or Google AI Studio's compatible endpoint."""
+        return self.s.google_base_url if self.provider == "google" else self.s.openai_base_url
+
+    @property
+    def _strict(self) -> dict:
+        """OpenAI's strict schemas; Gemini's compatible endpoint takes the schema without the flag."""
+        return {} if self.provider == "google" else {"strict": True}
 
     def _anthropic_headers(self) -> dict[str, str]:
         return {"x-api-key": self.s.anthropic_api_key, "anthropic-version": "2023-06-01"}

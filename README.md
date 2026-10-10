@@ -161,6 +161,15 @@ ANTHROPIC_API_KEY=sk-ant-...
 ANTHROPIC_MODEL=claude-sonnet-5-5
 ```
 
+**Cloud, Google AI Studio (Gemini)**, through Google's OpenAI-compatible endpoint (a key from
+[aistudio.google.com/apikey](https://aistudio.google.com/apikey)):
+
+```bash
+LLM_PROVIDER=google
+GOOGLE_API_KEY=AIza...
+GOOGLE_MODEL=gemini-2.5-flash
+```
+
 By default (`AGENT_MODE=tools`) the model gets up to `AGENT_MAX_STEPS` tool calls to look at other
 timeframes or coins, scan the watchlist or check funding and open interest before it decides what to
 draw; the agent panel lists those steps. Anthropic and OpenAI models force a tool call; Ollama models

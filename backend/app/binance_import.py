@@ -133,6 +133,19 @@ class ImportSettings(BaseModel):
                                description="Spot pairs to import besides the wallet's coins and grid bot pairs")
     futures: bool = Field(True, description="Import USD-M futures fills and positions too")
     lookback_days: int = Field(30, ge=1, le=180, description="How far back the first futures import goes")
+    hidden_assets: list[str] = Field(default_factory=list, max_length=200,
+                                     description="Coins never requested from Binance and left out of holdings "
+                                                 "(airdropped dust like ETHW)")
+
+    @field_validator("hidden_assets")
+    @classmethod
+    def _hidden(cls, v: list[str]) -> list[str]:
+        out: list[str] = []
+        for a in v:
+            a = a.strip().upper().removesuffix("USDT") or a.strip().upper()
+            if a.isalnum() and len(a) <= 20 and a not in out:
+                out.append(a)
+        return out
 
     @field_validator("auto_minutes")
     @classmethod
@@ -578,7 +591,9 @@ class BinanceImportService:
             kinds[f.kind] += 1
         return {"settings": self.settings.model_dump(), "last_import": self.last, "fills": len(self._fills),
                 "by_kind": kinds, "running": self._lock.locked(), "key": self.account.status(),
-                "auto_minutes_options": list(AUTO_MINUTES), "spot_grid_api": False, "spot_grid_note": API_NOTE}
+                "auto_minutes_options": list(AUTO_MINUTES), "spot_grid_api": False, "spot_grid_note": API_NOTE,
+                # Pairs Binance said don't exist (-1121): never requested again.
+                "invalid_symbols": sorted(self._invalid)}
 
     def update_settings(self, new: ImportSettings) -> dict:
         self.settings = new
@@ -679,14 +694,15 @@ class BinanceImportService:
         never push a held coin out of MAX_SYMBOLS)."""
         out: list[str] = []
         coins = [a.removeprefix("LD") if a.startswith("LD") and len(a) > 2 else a for a in balances]
-        coins = [a for a in dict.fromkeys(coins) if a not in STABLES]
+        hidden = set(self.settings.hidden_assets)
+        coins = [a for a in dict.fromkeys(coins) if a not in STABLES and a not in hidden]
         held = [f"{a}USDT" for a in coins]
         other_quotes = [f"{a}{q}" for a in coins for q in ("USDC", "FDUSD") if f"{a}{q}" in pairs]
         bots = [b.params.symbol for b in self.gridbots.list()]
         cursors = [k.split(":", 1)[1] for k in self._cursors if k.startswith("spot:")]
         for s in [*extra, *self.settings.symbols, *bots, *held, *cursors, *other_quotes]:
             s = s.upper()
-            if s not in out and s not in self._invalid and s.isalnum():
+            if s not in out and s not in self._invalid and s.isalnum() and split_symbol(s)[0] not in hidden:
                 out.append(s)
         return out[:MAX_SYMBOLS]
 
@@ -831,9 +847,13 @@ class BinanceImportService:
             qty = balances.pop(a)
             if a[2:] not in earn_assets:
                 earn_rows.append({"product": "flexible", "asset": a[2:], "qty": qty, "apr_pct": None})
+        # Hidden coins (Settings) are never priced or shown; coins with no USDT pair aren't priced either.
+        hidden = set(self.settings.hidden_assets)
+        balances = {a: q for a, q in balances.items() if a not in hidden}
+        earn_rows = [r for r in earn_rows if r["asset"] not in hidden]
         fills = list(self._fills.values())
-        coins = [a for a in balances if a not in STABLES]
-        earn_coins = [r["asset"] for r in earn_rows if r["asset"] not in STABLES]
+        coins = [a for a in balances if a not in STABLES and f"{a}USDT" not in self._invalid]
+        earn_coins = [r["asset"] for r in earn_rows if r["asset"] not in STABLES and f"{r['asset']}USDT" not in self._invalid]
         prices = await self._prices([f"{a}USDT" for a in coins + earn_coins] + [p["symbol"] for p in futures])
 
         manual_spot, bot_spot, cash = [], [], []
@@ -910,8 +930,10 @@ class BinanceImportService:
                          "value": round(r["qty"] * price, 2) if price else None})
         earn.sort(key=lambda r: -(r["value"] or 0))
         holdings = merge_holdings(manual_spot, earn, fills)
+        for h in holdings:  # no USDT pair on Binance: nothing to chart, price or alert on
+            h["tradable"] = h["symbol"] not in self._invalid
         bot_wallet = next((w for w in wallets if w["wallet"].lower().replace(" ", "") == "tradingbots"), None)
-        out = {"manual": {"spot": manual_spot, "futures": manual_fut, "cash": cash, "earn": earn,
+        out = {"hidden": sorted(hidden), "manual": {"spot": manual_spot, "futures": manual_fut, "cash": cash, "earn": earn,
                           "holdings": holdings},
                "bots": {"wallet": bot_wallet, "spot": bot_spot, "futures": bot_fut, "tracked": tracked_bots},
                "wallets": wallets, "notes": notes, "updated_at": int(time.time())}

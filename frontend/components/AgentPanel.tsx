@@ -790,7 +790,7 @@ export default function AgentPanel(p: Props) {
                     {m.scan && <ScanTable rows={m.scan} onPick={p.onPickSymbol} />}
                     {m.setups && (
                       <div className="mt-1.5">
-                        <SetupList rows={m.setups} onPick={(s) => (p.onOpenSetup ? p.onOpenSetup(s) : p.onPickSymbol(s.symbol))} />
+                        <SetupList rows={m.setups} spot={p.spotOnly} onPick={(s) => (p.onOpenSetup ? p.onOpenSetup(s) : p.onPickSymbol(s.symbol))} />
                       </div>
                     )}
                     {m.walk && <WalkCard walk={m.walk} />}
