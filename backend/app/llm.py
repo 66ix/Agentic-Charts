@@ -279,7 +279,7 @@ INTENT_SYSTEM = (
     "Keep what is on the chart (keep_existing true) whenever the request doesn't ask for a new analysis. "
     "A question about the plan, zone, price or indicator already in view ('what would invalidate this?', 'does the "
     "daily agree?', 'is RSI overbought here?', 'why?', 'is that a good entry?') draws nothing: features empty, "
-    "timeframe null, keep_existing true. "
+    "timeframe null, keep_existing true. FOCUS in the context says what 'this' or 'it' refers to. "
     "An alert on a lower-timeframe confirmation inside a zone ('alert me when 1m shows a CHoCH inside the 4h "
     "demand', 'ping me on a 5m confirmation in the H4 supply') is zone_trigger, not alert_targets: features empty, "
     "keep_existing true. "
@@ -883,6 +883,8 @@ class ChartContext:
     spot_only: bool = False
     # Binance's live USDT pairs; None when only the built-in fallback list is at hand (too short to rule a coin out).
     listed: frozenset[str] | None = None
+    # What "this" is in the conversation (focus.focus_line): the plan, price or zone the user is looking at.
+    focus: str = ""
 
 
 @dataclass
@@ -912,6 +914,8 @@ def _context_block(history: list[ChatTurn], overlays: list, previous: AnalysisIn
         parts.append("SPOT ONLY: the user buys and sells coins outright; no shorts, futures or leverage.")
     if chart and chart.watchlist:
         parts.append("WATCHLIST: " + ", ".join(chart.watchlist[:40]))
+    if chart and chart.focus:
+        parts.append(f"FOCUS (what 'this' / 'it' means): {chart.focus}")
     if history:
         parts.append("CONVERSATION SO FAR:\n" + "\n".join(f"{t.role}: {t.text[:400]}" for t in history[-6:]))
     if overlays:

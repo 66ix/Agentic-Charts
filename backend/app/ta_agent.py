@@ -1099,6 +1099,68 @@ def _break_sentence(br: dict) -> str:
     return f"{lead} {br['direction']} {ago} (a {kind} through {_fmt(br['level'])}), so {who} have the upper hand."
 
 
+def _focus_sentences(pf: dict, last: float) -> list[str]:
+    """The plan the user is asking about: where it is wrong, whether it filled, and whether the higher timeframes
+    agree."""
+    inv = pf.get("invalidation") or {}
+    sd = pf.get("stop_distance") or {}
+    away = f" ({abs(sd['pct']):g}% away)" if sd.get("pct") is not None else ""
+    side = "below" if pf["direction"] == "long" else "above"
+    s = f"The {pf['direction']} plan is wrong on a close {side} {_fmt(inv.get('stop', pf['stop']))}, the stop{away}"
+    if inv.get("structure_level") is not None:
+        s += f"; a close {side} {_fmt(inv['structure_level'])} ({inv.get('why', 'structure')}) is the first warning"
+    out = [s + "."]
+    if pf.get("stop_hit_since"):
+        out.append("Since it was given it filled and the stop has been hit, so the idea is done.")
+    elif pf.get("t1_hit_since"):
+        out.append("Since it was given it filled and reached T1.")
+    elif pf.get("filled_since"):
+        out.append("It has filled since it was given and is still open.")
+    else:
+        ed = pf.get("entry_distance") or {}
+        out.append(f"It hasn't filled yet: the entry {_fmt(pf['entry'])} is "
+                   + (f"{abs(ed['pct']):g}% away." if ed.get("pct") is not None else "still waiting."))
+    verdict, trends = pf.get("htf_verdict"), pf.get("higher_timeframes") or {}
+    if verdict in ("agrees", "disagrees", "mixed") and trends:
+        listing = ", ".join(f"{tf} {t}" for tf, t in trends.items())
+        out.append({"agrees": "The higher timeframes agree", "disagrees": "The higher timeframes disagree",
+                    "mixed": "The higher timeframes are mixed"}[verdict] + f" ({listing}).")
+    return out
+
+
+def _indicator_sentences(ind: dict, prompt: str) -> list[str]:
+    """The indicator the question names, read out whatever its value (not only at extremes)."""
+    out: list[str] = []
+    p = prompt.lower()
+    if "rsi" in p and "stoch" not in p and ind.get("rsi") is not None:
+        r = ind["rsi"]
+        out.append(f"RSI is {r}" + (", overbought." if r >= 70 else ", oversold." if r <= 30 else ", in the middle."))
+    if "stoch" in p and (st := ind.get("stoch_rsi")):
+        out.append(f"Stoch RSI is {st['k']} ({st['zone']}).")
+    if "macd" in p and (m := ind.get("macd")):
+        side = "above" if (m.get("hist") or 0) > 0 else "below"
+        out.append(f"The MACD histogram is {_fmt(m['hist'])}, {side} zero and "
+                   f"{'rising' if m.get('hist_rising') else 'falling'}.")
+    if "ema" in p and ind.get("ema_fast") is not None:
+        out.append(f"Price is {ind.get('price_vs_ema', 'around')} the EMAs ({_fmt(ind['ema_fast'])} / "
+                   f"{_fmt(ind['ema_slow'])}).")
+    if "bollinger" in p and (bb := ind.get("bollinger")):
+        out.append(f"Bollinger bands {_fmt(bb['lower'])}–{_fmt(bb['upper'])}, %B {bb.get('pct_b')}.")
+    if "vwap" in p and isinstance(ind.get("vwap"), dict) and ind["vwap"].get("value") is not None:
+        out.append(f"VWAP is {_fmt(ind['vwap']['value'])}, price {ind['vwap'].get('price', 'near it')}.")
+    return out
+
+
+def _htf_sentences(htf: dict, trend: str | None) -> list[str]:
+    if not htf:
+        return []
+    rows = ", ".join(f"{tf} {r.get('trend')}" + (f" (RSI {r['rsi']})" if r.get("rsi") is not None else "")
+                     for tf, r in htf.items())
+    here = {"up": "up", "down": "down"}.get(trend or "", "mixed")
+    agree = all(r.get("trend") == here for r in htf.values())
+    return [f"Higher timeframes: {rows}" + ("; they agree with this one." if agree else ".")]
+
+
 def _momentum_sentence(mom: dict) -> str | None:
     r = mom.get("rsi")
     if mom.get("divergence"):
@@ -1195,6 +1257,8 @@ def _price_sentences(q: dict, last: float) -> list[str]:
 
 
 _TOPIC_WORDS = (
+    ("indicators", r"\b(rsi|macd|ema|bollinger|stoch|vwap|sar|cvd)\b"),
+    ("htf", r"\b(agree|daily|weekly|htf|higher time ?frames?)\b"),
     ("supply_demand", r"\b(supply|demand)\b"),
     ("windows", r"\b(window|high of|low of|range high|range low|resistance high|support low)\b"),
     ("support_resistance", r"\b(support|resistance|levels?)\b"),
@@ -1218,12 +1282,19 @@ def describe(facts: dict, symbol: str, detail: str = "normal", prompt: str = "")
     body: list[tuple[str, str]] = []  # (topic, sentence), in order of importance
     tail: list[str] = list(facts.get("navigation", []))  # always said
 
+    if facts.get("plan_in_focus"):
+        lead += _focus_sentences(facts["plan_in_focus"], last)
     if facts.get("price_in_question"):
         lead += _price_sentences(facts["price_in_question"], last)
 
     for kind in ("resistance", "support"):
         if facts.get(kind):
             body.append(("support_resistance", _zone_sentence(kind, facts[kind][0], tf)))
+    if "resistance" in facts and not facts["resistance"]:
+        body.append(("support_resistance", f"No resistance above on the {tf}: open space."))
+    body += [("indicators", x) for x in _indicator_sentences(facts.get("indicators") or {}, prompt)]
+    if "htf" in asked and not facts.get("plan_in_focus"):  # "does the daily agree?" (a plan in focus says it)
+        body += [("htf", x) for x in _htf_sentences(facts.get("higher_timeframes") or {}, facts.get("trend"))]
     for kind, side in (("supply", "above"), ("demand", "below")):
         if kind in facts and not facts[kind]:
             body.append(("supply_demand", f"There's no unmitigated {tf} {kind} zone {side} price right now."))

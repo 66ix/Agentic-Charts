@@ -80,3 +80,9 @@
 {"prompt": "is that a good entry?", "previous": {"features": [], "trade_plan": "long"}, "expect": {"features": [], "keep_existing": true, "timeframe": null, "trade_plan": null, "symbol": null}}
 {"prompt": "buy SOL with 500usdt", "expect": {"symbol": "SOLUSDT"}}
 {"prompt": "plan a 200USDT buy of ETH", "expect": {"symbol": "ETHUSDT"}}
+{"prompt": "Alert me if INJ breaks below 7.53", "expect": {"alert_prices": [7.53], "trade_plan": null}}
+{"prompt": "Give me a long plan on INJ", "expect": {"trade_plan": "long"}}
+{"prompt": "Where should I take profit on INJ?", "expect": {"take_profit": true, "trade_plan": null}}
+{"prompt": "Does the D1 agree?", "previous": {"features": [], "trade_plan": "long"}, "expect": {"features": [], "keep_existing": true, "timeframe": null}}
+{"prompt": "Show swings and RSI divergence on INJ", "expect": {"features": ["swings"]}}
+{"prompt": "Any news on INJ?", "expect": {"trade_plan": null}}

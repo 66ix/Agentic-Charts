@@ -540,7 +540,34 @@ export interface AnalyzeResponse {
   sell_watch?: SellWatch | null;
   /** The numbers the answer was written from (indicators, zones, market overview...), as the model saw them. */
   facts?: Record<string, unknown>;
+  /** Next steps built from what this answer found (backend/app/suggest.py). */
+  suggestions?: Suggestion[];
+  /** A question about what is on screen: nothing redrawn, and the previous intent still describes the chart. */
+  question_only?: boolean;
   generated_at: string;
+}
+
+/** A next step offered under an answer. Mirrors Suggestion in backend/app/schemas.py. */
+export interface Suggestion {
+  label: string;
+  prompt: string;
+  reason: string;
+}
+
+/** What "this" is in the conversation: the plan, price, zone or scan the agent last gave on this chart.
+ *  Mirrors Focus in backend/app/schemas.py. */
+export interface Focus {
+  kind: "plan" | "price" | "zone" | "scan";
+  symbol: string;
+  interval?: Interval;
+  /** UNIX seconds. */
+  at: number;
+  plan?: TradePlan | null;
+  price?: number | null;
+  zone_low?: number | null;
+  zone_high?: number | null;
+  label: string;
+  symbols?: string[];
 }
 
 export interface Metric {

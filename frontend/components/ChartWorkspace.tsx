@@ -20,6 +20,7 @@ import { composeSnapshot, shareSnapshot } from "@/lib/snapshot";
 import { DEFAULT_INTERVAL, DEFAULT_SYMBOL } from "@/lib/config";
 import { isCustom } from "@/lib/customSymbols";
 import { fetchLiquidationLevels, liquidationOverlays } from "@/lib/marketdata";
+import { focusFrom } from "@/lib/focus";
 import { CHAT_ID_KEY, CHATS_KEY, lastAnswerOn, toSession, upsertSession, worthKeeping, type ChatSession } from "@/lib/chatHistory";
 import { createJournalEntry, planToJournalEntry } from "@/lib/journal";
 import { DEFAULT_SIZING, sizePlan, type SizingSettings } from "@/lib/sizing";
@@ -540,8 +541,13 @@ export default function ChartWorkspace() {
     const id = window.setTimeout(() => void saveBriefNotes(coinNotes).catch(() => undefined), 1500);
     return () => window.clearTimeout(id);
   }, [coinNotes]);
-const convoRef = useRef({ messages, overlays, lastIntent, watchlist, spotOnly, indicatorSettings, answerDetail, coinNotes, chats, chatId });
-  convoRef.current = { messages, overlays, lastIntent, watchlist, spotOnly, indicatorSettings, answerDetail, coinNotes, chats, chatId };
+// What "this" means in the next question: the newest plan, price or scan on this chart, unless dismissed.
+  const [focusCleared, setFocusCleared] = useState<string | null>(null);
+  const focusRaw = useMemo(() => focusFrom(messages, symbol, interval), [messages, symbol, interval]);
+  const focus = focusRaw && focusCleared !== `${focusRaw.kind}:${focusRaw.at}` ? focusRaw : null;
+  const clearFocus = useCallback(() => focusRaw && setFocusCleared(`${focusRaw.kind}:${focusRaw.at}`), [focusRaw]);
+  const convoRef = useRef({ messages, overlays, lastIntent, watchlist, spotOnly, indicatorSettings, answerDetail, coinNotes, chats, chatId, focus });
+  convoRef.current = { messages, overlays, lastIntent, watchlist, spotOnly, indicatorSettings, answerDetail, coinNotes, chats, chatId, focus };
 
   // Cancel in-flight analysis when the market changes (unless a top-down walk is the one changing it).
   useEffect(() => {
@@ -612,6 +618,7 @@ const convoRef = useRef({ messages, overlays, lastIntent, watchlist, spotOnly, i
           detail: convo.answerDetail,
           coin_note: convo.coinNotes[symbol] || undefined,
           previous_answer: opts.silent ? null : lastAnswerOn(convo.chats, symbol, convo.chatId),
+          focus: opts.silent ? null : convo.focus,
           // The agent reads every indicator with the lengths the chart uses.
           indicator_settings: {
             ema_fast: convo.indicatorSettings.ema1.length,
@@ -647,6 +654,7 @@ const convoRef = useRef({ messages, overlays, lastIntent, watchlist, spotOnly, i
             sells: res.sells?.length ? res.sells : undefined,
             sellWatch: res.sell_watch?.symbols.length ? res.sell_watch : undefined,
             steps: res.steps?.length ? res.steps : undefined,
+            suggestions: res.suggestions?.length ? res.suggestions : undefined,
             symbol: target.symbol,
             interval: target.interval,
             prompt: prompt || undefined,
@@ -672,7 +680,7 @@ const convoRef = useRef({ messages, overlays, lastIntent, watchlist, spotOnly, i
           if (Object.keys(r.indicators ?? {}).length) setIndicators((ind) => ({ ...ind, ...r.indicators }));
           // A question about the plan on screen ("what invalidates this?") keeps that plan's intent for the next
           // follow-up rather than replacing it with an empty one.
-          if (prompt && !(r.intent?.keep_existing && !r.intent.features?.length)) setLastIntent(r.intent);
+          if (prompt && !r.question_only && !(r.intent?.keep_existing && !r.intent.features?.length)) setLastIntent(r.intent);
           addAlerts(r.alerts ?? [], r.symbol);
           for (const t of r.trigger_alerts ?? []) void addTrigger(t);
         };
@@ -1111,6 +1119,8 @@ const convoRef = useRef({ messages, overlays, lastIntent, watchlist, spotOnly, i
           onOpenGridCoin={openGridCoin}
           spotOnly={spotOnly}
           onSpotOnly={setSpotOnly}
+          focus={focus}
+          onClearFocus={clearFocus}
           walkNote={walkNote}
           onTogglePin={togglePin}
           onLogTrade={logTrade}

@@ -563,6 +563,35 @@ class PastAnswer(BaseModel):
     price: Optional[float] = Field(None, description="Price when it answered")
 
 
+class Focus(BaseModel):
+    """What the user is looking at in the conversation, so "what would invalidate this?" knows what "this" is: the
+    newest plan, price or zone the agent gave on this chart (frontend/lib/focus.ts)."""
+
+    kind: Literal["plan", "price", "zone", "scan"]
+    symbol: str = Field(..., max_length=40)
+    interval: Optional[str] = None
+    at: int = Field(..., description="UNIX seconds the answer it comes from was given")
+    plan: Optional[TradePlan] = None
+    price: Optional[float] = Field(None, gt=0)
+    zone_low: Optional[float] = None
+    zone_high: Optional[float] = None
+    label: str = Field("", max_length=200)
+    symbols: list[str] = Field(default_factory=list, max_length=10)
+
+    @field_validator("symbol")
+    @classmethod
+    def _sym(cls, v: str) -> str:
+        return norm_symbol(v)
+
+
+class Suggestion(BaseModel):
+    """A next step to offer under an answer, built from what the answer found (suggest.py)."""
+
+    label: str
+    prompt: str
+    reason: str = ""
+
+
 class AnalyzeRequest(BaseModel):
     symbol: str = Field("INJUSDT", min_length=2, max_length=40)
     interval: Interval = "4h"
@@ -580,6 +609,7 @@ class AnalyzeRequest(BaseModel):
     detail: Literal["short", "normal", "detailed"] = Field("normal", description="How long the answer should be")
     coin_note: Optional[str] = Field(None, max_length=1000, description="The user's own note on this coin")
     previous_answer: Optional[PastAnswer] = None
+    focus: Optional[Focus] = Field(None, description="The plan, price or zone the conversation is about")
 
     @field_validator("symbol")
     @classmethod
@@ -651,6 +681,9 @@ class AnalyzeResponse(BaseModel):
                                                               "client can offer to watch them with signal alerts")
     facts: dict = Field(default_factory=dict, description="The numbers the answer was written from, rounded as the "
                                                           "model saw them, for the 'numbers used' view")
+    suggestions: list[Suggestion] = Field(default_factory=list, description="Next steps built from this answer")
+    question_only: bool = Field(False, description="A question about what is on screen: nothing was redrawn, and "
+                                                   "the previous intent still describes the chart")
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

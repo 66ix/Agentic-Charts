@@ -20,6 +20,8 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+import pandas as pd
+
 from . import general
 from .agent_loop import Toolbox, plan_with_tools
 from .config import get_settings
@@ -48,6 +50,7 @@ from .schemas import (
     AnalysisIntent,
     AnalyzeRequest,
     AnalyzeResponse,
+    Focus,
     IndicatorLengths,
     BoxOverlay,
     HorizontalLineOverlay,
@@ -58,8 +61,11 @@ from .schemas import (
     ZoneTriggerSpec,
     is_custom_symbol,
 )
-from .ta_agent import (GREEN, ORANGE, TEAL, _fmt, analyze, describe, higher_timeframes, htf_readings, htf_zones,
-                       price_check, rgba)
+from .ta_agent import (GREEN, ORANGE, TEAL, ZONE_BARS, _fmt, analyze, atr, describe, find_swings, higher_timeframes,
+                       htf_readings, htf_zones, price_check, rgba)
+from .focus import focus_line, plan_in_focus
+from .suggest import next_steps
+from .focus import usable as focus_usable
 from .top_down import TopDownResult, describe_walk, walk, walk_facts
 from .trade_plan import build_plan, plan_overlays
 from .level_review import LevelLog
@@ -640,6 +646,28 @@ async def _grid_plan(gridbots: GridBotService | None, symbol: str):
         return None
 
 
+async def _plan_in_focus(market: MarketData, f: Focus, symbol: str, tf: str, df: pd.DataFrame, result,
+                         htf: dict | None, custom_chart: bool) -> dict | None:
+    """plan_in_focus on the plan's own timeframe: this chart's candles when it is the same, else that timeframe's."""
+    assert f.plan is not None
+    if not f.interval or f.interval == tf:
+        return plan_in_focus(f.plan, f.at, df, result.stats.last_price, result.stats.atr, result.swing_lows,
+                             result.swing_highs, htf)
+    if custom_chart:
+        return None
+    try:
+        candles, _ = await market.get_klines(symbol, f.interval, ZONE_BARS)
+    except Exception:
+        return None
+    fdf = candles_to_df(candles)
+    if len(fdf) < 30:
+        return None
+    a = float(atr(fdf).iloc[-1])
+    highs, lows = find_swings(fdf, a)
+    return plan_in_focus(f.plan, f.at, fdf, float(fdf["close"].iloc[-1]), a, [s.price for s in lows],
+                         [s.price for s in highs], htf)
+
+
 async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
                        derivatives: DerivativesService | None = None, kimi: KimiService | None = None,
                        futures: FuturesDataService | None = None,
@@ -659,7 +687,8 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
     plan and the rest go to `on_result` before the summary is written, and the summary to `on_delta` as it is."""
     settings = get_settings()
     scanner = scanner or MarketScanner(market)
-    chart = ChartContext(req.symbol, req.interval, req.watchlist, req.spot_only, await _listed(market))
+    chart = ChartContext(req.symbol, req.interval, req.watchlist, req.spot_only, await _listed(market),
+                         focus_line(req.focus) if focus_usable(req.focus, req.symbol) else "")
     steps: list[str] = []
     research: list[dict] = []
     loop = None
@@ -855,6 +884,17 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
             facts["your_holdings"] = portfolio_facts(positions)
     if (asked := asked_price(req.prompt, intent, result.stats.last_price)) is not None:
         facts["price_in_question"] = await asyncio.to_thread(price_check, df, asked, tf, htf_frames)
+    if req.focus and not intent.trade_plan and focus_usable(req.focus, symbol):
+        # "What would invalidate this?" under a plan: "this" is the plan in focus (focus.py).
+        f = req.focus
+        if f.kind == "plan" and f.plan is not None:
+            pf = await _plan_in_focus(market, f, symbol, tf, df, result, facts.get("higher_timeframes"), custom_chart)
+            if pf is not None:
+                facts["plan_in_focus"] = pf
+        elif f.kind in ("price", "zone") and "price_in_question" not in facts:
+            price = f.price or ((f.zone_low + f.zone_high) / 2 if f.zone_low and f.zone_high else None)
+            if price:
+                facts["price_in_question"] = await asyncio.to_thread(price_check, df, price, tf, htf_frames)
     if desk is not None and not custom_chart and (dk := desk.facts_for(symbol)):
         facts["agent_desk"] = dk  # the calls the desk made on its own on this coin (agent_desk.py)
     if desk is not None and WORKING_WORDS.search(req.prompt):
@@ -975,7 +1015,11 @@ async def run_analysis(req: AnalyzeRequest, market: MarketData, llm: LLMClient,
         sells=sells or [],
         sell_watch=SellWatch(symbols=sell_symbols[:40], interval=sell_tf) if sells is not None else None,
         facts=round_facts({k: v for k, v in narrate_facts.items() if k not in USED_SKIP}),
+        question_only=bool(req.prompt.strip()) and intent.keep_existing and not intent.features
+        and not intent.has_actions and not intent.take_profit,
     )
+    if not custom_chart:
+        res.suggestions = next_steps(narrate_facts, intent, symbol, tf, req.spot_only)
     if on_result is not None:
         await on_result(res)
     sources: list[dict[str, str]] = []

@@ -8,6 +8,7 @@ import type {
   AnalyzeResponse,
   Candle,
   ChatTurn,
+  Focus,
   Interval,
   KimiResult,
   LadderResult,
@@ -107,6 +108,8 @@ export function analyze(
     coin_note?: string;
     /** The agent's last answer on this coin in an earlier conversation. */
     previous_answer?: { time: number; prompt: string; summary: string; interval?: Interval; price?: number } | null;
+    /** What "this" means: the plan, price or zone the conversation is about (lib/focus.ts). */
+    focus?: Focus | null;
   },
   signal?: AbortSignal,
 ) {

@@ -24,6 +24,7 @@ import {
   Trash2,
   User,
   ImagePlus,
+  X,
 } from "lucide-react";
 import { Fragment, useEffect, useImperativeHandle, useRef, useState, type ReactNode, type Ref } from "react";
 
@@ -49,6 +50,8 @@ import {
   type SellWatch,
   type TopDownResult,
   type TradePlan,
+  type Focus,
+  type Suggestion,
   type TriggerInterval,
 } from "@/lib/types";
 
@@ -90,6 +93,8 @@ export interface AgentMessage {
   lastPrice?: number;
   /** When it was answered (ms); older messages lack it. */
   at?: number;
+  /** Next steps built from what the answer found (backend suggest.py); the fixed follow-ups are the fallback. */
+  suggestions?: Suggestion[];
 }
 
 export interface AgentPanelHandle {
@@ -643,6 +648,9 @@ interface Props {
   /** How long answers are. */
   detail?: AnswerDetail;
   onDetail?(d: AnswerDetail): void;
+  /** What "this" means in the next question (lib/focus.ts), shown as a removable chip. */
+  focus?: Focus | null;
+  onClearFocus?(): void;
 }
 
 /** The chart agent as a dock tab: the conversation fills the height, the prompt sits at the bottom. */
@@ -885,19 +893,37 @@ export default function AgentPanel(p: Props) {
           </div>
           {!p.busy && (
             <div className="flex shrink-0 flex-wrap gap-1.5 px-3 pt-2">
-              {(p.messages.length === 0 ? SUGGESTIONS : followUps(lastAgent, p.spotOnly)).map((s) => (
+              {(p.messages.length === 0
+                ? SUGGESTIONS.map((x) => ({ label: x, prompt: x, reason: "" }))
+                : lastAgent?.suggestions?.length
+                  ? lastAgent.suggestions
+                  : followUps(lastAgent, p.spotOnly).map((x) => ({ label: x, prompt: x, reason: "" }))
+              ).map((s) => (
                 <button
-                  key={s}
+                  key={s.label}
                   type="button"
-                  onClick={() => submit(s)}
+                  title={s.reason || undefined}
+                  onClick={() => submit(s.prompt)}
                   className="rounded-full border border-line px-2.5 py-1 text-[11px] text-mute transition-colors hover:border-accent/50 hover:text-ink"
                 >
-                  {s}
+                  {s.label}
                 </button>
               ))}
             </div>
           )}
 
+          {p.focus && !p.busy && (
+            <div className="flex shrink-0 items-center gap-1 px-3 pt-2 text-[11px] text-mute">
+              <span className="truncate rounded-full border border-accent/30 bg-accent/5 px-2 py-0.5" title="Questions like 'what would invalidate this?' are about this">
+                About: <span className="text-ink">{p.focus.label}</span>
+              </span>
+              {p.onClearFocus && (
+                <button type="button" className="btn-ghost h-5 w-5 p-0" aria-label="Ask without this context" title="Ask without this context" onClick={p.onClearFocus}>
+                  <X className="h-3 w-3" />
+                </button>
+              )}
+            </div>
+          )}
           <form
             className="flex shrink-0 items-end gap-2 p-3"
             onSubmit={(e) => {
