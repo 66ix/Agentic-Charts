@@ -86,7 +86,7 @@ from .schemas import (INTERVALS, AnalyzeRequest, AnalyzeResponse, CreateAlertsRe
                       ScanResult, ZoneTriggerSpec)
 from .level_review import LevelLog
 from .metric_alerts import CreateMetricAlertsRequest, MetricAlertService
-from .signal_alerts import SIGNALS, CreateSignalAlertsRequest, SignalAlertPatch, SignalAlertService
+from .signal_alerts import SIGNALS, CreateSignalAlertsRequest, LevelClose, SignalAlertPatch, SignalAlertService
 from .stream_hub import StreamHub
 from .trade_manager import NewManagedTrade, TradeManager, TradePatch, from_journal
 from .track_record import TrackRecordService
@@ -499,6 +499,26 @@ async def preview_zone_trigger(spec: ZoneTriggerSpec, request: Request,
         raise HTTPException(502, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+class LevelAlertRequest(LevelClose):
+    symbol: str
+    interval: str = "4h"
+    repeat: bool = False
+    note: str = ""
+
+
+@app.post("/api/level-alerts")
+async def create_level_alert(req: LevelAlertRequest, request: Request) -> dict:
+    """A close-confirmed level alert: fires when `closes` candles close above, below or inside the level."""
+    level = LevelClose(**req.model_dump(include=set(LevelClose.model_fields)))
+    try:
+        alert = await request.app.state.signal_alerts.add_level(_norm_symbol(req.symbol),
+                                                                _check_interval(req.interval), level,
+                                                                req.repeat, req.note)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"alert": alert.model_dump()}
 
 
 @app.patch("/api/signal-alerts/{alert_id}")

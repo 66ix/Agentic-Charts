@@ -60,7 +60,7 @@ log = logging.getLogger(__name__)
 
 SignalId = Literal["kimi_buy", "kimi_sell", "kimi_any", "rsi_bull_div", "rsi_bear_div", "sweep_low", "sweep_high",
                    "new_demand", "new_supply", "bos_bull", "bos_bear", "rsi_overbought", "rsi_oversold",
-                   "lost_support", "at_resistance", "zone_trigger"]
+                   "lost_support", "at_resistance", "zone_trigger", "level_close"]
 SIGNAL_IDS: tuple[str, ...] = get_args(SignalId)
 
 
@@ -96,6 +96,8 @@ SIGNALS: dict[str, SignalInfo] = {
                                 "the zone"),
     "zone_trigger": SignalInfo("Zone trigger", "A lower timeframe (1m/5m/15m) confirms inside a higher-timeframe zone: "
                                                "a CHoCH / BOS, a liquidity sweep or an engulfing close"),
+    "level_close": SignalInfo("Close beyond a level", "A candle closes above or below a price (or inside a zone), "
+                                                      "N closes in a row: no wick fires it"),
 }
 KIMI_SIGNALS = frozenset({"kimi_buy", "kimi_sell", "kimi_any"})
 SELL_SIGNALS = frozenset({"lost_support", "at_resistance"})  # sell_check.py's checks, for spot holders
@@ -120,6 +122,36 @@ ZONE_RETRY = 30.0     # seconds before looking up a detected zone again when the
 # ----------------------------------------------------------------- models --
 
 
+class LevelClose(BaseModel):
+    """A level_close alert's level: a line (low == high) or a zone, which side the close must be on, and how many
+    closes in a row."""
+
+    price_low: float = Field(..., gt=0)
+    price_high: float = Field(..., gt=0)
+    side: Literal["above", "below", "inside"]
+    closes: int = Field(1, ge=1, le=3)
+    label: str = Field("", max_length=120)
+
+
+def level_close_hit(level: LevelClose, closes: list[float], t: int) -> Optional[SignalHit]:
+    """Did the last `level.closes` closes land on the level's side, with the close before them not? (pure)"""
+    n = level.closes
+    if len(closes) < n + 1:
+        return None
+
+    def beyond(c: float) -> bool:
+        return (c > level.price_high if level.side == "above" else c < level.price_low if level.side == "below"
+                else level.price_low <= c <= level.price_high)
+
+    if not all(beyond(c) for c in closes[-n:]) or beyond(closes[-n - 1]):
+        return None
+    where = (f"{fmt_price(level.price_low)}–{fmt_price(level.price_high)}" if level.price_high > level.price_low
+             else fmt_price(level.price_low))
+    text = (f"closed {level.side} {where}" + (f" ({level.label})" if level.label else "")
+            + f": close {fmt_price(closes[-1])}" + (f", {n} closes in a row" if n > 1 else ""))
+    return SignalHit(t, closes[-1], text, f"level:{t}")
+
+
 class SignalAlert(BaseModel):
     """A stored signal alert. Mirrors SignalAlert in frontend/lib/alerts.ts."""
 
@@ -139,6 +171,7 @@ class SignalAlert(BaseModel):
     last_key: Optional[str] = Field(None, description="The event it last fired on, so it never fires twice")
     trigger: Optional[ZoneTrigger] = Field(None, description="Signal zone_trigger: the zone and the confirmation")
     last_stop: Optional[float] = Field(None, description="Zone triggers: the suggested stop of the last fire")
+    level: Optional[LevelClose] = Field(None, description="Signal level_close: the level and the close rule")
     owner: Optional[str] = Field(None, description="Set when the app manages it (\"holdings\": the holdings "
                                                    "watch adds and removes it as coins are bought and sold)")
 
@@ -218,8 +251,8 @@ def detect(signal: str, frame: Frame, prev: Optional[Frame] = None,
     chart (needed for the kimi_* signals)."""
     if signal in KIMI_SIGNALS:
         return _kimi_hit(signal, frame.time, kimi or [])
-    if signal == "zone_trigger":
-        return None  # each trigger alert has its own zone: SignalAlertService._trigger_hit
+    if signal in ("zone_trigger", "level_close"):
+        return None  # each of these alerts has its own zone or level: SignalAlertService
     if frame.n < MIN_BARS:
         return None
     t, close, n = frame.time, frame.close, frame.n
@@ -532,6 +565,27 @@ class SignalAlertService:
         await self._sync()
         return a
 
+    async def add_level(self, symbol: str, interval: str, level: LevelClose, repeat: bool = False, note: str = "",
+                        owner: Optional[str] = None) -> SignalAlert:
+        """A close-confirmed alert: fires when `level.closes` candles of `interval` close on its side. The same coin,
+        timeframe and level again replaces the old one."""
+        if not (symbol.isalnum() and 5 <= len(symbol) <= 20):
+            raise ValueError(f"Invalid symbol {symbol!r}")
+        if level.price_high < level.price_low:
+            raise ValueError("price_high must be at least price_low")
+        same = next((a for a in self._alerts.values() if a.level is not None and a.symbol == symbol
+                     and a.interval == interval and a.level == level), None)
+        if same is None and len(self._alerts) >= MAX_SIGNAL_ALERTS:
+            raise ValueError(f"At most {MAX_SIGNAL_ALERTS} signal alerts; delete some first")
+        a = (same.model_copy(update={"armed": True, "repeat": repeat, "note": note[:500]}) if same else
+             SignalAlert(id=uuid.uuid4().hex[:10], symbol=symbol, interval=interval, signal="level_close",
+                         repeat=repeat, note=note[:500], created_at=int(time.time() * 1000), level=level,
+                         owner=owner))
+        self._alerts[a.id] = a
+        self._changed()
+        await self._sync()
+        return a
+
     async def _side_of(self, symbol: str, interval: str, zone: TriggerZone) -> str:
         candles, _ = await self.market.get_klines(symbol, interval, 2)
         if not candles:
@@ -740,7 +794,10 @@ class SignalAlertService:
             if a.signal in KIMI_SIGNALS and kimi is None:
                 continue
             hit: Optional[SignalHit | TriggerHit]
-            if a.trigger is not None:
+            if a.level is not None:
+                hit = level_close_hit(a.level, [float(x) for x in frame.df["close"].tail(a.level.closes + 1)],
+                                      frame.time)
+            elif a.trigger is not None:
                 hit, zone_moved = await self._trigger_hit(a, frame)
                 moved = moved or zone_moved
             else:
